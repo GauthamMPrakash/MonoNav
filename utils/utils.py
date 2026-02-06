@@ -24,9 +24,12 @@ import open3d.core as o3c
 import copy
 import yaml, json
 
-# For Craziflie logging
-from cflib.crazyflie.log import LogConfig
-from cflib.crazyflie.syncLogger import SyncLogger
+# # For Craziflie logging
+# from cflib.crazyflie.log import LogConfig
+# from cflib.crazyflie.syncLogger import SyncLogger
+
+# import the mavlink helper script
+import mavlink_control as mav
 
 # For bufferless video capture
 import queue, threading
@@ -98,33 +101,150 @@ class VideoCapture:
   def read(self):
     return self.q.get()
 
+# Author: MiniMax
 """
-Get the global Crazyflie (camera) pose from the logger, convert to the Open3D frame
-Crazyflie frame: (X, Y, Z) is FRONT LEFT UP (FLU)
+Conversion functions for coordinate frames.
+
+Aeronautical frame convention (e.g., NED with Z-down):
+- X: Forward (front)
+- Y: Right
+- Z: Down
+- Intrinsic ZYX rotation sequence (yaw-Z, pitch-Y, roll-X)
+
+TSDF/Open3D frame convention:
+- X: Right
+- Y: Down
+- Z: Forward (front)
+- Extrinsic XYZ rotation sequence (equivalent to intrinsic ZYX)
+"""
+
+def aeronautical_to_tsdf(roll, pitch, yaw, x, y, z, degrees=True):
+    """
+    Convert pose from aeronautical frame (X-front, Y-right, Z-down, ZYX intrinsic)
+    to TSDF frame (X-right, Y-down, Z-front).
+    
+    Args:
+        roll: Roll angle (rotation around X/front axis)
+        pitch: Pitch angle (rotation around Y/right axis)
+        yaw: Yaw angle (rotation around Z/down axis)
+        x: X position in aeronautical frame (forward)
+        y: Y position in aeronautical frame (right)
+        z: Z position in aeronautical frame (down)
+        degrees: If True, angles are in degrees (default: True)
+    
+    Returns:
+        4x4 homogeneous transformation matrix in TSDF frame
+    """
+    # Convert angles to rotation matrix using scipy
+    # 'ZYX' with extrinsic=True gives the same rotation as intrinsic ZYX
+    r = Rotation.from_euler('ZYX', [yaw, pitch, roll], degrees=degrees)
+    R_aero = r.as_matrix()
+    
+    # Transformation matrix between coordinate frames
+    # Maps: X_front -> Z_front, Y_right -> X_right, Z_down -> Y_down
+    M_change = np.array([[0, 0, 1],
+                         [1, 0, 0],
+                         [0, 1, 0]])
+    
+    # Convert rotation matrix
+    R_tsdf = M_change @ R_aero @ M_change.T
+    
+    # Convert position
+    xyz_aero = np.array([x, y, z])
+    xyz_tsdf = M_change @ xyz_aero
+    
+    # Create homogeneous transformation matrix
+    H = np.eye(4)
+    H[0:3, 0:3] = R_tsdf
+    H[0:3, 3] = xyz_tsdf
+    
+    return H
+
+
+def aeronautical_pose_to_tsdf(pose_aero):
+    """
+    Convert a full 4x4 pose matrix from aeronautical frame to TSDF frame.
+    
+    Args:
+        pose_aero: 4x4 homogeneous transformation matrix in aeronautical frame
+    
+    Returns:
+        4x4 homogeneous transformation matrix in TSDF frame
+    """
+    # Extract rotation matrix and translation vector
+    R_aero = pose_aero[0:3, 0:3]
+    t_aero = pose_aero[0:3, 3]
+    
+    # Transformation matrix between coordinate frames
+    M_change = np.array([[0, 0, 1],
+                         [1, 0, 0],
+                         [0, 1, 0]])
+    
+    # Convert rotation matrix
+    R_tsdf = M_change @ R_aero @ M_change.T
+    
+    # Convert translation
+    t_tsdf = M_change @ t_aero
+    
+    # Create homogeneous transformation matrix
+    H_tsdf = np.eye(4)
+    H_tsdf[0:3, 0:3] = R_tsdf
+    H_tsdf[0:3, 3] = t_tsdf
+    
+    return H_tsdf
+
+
+# """
+# Get the global pose from the vehicle, convert to the Open3D frame
+# Crazyflie frame: (X, Y, Z) is FRONT LEFT UP (FLU)
+# Open3D frame: (X, Y, Z) is RIGHT DOWN FRONT (RDF)
+# """
+# def get_crazyflie_pose(scf, logstate):
+#     with SyncLogger(scf, logstate) as logger:
+#         for log_entry in logger:
+#             data = log_entry[1]
+#             _x = data['stateEstimate.x']
+#             _y = data['stateEstimate.y']
+#             _z = data['stateEstimate.z']
+#             _roll = data['stateEstimate.roll']
+#             _pitch = data['stateEstimate.pitch']
+#             _yaw = data['stateEstimate.yaw']
+#             # Convert position from CF to TSDF frame
+#             xyz = np.array([-_y, -_z, _x]) # Convert to TSDF frame
+#             # Convert rotation from CF to TSDF frame
+#             r = Rotation.from_euler('xyz', [_roll, -_pitch, _yaw], degrees=True)
+#             R = r.as_matrix()
+#             M_change = np.array([[0,-1,0],[0,0,-1],[1,0,0]])
+#             R = M_change @ R @ M_change.T
+
+#             # Create a homogeneous matrix
+#             Hmtrx = np.hstack((R, xyz.reshape(3,1)))
+#             # return camera position
+#             return np.vstack((Hmtrx, np.array([0, 0, 0, 1])))
+
+"""
+Get the global pose from the vehicle, convert to the Open3D frame
+ArduPilot frame: (X, Y, Z) is NORTH EAST DOWN (NED)
 Open3D frame: (X, Y, Z) is RIGHT DOWN FRONT (RDF)
 """
-def get_crazyflie_pose(scf, logstate):
-    with SyncLogger(scf, logstate) as logger:
-        for log_entry in logger:
-            data = log_entry[1]
-            _x = data['stateEstimate.x']
-            _y = data['stateEstimate.y']
-            _z = data['stateEstimate.z']
-            _roll = data['stateEstimate.roll']
-            _pitch = data['stateEstimate.pitch']
-            _yaw = data['stateEstimate.yaw']
-            # Convert position from CF to TSDF frame
-            xyz = np.array([-_y, -_z, _x]) # Convert to TSDF frame
-            # Convert rotation from CF to TSDF frame
-            r = Rotation.from_euler('xyz', [_roll, -_pitch, _yaw], degrees=True)
-            R = r.as_matrix()
-            M_change = np.array([[0,-1,0],[0,0,-1],[1,0,0]])
-            R = M_change @ R @ M_change.T
+def get_drone_pose():
+    time_boot, _x, _y, _z, _yaw, _pitch, _roll = mav.get_pose()
+    # Convert position from AP to TSDF frame
+    xyz = np.array([_y, _z, _x]) # Convert to TSDF frame
+    # Convert rotation from AP to TSDF frame
+    r = Rotation.from_euler('xyz', [_roll, _pitch, _yaw], degrees=True)
+    R = r.as_matrix()
+    # NED (North, East, Down) -> RDF (Right, Down, Front)
+    # Right=East, Down=Down, Front=North
+    M_change = np.array([[0, 1, 0],
+                         [0, 0, 1],
+                         [1, 0, 0]])
+    R = M_change @ R @ M_change.T
 
-            # Create a homogeneous matrix
-            Hmtrx = np.hstack((R, xyz.reshape(3,1)))
-            # return camera position
-            return np.vstack((Hmtrx, np.array([0, 0, 0, 1])))
+    # Create a homogeneous matrix
+    Hmtrx = np.hstack((R, xyz.reshape(3,1)))
+    # return camera position
+    return np.vstack((Hmtrx, np.array([0, 0, 0, 1])))
 
 """
 Compute depth from an RGB image using ZoeDepth
@@ -312,51 +432,51 @@ def choose_primitive(vbg, camera_position, traj_linesets, goal_position, dist_th
     return shouldStop, max_traj_idx
 
 
-"""
-Upon Crazyflie startup, these helper functions ensure the EKF is properly initialized before takeoff.
-#  Copyright (C) 2018 Bitcraze AB
-Taken from several Crazyflie examples, e.g., https://github.com/bitcraze/crazyflie-lib-python/blob/master/examples/autonomy/autonomous_sequence_high_level.py
-"""
-def reset_estimator(scf):
-    scf.param.set_value('kalman.resetEstimation', '1')
-    time.sleep(0.1)
-    scf.param.set_value('kalman.resetEstimation', '0')
+# """
+# Upon Crazyflie startup, these helper functions ensure the EKF is properly initialized before takeoff.
+# #  Copyright (C) 2018 Bitcraze AB
+# Taken from several Crazyflie examples, e.g., https://github.com/bitcraze/crazyflie-lib-python/blob/master/examples/autonomy/autonomous_sequence_high_level.py
+# """
+# def reset_estimator(scf):
+#     scf.param.set_value('kalman.resetEstimation', '1')
+#     time.sleep(0.1)
+#     scf.param.set_value('kalman.resetEstimation', '0')
     
-    print('Waiting for estimator to find position...')
+#     print('Waiting for estimator to find position...')
 
-    log_config = LogConfig(name='Kalman Variance', period_in_ms=500)
-    log_config.add_variable('kalman.varPX', 'float')
-    log_config.add_variable('kalman.varPY', 'float')
-    log_config.add_variable('kalman.varPZ', 'float')
+#     log_config = LogConfig(name='Kalman Variance', period_in_ms=500)
+#     log_config.add_variable('kalman.varPX', 'float')
+#     log_config.add_variable('kalman.varPY', 'float')
+#     log_config.add_variable('kalman.varPZ', 'float')
 
-    var_y_history = [1000] * 10
-    var_x_history = [1000] * 10
-    var_z_history = [1000] * 10
+#     var_y_history = [1000] * 10
+#     var_x_history = [1000] * 10
+#     var_z_history = [1000] * 10
 
-    threshold = 0.001
+#     threshold = 0.001
 
-    with SyncLogger(scf, log_config) as logger:
-        for log_entry in logger:
-            data = log_entry[1]
+#     with SyncLogger(scf, log_config) as logger:
+#         for log_entry in logger:
+#             data = log_entry[1]
 
-            var_x_history.append(data['kalman.varPX'])
-            var_x_history.pop(0)
-            var_y_history.append(data['kalman.varPY'])
-            var_y_history.pop(0)
-            var_z_history.append(data['kalman.varPZ'])
-            var_z_history.pop(0)
+#             var_x_history.append(data['kalman.varPX'])
+#             var_x_history.pop(0)
+#             var_y_history.append(data['kalman.varPY'])
+#             var_y_history.pop(0)
+#             var_z_history.append(data['kalman.varPZ'])
+#             var_z_history.pop(0)
 
-            min_x = min(var_x_history)
-            max_x = max(var_x_history)
-            min_y = min(var_y_history)
-            max_y = max(var_y_history)
-            min_z = min(var_z_history)
-            max_z = max(var_z_history)
+#             min_x = min(var_x_history)
+#             max_x = max(var_x_history)
+#             min_y = min(var_y_history)
+#             max_y = max(var_y_history)
+#             min_z = min(var_z_history)
+#             max_z = max(var_z_history)
 
-            if (max_x - min_x) < threshold and (
-                    max_y - min_y) < threshold and (
-                    max_z - min_z) < threshold:
-                break
+#             if (max_x - min_x) < threshold and (
+#                     max_y - min_y) < threshold and (
+#                     max_z - min_z) < threshold:
+#                 break
 
 """
 Load config.yml file

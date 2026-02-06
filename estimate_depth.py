@@ -25,9 +25,9 @@ import torch
 import cv2
 
 # Add ZoeDepth to path
-sys.path.insert(0, "ZoeDepth")
-from zoedepth.models.builder import build_model
-from zoedepth.utils.config import get_config
+# sys.path.insert(0, "ZoeDepth")
+# from zoedepth.models.builder import build_model
+# from zoedepth.utils.config import get_config
 
 import open3d as o3d
 from PIL import Image
@@ -61,11 +61,11 @@ mtx, dist = get_calibration_values(camera_calibration_path)
 kinect = o3d.camera.PinholeCameraIntrinsic(o3d.camera.PinholeCameraIntrinsicParameters.PrimeSenseDefault)
 
 # Load the ZoeDepth model
-conf = get_config("zoedepth", config["zoedepth_mode"]) # NOTE: "eval" runs slightly slower, but is stated to be more metrically accurate
-model_zoe = build_model(conf)
+# conf = get_config("zoedepth", config["zoedepth_mode"]) # NOTE: "eval" runs slightly slower, but is stated to be more metrically accurate
+# model_zoe = build_model(conf)
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 print("Device is: ", DEVICE)
-zoe = model_zoe.to(DEVICE)
+# zoe = model_zoe.to(DEVICE)
 
 # Figure out how many images are in folder by counting .jpg files
 end_frame = len([name for name in os.listdir(rgb_dir) if os.path.isfile(os.path.join(rgb_dir, name)) and name.endswith(".jpg")])
@@ -89,4 +89,3 @@ for frame_number in range(0, end_frame):
     np.save(kinect_depth_dir + "/" + "kinect_frame-%06d.depth.npy"%(frame_number), depth_numpy) # saved in meters
 
 print("Time to compute depth for %d images: %f"%(end_frame, time.time()-start_time))
-# On Nvidia GeForce RTX 4090: 13.6 s for 80 images

@@ -24,7 +24,7 @@ import matplotlib.pyplot as plt
 # Trajectory Constants
 T = 1.0 # s, period of the primitive
 V = 0.5 # m/s, forward speed
-max_yawrate = 0.7 # rad/s
+max_yawrate = 3 # rad/s
 num_trajectories = 7 # number of trajectories should be ODD (e.g., 11) to ensure a straight line is included
 num_commands = 65 # number of points in the trajectory
 num_points = 8 # how many points should be in each primitive and each extension segment? (for primitive evaluation)

@@ -31,7 +31,7 @@ CONFIG_PATH = "config.yml"
 config = load_config("config.yml")
 
 data_dir = config["data_dir"] # parent directory to look for RGB images, and save depth images
-pose_dir = os.path.join(data_dir, "crazyflie-poses")
+pose_dir = os.path.join(data_dir, "poses")
 trajlib_dir = config["trajlib_dir"]
 
 # Load the VoxelBlockGrid from file.

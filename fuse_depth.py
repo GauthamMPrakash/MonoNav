@@ -35,10 +35,10 @@ with open(CONFIG_PATH, "r") as f:
 
 data_dir = config["data_dir"] # parent directory to look for RGB images, and save depth images
 
-source = "kinect" # meaning: crazyflie images have been undistorted to match kinect
+source = "kinect" # meaning: images have been undistorted to match kinect
 rgb_dir = data_dir + "/" + source + "-rgb-images/"
 depth_dir = data_dir + "/" + source + "-depth-images"
-pose_dir = data_dir + "/crazyflie-poses/"
+pose_dir = data_dir + "/poses/"
 #####################################################################
 
 # Initialize TSDF VoxelBlockGrid
@@ -70,7 +70,7 @@ for filename in depth_files:
     rgb_file = rgb_dir + source + "_frame-%06d.rgb.jpg"%(frame_number)
 
     # Read in camera pose
-    pose_file = data_dir + "/crazyflie-poses/crazyflie_frame-%06d.pose.txt"%(frame_number)
+    pose_file = data_dir + "/poses/frame-%06d.pose.txt"%(frame_number)
     cam_pose = np.loadtxt(pose_file)
     poses.append(cam_pose)
 
