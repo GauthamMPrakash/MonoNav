@@ -259,8 +259,12 @@ def get_pose(blocking=False):
     return time_boot, x, y, z, yaw, pitch, roll
 
 def heading_offset_init():
+    """
+    Call once to get initial absolute heading.
+    Subsequently subtract heading_offset from the absolute heading (ATTITUDE.yaw) to get relative heading
+    """
     pose = get_pose()
-    heading = pose[4]
+    heading_offset = pose[4]
 
 def test(): 
     try:
