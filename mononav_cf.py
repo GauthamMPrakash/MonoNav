@@ -36,7 +36,7 @@ from zoedepth.models.builder import build_model
 from zoedepth.utils.config import get_config
 
 # For Craziflie logging
-import logging
+# import logging
 import time
 
 # import cflib.crtp
@@ -65,7 +65,10 @@ config = load_config("config.yml")
 # logging.basicConfig(level=logging.ERROR)
 IP = config["IP"]
 height = config["height"]
-FLY_CRAZYFLIE = config["FLY_CRAZYFLIE"]
+FLY_VEHICLE = config["FLY_VEHICLE"]
+baud = config["baud"]
+EKF_LAT = config["EKF_LAT"]
+EKF_LON = config["EKF_LON"]
 
 # Camera Settings for Undistortion
 camera_num = config["camera_num"]
@@ -398,11 +401,11 @@ def main():
             depth_numpy, depth_colormap = compute_depth(kinect_rgb, zoe)
 
             # SAVE DATA TO FILE
-            cv2.imwrite(crazyflie_img_dir + "/frame-%06d.rgb.jpg"%(frame_number), crazyflie_rgb)
+            cv2.imwrite(img_dir + "/frame-%06d.rgb.jpg"%(frame_number), rgb)
             cv2.imwrite(kinect_img_dir + "/kinect_frame-%06d.rgb.jpg"%(frame_number), kinect_rgb)
             cv2.imwrite(kinect_depth_dir + "/" + "kinect_frame-%06d.depth.jpg"%(frame_number), depth_colormap)
             np.save(kinect_depth_dir + "/" + "kinect_frame-%06d.depth.npy"%(frame_number), depth_numpy) # saved in meters
-            np.savetxt(crazyflie_pose_dir + "/frame-%06d.pose.txt"%(frame_number), camera_position)
+            np.savetxt(pose_dir + "/frame-%06d.pose.txt"%(frame_number), camera_position)
             
             # integrate the vbg (prefers bgr)
             vbg.integration_step(kinect_bgr, depth_numpy, camera_position)
