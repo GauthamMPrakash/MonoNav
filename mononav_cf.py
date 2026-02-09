@@ -173,7 +173,7 @@ def main():
     global max_traj_idx
 
     # Run the depth model a few times (the first inference is slow), and skip the first few frames
-    cap = VideoCapture(camera_num)
+    cap = VideoCapture(STREAM_URL)
     for i in range(0, config['num_pre_depth_frames']):
         rgb = cap.read()
         # COMPUTE DEPTH
@@ -408,7 +408,8 @@ def main():
                 #cf.commander.send_hover_setpoint(forward_speed, yvel, yawrate, height)
                 mav.send_body_offset_ned_pos_vel(forward_speed, 0, 0, yaw_rate = yawrate)
             # get camera capture and transform intrinsics
-            rgb = cap.read()
+            # rgb = cap.read()
+            bgr = cap.read()
             camera_position = get_drone_pose() # get camera position immediately
             if goal_position is not None:
                 dist_to_goal = np.linalg.norm(camera_position[0:-1, -1]-goal_position[0])
@@ -418,11 +419,12 @@ def main():
                     shouldStop = True
                     last_key_pressed = 'q'
                     break
-            # Transform Crazyflie Image to Kinect Image
-            kinect_rgb = transform_image(np.asarray(rgb), mtx, dist, kinect)
-            kinect_bgr = cv2.cvtColor(kinect_rgb, cv2.COLOR_RGB2BGR)
+            # Transform Camera Image to Kinect Image
+            # kinect_rgb = transform_image(np.asarray(rgb), mtx, dist, kinect)
+            kinect_rgb = transform_image(np.asarray(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)), mtx, dist, kinect)
+            # kinect_bgr = cv2.cvtColor(kinect_rgb, cv2.COLOR_RGB2BGR)
             # compute depth
-            depth_numpy, depth_colormap = compute_depth(depth_anything, rgb, INPUT_SIZE)
+            depth_numpy, depth_colormap = compute_depth(depth_anything, bgr, INPUT_SIZE)
 
             # SAVE DATA TO FILE
             cv2.imwrite(img_dir + '/frame-%06d.rgb.jpg'%(frame_number), rgb)
@@ -432,7 +434,7 @@ def main():
             np.savetxt(pose_dir + '/frame-%06d.pose.txt'%(frame_number), camera_position)
             
             # integrate the vbg (prefers bgr)
-            vbg.integration_step(kinect_bgr, depth_numpy, camera_position)
+            vbg.integration_step(bgr, depth_numpy, camera_position)
 
             frame_number += 1
         traj_counter += 1
