@@ -32,8 +32,8 @@ import open3d as o3d
 import sys
 
 # Add path to DepthAnythingV2
-repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-metric_depth_path = os.path.join(repo_root, "metric_depth")
+repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+metric_depth_path = os.path.join(repo_root, 'metric_depth')
 sys.path.insert(0, metric_depth_path)
 from depth_anything_v2.dpt import DepthAnythingV2
 
@@ -59,40 +59,40 @@ last_key_pressed = None  # store the last key pressed
 shouldStop = False
 
 # LOAD VALUES FROM CONFIG FILE
-CONFIG_PATH = "config.yml"
-config = load_config("config.yml")
+CONFIG_PATH = 'config.yml'
+config = load_config('config.yml')
 
-# URI = uri_helper.uri_from_env(default=config["radio_uri"])
+# URI = uri_helper.uri_from_env(default=config['radio_uri'])
 # logging.basicConfig(level=logging.ERROR)
-IP = config["IP"]
-height = config["height"]
-FLY_VEHICLE = config["FLY_VEHICLE"]
-baud = config["baud"]
-EKF_LAT = config["EKF_LAT"]
-EKF_LON = config["EKF_LON"]
+IP = config['IP']
+height = config['height']
+FLY_VEHICLE = config['FLY_VEHICLE']
+baud = config['baud']
+EKF_LAT = config['EKF_LAT']
+EKF_LON = config['EKF_LON']
 
 # Camera Settings for Undistortion
-camera_num = config["camera_num"]
+camera_num = config['camera_num']
 # Intrinsics for undistortion
-camera_calibration_path = config["camera_calibration_path"]
+camera_calibration_path = config['camera_calibration_path']
 mtx, dist = get_calibration_values(camera_calibration_path) # for the robot's camera
 kinect = o3d.camera.PinholeCameraIntrinsic(o3d.camera.PinholeCameraIntrinsicParameters.PrimeSenseDefault) # for the kinect
 
 # # Initialize Zoedepth Model & Move to device
-# conf = get_config("zoedepth", config["zoedepth_mode"]) # NOTE: "eval" runs slightly slower, but is stated to be more metrically accurate
+# conf = get_config('zoedepth', config['zoedepth_mode']) # NOTE: "eval" runs slightly slower, but is stated to be more metrically accurate
 # model_zoe = build_model(conf)
-# DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+# DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 # print("Device is: ", DEVICE)
 # zoe = model_zoe.to(DEVICE)
 
-STREAM_URL = config["camera_ip"]        # YOUR ESP32 HTTP MJPEG stream
-INPUT_SIZE = config["INPUT_SIZE"]       # Image size
-ENCODER = config["DA2_ENCODER"]       # must match your checkpoint
-CHECKPOINT = config["DA2_CHECKPOINT"] # path to checkpoint for DepthAnythingV2
+STREAM_URL = config['camera_ip']        # YOUR ESP32 HTTP MJPEG stream
+INPUT_SIZE = config['INPUT_SIZE']       # Image size
+ENCODER = config['DA2_ENCODER']       # must match your checkpoint
+CHECKPOINT = config['DA2_CHECKPOINT'] # path to checkpoint for DepthAnythingV2
 MAX_DEPTH = 20
 GRAYSCALE = False
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
-#OUTDIR = "./esp32_depth"
+#OUTDIR = './esp32_depth'
 #os.makedirs(OUTDIR, exist_ok=True)
 cmap = matplotlib.colormaps.get_cmap('Spectral')
 
@@ -103,47 +103,47 @@ model_configs = {
         'vitg': {'encoder': 'vitg', 'features': 384, 'out_channels': [1536, 1536, 1536, 1536]}
     }
 
-depth_anything = DepthAnythingV2(**{**model_configs[config[DA2_ENCODER]], 'max_depth': MAX_DEPTH})
+depth_anything = DepthAnythingV2(**{**model_configs[config['DA2_ENCODER']], 'max_depth': MAX_DEPTH})
 depth_anything.load_state_dict(torch.load(CHECKPOINT, map_location='cpu'))
 depth_anything = depth_anything.to(DEVICE).eval()
 
 # Initialize VoxelBlockGrid
-depth_scale = config["VoxelBlockGrid"]["depth_scale"]
-depth_max = config["VoxelBlockGrid"]["depth_max"]
-trunc_voxel_multiplier = config["VoxelBlockGrid"]["trunc_voxel_multiplier"]
-weight_threshold = config["weight_threshold"] # for planning and visualization (!! important !!)
-device = config["VoxelBlockGrid"]["device"]
+depth_scale = config['VoxelBlockGrid']['depth_scale']
+depth_max = config['VoxelBlockGrid']['depth_max']
+trunc_voxel_multiplier = config['VoxelBlockGrid']['trunc_voxel_multiplier']
+weight_threshold = config['weight_threshold'] # for planning and visualization (!! important !!)
+device = config['VoxelBlockGrid']['device']
 vbg = VoxelBlockGrid(depth_scale, depth_max, trunc_voxel_multiplier, o3d.core.Device(device))
 
 # Initialize Trajectory Library (Motion Primitives)
-trajlib_dir = config["trajlib_dir"]
+trajlib_dir = config['trajlib_dir']
 traj_list = get_trajlist(trajlib_dir)
 traj_linesets, period, forward_speed, amplitudes = get_traj_linesets(traj_list)
 max_traj_idx = int(len(traj_list)/2) # set initial value to that of FORWARD flight (should be median value)
 print("Initial trajectory chosen: %d out of %d"%(max_traj_idx, len(traj_list)))
 
 # Planning presets
-filterYvals = config["filterYvals"]
-filterWeights = config["filterWeights"]
-filterTSDF = config["filterTSDF"]
-if "goal_position" in config:
-    goal_position = np.array(config["goal_position"]).reshape(1, 3)#np.array([-5., -0.4, 10.0]).reshape(1, 3) # OpenCV frame: +X RIGHT, +Y DOWN, +Z FORWARD
+filterYvals = config['filterYvals']
+filterWeights = config['filterWeights']
+filterTSDF = config['filterTSDF']
+if 'goal_position' in config:
+    goal_position = np.array(config['goal_position']).reshape(1, 3)#np.array([-5., -0.4, 10.0]).reshape(1, 3) # OpenCV frame: +X RIGHT, +Y DOWN, +Z FORWARD
 else:
     goal_position = None # non-directed exploration
 print("Goal position: ", goal_position)
-min_dist2obs = config["min_dist2obs"]
-min_dist2goal = config["min_dist2goal"]
+min_dist2obs = config['min_dist2obs']
+min_dist2goal = config['min_dist2goal']
 
 # Make directories for data
-time_string = time.strftime("%Y-%m-%d-%H-%M-%S")
-save_dir = config["save_dir_prefix"] + time_string
+time_string = time.strftime('%Y-%m-%d-%H-%M-%S')
+save_dir = config['save_dir_prefix'] + time_string
 print("Saving files to: " + save_dir)
-npz_save_filename = save_dir + "/vbg.npz"
+npz_save_filename = save_dir + '/vbg.npz'
 
-img_dir = os.path.join(save_dir, "rgb-images")
-pose_dir = os.path.join(save_dir, "poses")
-kinect_img_dir = os.path.join(save_dir, "kinect-rgb-images")
-kinect_depth_dir = os.path.join(save_dir, "kinect-depth-images")
+img_dir = os.path.join(save_dir, 'rgb-images')
+pose_dir = os.path.join(save_dir, 'poses')
+kinect_img_dir = os.path.join(save_dir, 'kinect-rgb-images')
+kinect_depth_dir = os.path.join(save_dir, 'kinect-depth-images')
 
 os.makedirs(img_dir, exist_ok=True)
 os.makedirs(pose_dir, exist_ok=True)
@@ -151,9 +151,9 @@ os.makedirs(kinect_img_dir, exist_ok=True)
 os.makedirs(kinect_depth_dir, exist_ok=True)
 
 # Save the run information to a csv
-header = ["frame_number", "chosen_traj_idx", "time_elapsed"]
-with open(save_dir + "/trajectories.csv", "w") as file:
-    file.write(",".join(header) + "\n")
+header = ['frame_number', 'chosen_traj_idx', 'time_elapsed']
+with open(save_dir + '/trajectories.csv', 'w') as file:
+    file.write(','.join(header) + '\n')
 
 # key press callback function (for manual control)
 def on_press(key):
@@ -174,13 +174,13 @@ def main():
 
     # Run the depth model a few times (the first inference is slow), and skip the first few frames
     cap = VideoCapture(camera_num)
-    for i in range(0, config["num_pre_depth_frames"]):
+    for i in range(0, config['num_pre_depth_frames']):
         rgb = cap.read()
         # COMPUTE DEPTH
         start_time_test = time.time()
         depth_numpy, depth_colormap = compute_depth(depth_anything, rgb, INPUT_SIZE)
         print("TIME TO COMPUTE DEPTH:",time.time()-start_time_test)
-        cv2.imshow('frame', rgb)
+        cv2.imshow("frame", rgb)
         cv2.waitKey(1)
     cv2.destroyAllWindows()
 
@@ -265,8 +265,8 @@ def main():
     #             # WARNING: This controller is tuned to work for the Crazyflie 2.1.
     #             # You must check whether your robot follows the open-loop trajectory.
     #             yawrate = -amplitudes[traj_index]*np.sin(np.pi/period*(time.time() - start_time))*180/np.pi # deg/s
-    #             yvel =  -yawrate*config["yvel_gain"]
-    #             yawrate = yawrate*config["yawrate_gain"]
+    #             yvel =  -yawrate*config['yvel_gain']
+    #             yawrate = yawrate*config['yawrate_gain']
     #             print("last_key_pressed = ", last_key_pressed)
     #             if FLY_CRAZYFLIE:
     #                 cf.commander.send_hover_setpoint(forward_speed, yvel, yawrate, height)
@@ -290,8 +290,8 @@ def main():
     #             # SAVE DATA TO FILE
     #             cv2.imwrite(crazyflie_img_dir + "/crazyflie_frame-%06d.rgb.jpg"%(frame_number), crazyflie_rgb)
     #             cv2.imwrite(kinect_img_dir + "/kinect_frame-%06d.rgb.jpg"%(frame_number), kinect_rgb)
-    #             cv2.imwrite(kinect_depth_dir + "/" + "kinect_frame-%06d.depth.jpg"%(frame_number), depth_colormap)
-    #             np.save(kinect_depth_dir + "/" + "kinect_frame-%06d.depth.npy"%(frame_number), depth_numpy) # saved in meters
+    #             cv2.imwrite(kinect_depth_dir + '/' + 'kinect_frame-%06d.depth.jpg'%(frame_number), depth_colormap)
+    #             np.save(kinect_depth_dir + '/' + 'kinect_frame-%06d.depth.npy'%(frame_number), depth_numpy) # saved in meters
     #             np.savetxt(crazyflie_pose_dir + "/crazyflie_frame-%06d.pose.txt"%(frame_number), camera_position)
                 
     #             # integrate the vbg (prefers bgr)
@@ -358,7 +358,7 @@ def main():
 #   start_time = time.time() # seconds
 
     while not shouldStop:
-        cv2.imshow('frame', cap.read())
+        cv2.imshow("frame", cap.read())
         cv2.waitKey(1)
         print("shouldStop: ", shouldStop)
         if last_key_pressed == 'a':
@@ -392,7 +392,7 @@ def main():
         
         # Save trajectory information
         row = np.array([frame_number, int(max_traj_idx), time.time()-start_flight_time]) # time since start of flight
-        with open(save_dir + "/trajectories.csv", "a") as file:
+        with open(save_dir + '/trajectories.csv', 'a') as file:
             np.savetxt(file, row.reshape(1, -1), delimiter=',', fmt='%s')
 
         # Fly the selected trajectory, as applicable.
@@ -401,8 +401,8 @@ def main():
             # WARNING: This controller is tuned to work for the Crazyflie 2.1.
             # You must check whether your robot follows the open-loop trajectory.
             yawrate = amplitudes[traj_index]*np.sin(np.pi/period*(time.time() - start_time)) # rad/s
-            # yvel = yawrate*config["yvel_gain"]
-            # yawrate = yawrate*config["yawrate_gain"]
+            # yvel = yawrate*config['yvel_gain']
+            # yawrate = yawrate*config['yawrate_gain']
             print("last_key_pressed = ", last_key_pressed)
             if FLY_VEHICLE:
                 #cf.commander.send_hover_setpoint(forward_speed, yvel, yawrate, height)
@@ -425,11 +425,11 @@ def main():
             depth_numpy, depth_colormap = compute_depth(depth_anything, rgb, INPUT_SIZE)
 
             # SAVE DATA TO FILE
-            cv2.imwrite(img_dir + "/frame-%06d.rgb.jpg"%(frame_number), rgb)
-            cv2.imwrite(kinect_img_dir + "/kinect_frame-%06d.rgb.jpg"%(frame_number), kinect_rgb)
-            cv2.imwrite(kinect_depth_dir + "/" + "kinect_frame-%06d.depth.jpg"%(frame_number), depth_colormap)
-            np.save(kinect_depth_dir + "/" + "kinect_frame-%06d.depth.npy"%(frame_number), depth_numpy) # saved in meters
-            np.savetxt(pose_dir + "/frame-%06d.pose.txt"%(frame_number), camera_position)
+            cv2.imwrite(img_dir + '/frame-%06d.rgb.jpg'%(frame_number), rgb)
+            cv2.imwrite(kinect_img_dir + '/kinect_frame-%06d.rgb.jpg'%(frame_number), kinect_rgb)
+            cv2.imwrite(kinect_depth_dir + '/' + 'kinect_frame-%06d.depth.jpg'%(frame_number), depth_colormap)
+            np.save(kinect_depth_dir + '/' + 'kinect_frame-%06d.depth.npy'%(frame_number), depth_numpy) # saved in meters
+            np.savetxt(pose_dir + '/frame-%06d.pose.txt'%(frame_number), camera_position)
             
             # integrate the vbg (prefers bgr)
             vbg.integration_step(kinect_bgr, depth_numpy, camera_position)
@@ -460,9 +460,9 @@ def main():
     cv2.destroyAllWindows()
 
     # save and view vbg
-    print('Saving to {}...'.format(npz_save_filename))
+    print("Saving to {}...".format(npz_save_filename))
     vbg.vbg.save(npz_save_filename)
-    print('Saving finished')
+    print("Saving finished")
     print("Visualize raw pointcloud.")
     pcd = vbg.vbg.extract_point_cloud(weight_threshold)
     o3d.visualization.draw([pcd.cpu()])
