@@ -30,14 +30,15 @@ import time
 import os
 import open3d as o3d
 import sys
-# Add path to ZoeDepth
-sys.path.insert(0, "ZoeDepth")
-from zoedepth.models.builder import build_model
-from zoedepth.utils.config import get_config
 
-# For Craziflie logging
+# Add path to DepthAnythingV2
+repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+metric_depth_path = os.path.join(repo_root, "metric_depth")
+sys.path.insert(0, metric_depth_path)
+from depth_anything_v2.dpt import DepthAnythingV2
+
+# For Crazyflie logging
 # import logging
-import time
 
 # import cflib.crtp
 # from cflib.crazyflie import Crazyflie
@@ -77,12 +78,34 @@ camera_calibration_path = config["camera_calibration_path"]
 mtx, dist = get_calibration_values(camera_calibration_path) # for the robot's camera
 kinect = o3d.camera.PinholeCameraIntrinsic(o3d.camera.PinholeCameraIntrinsicParameters.PrimeSenseDefault) # for the kinect
 
-# Initialize Zoedepth Model & Move to device
-conf = get_config("zoedepth", config["zoedepth_mode"]) # NOTE: "eval" runs slightly slower, but is stated to be more metrically accurate
-model_zoe = build_model(conf)
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-print("Device is: ", DEVICE)
-zoe = model_zoe.to(DEVICE)
+# # Initialize Zoedepth Model & Move to device
+# conf = get_config("zoedepth", config["zoedepth_mode"]) # NOTE: "eval" runs slightly slower, but is stated to be more metrically accurate
+# model_zoe = build_model(conf)
+# DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+# print("Device is: ", DEVICE)
+# zoe = model_zoe.to(DEVICE)
+
+STREAM_URL = config["camera_ip"]        # YOUR ESP32 HTTP MJPEG stream
+INPUT_SIZE = config["INPUT_SIZE"]       # Image size
+ENCODER = config["DA2_ENCODER"]       # must match your checkpoint
+CHECKPOINT = config["DA2_CHECKPOINT"] # path to checkpoint for DepthAnythingV2
+MAX_DEPTH = 20
+GRAYSCALE = False
+DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
+#OUTDIR = "./esp32_depth"
+#os.makedirs(OUTDIR, exist_ok=True)
+cmap = matplotlib.colormaps.get_cmap('Spectral')
+
+model_configs = {
+        'vits': {'encoder': 'vits', 'features': 64, 'out_channels': [48, 96, 192, 384]},
+        'vitb': {'encoder': 'vitb', 'features': 128, 'out_channels': [96, 192, 384, 768]},
+        'vitl': {'encoder': 'vitl', 'features': 256, 'out_channels': [256, 512, 1024, 1024]},
+        'vitg': {'encoder': 'vitg', 'features': 384, 'out_channels': [1536, 1536, 1536, 1536]}
+    }
+
+depth_anything = DepthAnythingV2(**{**model_configs[config[DA2_ENCODER]], 'max_depth': MAX_DEPTH})
+depth_anything.load_state_dict(torch.load(CHECKPOINT, map_location='cpu'))
+depth_anything = depth_anything.to(DEVICE).eval()
 
 # Initialize VoxelBlockGrid
 depth_scale = config["VoxelBlockGrid"]["depth_scale"]
@@ -149,13 +172,13 @@ def main():
     global last_key_pressed
     global max_traj_idx
 
-    # Run ZoeDepth a few times (the first inference is slow), and skip the first few frames
+    # Run the depth model a few times (the first inference is slow), and skip the first few frames
     cap = VideoCapture(camera_num)
     for i in range(0, config["num_pre_depth_frames"]):
         rgb = cap.read()
         # COMPUTE DEPTH
         start_time_test = time.time()
-        depth_numpy, depth_colormap = compute_depth(rgb, zoe)
+        depth_numpy, depth_colormap = compute_depth(depth_anything, rgb, INPUT_SIZE)
         print("TIME TO COMPUTE DEPTH:",time.time()-start_time_test)
         cv2.imshow('frame', rgb)
         cv2.waitKey(1)
@@ -352,6 +375,7 @@ def main():
             traj_index = max_traj_idx
         elif last_key_pressed == 'c': #end control and land
             print("Pressed c. Ending control.")
+            mav.land()
             break
         # elif last_key_pressed == 'q': #end flight immediately
         #     print("Pressed q. EMERGENCY STOP.")
@@ -382,7 +406,7 @@ def main():
             print("last_key_pressed = ", last_key_pressed)
             if FLY_VEHICLE:
                 #cf.commander.send_hover_setpoint(forward_speed, yvel, yawrate, height)
-                mav.send_body_offset_ned_pos_vel("vel", forward_speed, 0, 0, yaw_rate = yawrate)
+                mav.send_body_offset_ned_pos_vel(forward_speed, 0, 0, yaw_rate = yawrate)
             # get camera capture and transform intrinsics
             rgb = cap.read()
             camera_position = get_drone_pose() # get camera position immediately
@@ -398,7 +422,7 @@ def main():
             kinect_rgb = transform_image(np.asarray(rgb), mtx, dist, kinect)
             kinect_bgr = cv2.cvtColor(kinect_rgb, cv2.COLOR_RGB2BGR)
             # compute depth
-            depth_numpy, depth_colormap = compute_depth(kinect_rgb, zoe)
+            depth_numpy, depth_colormap = compute_depth(depth_anything, rgb, INPUT_SIZE)
 
             # SAVE DATA TO FILE
             cv2.imwrite(img_dir + "/frame-%06d.rgb.jpg"%(frame_number), rgb)

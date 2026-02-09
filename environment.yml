@@ -1,4 +1,4 @@
-name: test2_mononav
+name: mononav
 channels:
   - pytorch
   - nvidia

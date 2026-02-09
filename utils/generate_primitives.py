@@ -22,12 +22,12 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 # Trajectory Constants
-T = 1.0 # s, period of the primitive
-V = 0.5 # m/s, forward speed
-max_yawrate = 3 # rad/s
+T = 2.0              # s, period of the primitive
+V = 0.3              # m/s, forward speed
+max_yawrate = 1      # rad/s
 num_trajectories = 7 # number of trajectories should be ODD (e.g., 11) to ensure a straight line is included
-num_commands = 65 # number of points in the trajectory
-num_points = 8 # how many points should be in each primitive and each extension segment? (for primitive evaluation)
+num_commands = 65    # number of points in the trajectory
+num_points = 8       # how many points should be in each primitive and each extension segment? (for primitive evaluation)
 
 # Extension segment - straight line at the end of the trajectory (to encourage foresight)
 x_ext = np.linspace(0., 1.0, num_points) # extension segment in the body frame (x = forward)
@@ -39,8 +39,8 @@ assert num_trajectories % 2 == 1, "num_trajectories should be odd"
 assert max_yawrate > 0, "max_yawrate should be positive"
 
 # Derived quantities
-omega = np.pi/T # 1/s, angular frequency
-t = np.linspace(0,T,num_commands) # s, time vector
+omega = np.pi/T                                                  # 1/s, angular frequency
+t = np.linspace(0,T,num_commands)                                # s, time vector
 Avals = np.linspace(max_yawrate, -max_yawrate, num_trajectories) # rad/s, yawrate amplitude vector
 
 

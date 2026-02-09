@@ -2,37 +2,44 @@
 data_dir: 'data/demo_hallway'
 save_dir_prefix: 'data/mononav-'
 # Camera Settings
-camera_num: 0 # camera number index (test with utils/test_camera.py), try (-1, 0, 1, 2, ...)
-camera_source: 'esp32-cam' # used for naming files
+camera_num: 0                        # camera number index (test with utils/test_camera.py), try (-1, 0, 1, 2, ...)
+camera_source: 'esp32-cam'                                        # used for naming files
 camera_calibration_path: 'utils/calibration/demo_intrinsics.json' # camera calibration file (for undistortion)
+camera_ip: 'http://172.16.6.243:81/stream'                        # IP camera stream URL (if using an IP camera, otherwise leave blank)   
 
 # ZoeDepth Settings
 # zoedepth_mode: "eval" # "eval" or "infer" - see ZoeDepth documentation for other settings
-num_pre_depth_frames: 5 # how many times to run ZoeDepth before starting (the first few inferences are much slower)
+num_pre_depth_frames: 5       # how many times to run the depth model before starting (the first few inferences are much slower)
+DA2_ENCODER: 'vitb'           # which encoder to use for DepthAnythingV2, options are 'vits', 'vitb', 'vitl', 'vitg'
+INPUT_SIZE: 384               # input and output size for DepthAnythingV2
+DA2_CHECKPOINT: "checkpoints/depth_anything_v2_metric_hypersim_vitb.pth" # path to checkpoint for DepthAnythingV2, make sure it matches the encoder you choose
 
 # Reconstruction settings
-filterYvals: True #this helps filter out the ground / ceiling (for planar navigation)
-filterWeights: True # this helps filter out low-weight voxels
+filterYvals: True             # this helps filter out the ground / ceiling (for planar navigation)
+filterWeights: True           # this helps filter out low-weight voxels
 filterTSDF: True
-weight_threshold: 3. # determine the weight threshold for filtering (higher threshold -> fewer points)
+weight_threshold: 3.          # determine the weight threshold for filtering (higher threshold -> fewer points)
 VoxelBlockGrid:
-  depth_scale: 1000.0 # 1000.0 is default (mm to m), scale factor for depth values during integration
-  depth_max: 7.0 # max depth to include in the reconstruction
+  depth_scale: 1000.0         # 1000.0 is default (mm to m), scale factor for depth values during integration
+  depth_max: 7.0              # max depth to include in the reconstruction
   trunc_voxel_multiplier: 8.0
-  device: "CUDA:0" # "CUDA:0" (faster) or "CPU:0" (if no GPU is available)
+  device: "CUDA:0"            # "CUDA:0" (faster) or "CPU:0" (if no GPU is available)
 
 # Planning Settings
 trajlib_dir: "utils/trajlib/" # where to save & retrieve the trajectory library (motion primitives)
+
 # comment out goal position for undirected exploration
 goal_position: # goal position in meters
  -  1.0 # +X RIGHT
  - -1.0 # +Y DOWN (HEIGHT)
  -  10.0 # +Z FORWARD
-min_dist2obs: 1.0 # minimum acceptable distance from obstacles, meters (for primitive selection)
-min_dist2goal: 1.0 # termination condition for reaching the goal, meters
+
+min_dist2obs: 1.0             # minimum acceptable distance from obstacles, meters (for primitive selection)
+min_dist2goal: 1.0            # termination condition for reaching the goal, meters
 
 
 # Drone Settings
+-----------------
 # radio_uri: 'radio://0/4/2M/E7E7E7E7E7' # update the drone ID# to match your vehicle, check using cfclient
 
 # IP and port of the telemetry module on the drone. Set appropriate connection strings.

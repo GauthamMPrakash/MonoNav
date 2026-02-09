@@ -1,5 +1,9 @@
 """
-Library for controlling an ArduCopter vehicle
+Library for controlling an ArduCopter vehicle using pymavlink.
+
+Provides functions for connecting, arming, taking off, sending velocity/position commands, changig flight modes and landing.
+Also provides functions to receive pose data from the copter.
+
 """
 
 from pymavlink import mavutil
@@ -29,8 +33,8 @@ def send_heartbeat():
 
 def connect_drone(IP, baud=115200):
     """ 
-    To connect to the drone, use the telemtry module's IP with the mavlink conenction string and port.
-    ex: "udpout:192.168.199.51:14550" -> Similar functionality as UDPCl in MP, but only if a heartbeat is sent from the GCS first if the connection is routed via another Access Point
+    To connect to the drone, use the telemetry module's IP with the mavlink conenction string and port.
+    ex: "udpout:192.168.199.51:14550" -> Similar functionality as UDPCl in Misson Planner, but only if a heartbeat is sent from the GCS first if the connection is routed via another Access Point.
     """
     global drone
     drone = mavutil.mavlink_connection(IP, baud)
@@ -81,6 +85,7 @@ def arm(arm_state=1):
         0,
         arm_state,0,0,0,0,0,0
     )
+
     # Wait until armed
     while True:
         msg = drone.recv_match(type='HEARTBEAT', blocking=True)
@@ -103,6 +108,7 @@ def takeoff(target_alt):
         target_alt
     )
 
+    # Wait until drone reaches target altitude
     while True:
         msg = drone.recv_match(type="VFR_HUD", blocking=True)
         if msg.alt >= target_alt * 0.98:
@@ -135,7 +141,7 @@ def send_body_offset_ned_vel(vx, vy, vz, duration, yaw_rate = 1):
 
 def send_body_offset_ned_pos(x, y, z, speed=0.1, yaw_rate = 1):
     """
-    Send velocity in BODY_NED frame (forward/back,left/right,up/down).
+    Send velocity in BODY_NED frame (forward/back, left/right, up/down).
     The local origin is not the EKF origin, but rather with respect to the current position and heading of the drone.
     """
     type_mask = 0b010111000000
@@ -156,30 +162,40 @@ def send_body_offset_ned_pos(x, y, z, speed=0.1, yaw_rate = 1):
         yaw_rate   
     )
 
-def send_body_offset_ned_pos_vel(pos_or_vel, ax, ay, az, speed=0.2, yaw_rate = 1):
+def send_body_offset_ned_pos_vel(ax, ay, az = 0, pos_or_vel = "vel", speed = 0.2, yaw_rate = 1):
     """
-    Send position/velocity in BODY_NED frame (forward/back,left/right,up/down).
-    The local origin is not the EKF origin, but rather with respect to the current position and heading of the drone.
-    """
-    type_mask = 0b010111000000
-    vx = speed if x > 0 else -speed if x < 0 else 0
-    vy = speed if y > 0 else -speed if y < 0 else 0 
+    Send position/velocity in BODY_NED frame (forward/back, left/right, up/down)
+    with respect to the current position and heading of the drone (NOT EKF ORIGIN!)
     
-    if pos_or_vel == "vel" or pos_or_vel == 2:
-        tupe_mask = 0b010111000111 # ignore pos
+     Args:
+        pos_or_vel (str)  : "pos" for position, otherwise velocity
+        ax, ay, az (float): Position offsets in meters if pos_or_vel = "pos"
+                            or velocity vectors in m/s if pos_or_vel by default
+        speed (float)     : Speed for position mode (Only supports same speed in all axes for simplicity)
+        yaw_rate (float)  : Yaw rate in rad/s
+    
+    """
+
+    type_mask = 0b010111000111 # ignore pos
         vx, vy, vz = ax, ay, az
 
-    printd(f"Sending BODY_NED pos x={x}, y={y}, z={z}")
+    if pos_or_vel == "pos":
+        type_mask = 0b010111000000
+        vx = speed if ax > 0 else -speed if ax < 0 else 0
+        vy = speed if ay > 0 else -speed if ay < 0 else 0 
+        vz = speed if az > 0 else -speed if az < 0 else 0 
+
+    printd(f"Sending BODY_NED pos/vel x={x}, y={y}, z={z}")
     drone.mav.set_position_target_local_ned_send(
         0,
         drone.target_system,
         drone.target_component,
         mavutil.mavlink.MAV_FRAME_BODY_OFFSET_NED,
         type_mask,
-        x,y,z,     # pos
-        vx,vy,0,   # velocity
-        0,0,0,     # acceleration ignored
-        0,         # yaw ignored
+        x,y,z,      # pos
+        vx,vy,vz,   # velocity
+        0,0,0,      # acceleration ignored
+        0,          # yaw ignored
         yaw_rate   
     )
     time.sleep(0.1)
@@ -259,6 +275,7 @@ def get_pose(blocking=False):
     return time_boot, x, y, z, yaw, pitch, roll
 
 def heading_offset_init():
+    global heading_offset
     """
     Call once to get initial absolute heading.
     Subsequently subtract heading_offset from the absolute heading (ATTITUDE.yaw) to get relative heading
@@ -291,8 +308,8 @@ def test():
     except:
         print("Emergency")
         land()
-        arm(0)
-
+        arm(0) 
+ 
 if __name__ == "__main__":
     test()
 

@@ -247,12 +247,13 @@ def get_drone_pose():
     return np.vstack((Hmtrx, np.array([0, 0, 0, 1])))
 
 """
-Compute depth from an RGB image using ZoeDepth
+Compute depth from an RGB image using DepthAnythingV2
 Returns depth_numpy (uint16 in mm), depth_colormap (for visualization)
 """
-def compute_depth(color, zoe):
+
+def compute_depth(depth_anything, frame, size):
     # Compute depth
-    depth = zoe.infer_pil(color, output_type="tensor")  # as torch tensor
+    depth = depth_anything.infer_image(frame, size)  # as torch tensor
     depth_numpy = np.asarray(depth) # Convert to numpy array
     depth_numpy = 1000*depth_numpy # Convert to mm
     depth_numpy = depth_numpy.astype(np.uint16) # Convert to uint16
@@ -261,7 +262,7 @@ def compute_depth(color, zoe):
     depth_colormap = cv2.applyColorMap(cv2.convertScaleAbs(depth_numpy, alpha=0.03), cv2.COLORMAP_JET)
 
     return depth_numpy, depth_colormap
-
+    
 """
 Load the poses (after navigation, for analysis) from the posedir.
 Returns a list of pose arrays.
