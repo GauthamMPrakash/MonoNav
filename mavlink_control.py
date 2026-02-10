@@ -55,7 +55,7 @@ def set_ekf_origin(lat, lon, alt):
         int(lon*1e7),       # longitude
         int(alt*1000)       # altitude in mm
     )
-    print(f"EKF origin set: lat={lat}, lon={lon}, alt={alt}")
+    printd(f"EKF origin set: lat={lat}, lon={lon}, alt={alt}")
 
 def set_mode(mode_name):
     """
@@ -116,7 +116,7 @@ def takeoff(target_alt):
             break
         time.sleep(0.1)
 
-def send_body_offset_ned_vel(vx, vy, vz, duration, yaw_rate = 1):
+def send_body_offset_ned_vel(vx, vy, vz=0, duration=0, yaw_rate = 0):
     """
     Send velocity in BODY_NED frame (forward/back,left/right,up/down).
     Not absolute NED, but with respect to the drone's current heading.
@@ -139,7 +139,7 @@ def send_body_offset_ned_vel(vx, vy, vz, duration, yaw_rate = 1):
         )
         time.sleep(0.1)
 
-def send_body_offset_ned_pos(x, y, z, speed=0.1, yaw_rate = 1):
+def send_body_offset_ned_pos(x, y, z=0, speed=0, yaw_rate = 0):
     """
     Send velocity in BODY_NED frame (forward/back, left/right, up/down).
     The local origin is not the EKF origin, but rather with respect to the current position and heading of the drone.
@@ -162,44 +162,6 @@ def send_body_offset_ned_pos(x, y, z, speed=0.1, yaw_rate = 1):
         yaw_rate   
     )
 
-def send_body_offset_ned_pos_vel(ax, ay, az = 0, pos_or_vel = "vel", speed = 0.2, yaw_rate = 1):
-    """
-    Send position/velocity in BODY_NED frame (forward/back, left/right, up/down)
-    with respect to the current position and heading of the drone (NOT EKF ORIGIN!)
-    
-     Args:
-        pos_or_vel (str)  : "pos" for position, otherwise velocity
-        ax, ay, az (float): Position offsets in meters if pos_or_vel = "pos"
-                            or velocity vectors in m/s if pos_or_vel by default
-        speed (float)     : Speed for position mode (Only supports same speed in all axes for simplicity)
-        yaw_rate (float)  : Yaw rate in rad/s
-    
-    """
-
-    type_mask = 0b010111000111 # ignore pos
-        vx, vy, vz = ax, ay, az
-
-    if pos_or_vel == "pos":
-        type_mask = 0b010111000000
-        vx = speed if ax > 0 else -speed if ax < 0 else 0
-        vy = speed if ay > 0 else -speed if ay < 0 else 0 
-        vz = speed if az > 0 else -speed if az < 0 else 0 
-
-    printd(f"Sending BODY_NED pos/vel x={x}, y={y}, z={z}")
-    drone.mav.set_position_target_local_ned_send(
-        0,
-        drone.target_system,
-        drone.target_component,
-        mavutil.mavlink.MAV_FRAME_BODY_OFFSET_NED,
-        type_mask,
-        x,y,z,      # pos
-        vx,vy,vz,   # velocity
-        0,0,0,      # acceleration ignored
-        0,          # yaw ignored
-        yaw_rate   
-    )
-    time.sleep(0.1)
-
 def set_speed(speed):
     """
     Set the horizontal navigation speed in meters per second
@@ -210,8 +172,10 @@ def set_speed(speed):
         drone.target_component,
         mavutil.mavlink.MAV_CMD_DO_CHANGE_SPEED,
         0,
+        1,
         speed,
-        0,0,0,0,0  # Unused
+        -1,
+        0,0,0,0  # Unused
     )
 
 def land():
@@ -292,16 +256,40 @@ def test():
         connect_drone(IP)
         set_ekf_origin(EKF_LAT, EKF_LON, 0)
         set_mode("GUIDED")
+        en_pose_stream()
+        print("Checking telemetry:")
+        # for i in range(20):
+        #     print(get_pose()[1:])
+        #     time.sleep(0.1)
         arm()
         takeoff(0.7)
-        send_body_offset_ned_pos(0.5,0,0,0.1,0)
-        time.sleep(2)
-        #send_body_offset_ned_pos(0,0.5,0,0.1,0)
-        #time.sleep(2)
-        send_body_offset_ned_pos(-0.5,0,0,0.1,0)
-        time.sleep(2)
-        #send_body_offset_ned_pos(0,-0.5,0,0.1,0)
-        #time.sleep(2)
+        set_speed(0.25)
+        time.sleep(0.2)
+        #send_body_offset_ned_pos_vel(0.7, 0, pos_or_vel="pos", speed=0.3)
+        """
+        Move along a square
+
+        WARNING: Ensure drone has space to move. Note that the movement may not move exactly along a sqaure                 and this will cause the drone to move at an angel. SO DO NOT run both functions unless you                 have tested that the drone will land with an acceptable heading that gives it space for                    another round.
+        """
+        def square_pos()
+            send_body_offset_ned_pos(0.5,0)
+            time.sleep(2)
+            send_body_offset_ned_pos(0,0.5)
+            time.sleep(2)
+            send_body_offset_ned_pos(-0.5,0)
+            time.sleep(2)
+            send_body_offset_ned_pos(0,-0.5)
+            time.sleep(2)
+        def square_vel():
+            send_body_offset_ned_vel(0.5,0,duration=1)
+            time.sleep(2)
+            send_body_offset_ned_pos(0,0.5, duration=1)
+            time.sleep(2)
+            send_body_offset_ned_pos(-0.5,0,duration=1)
+            time.sleep(2)
+            send_body_offset_ned_pos(0,-0.5,duration=1)
+            time.sleep(2)
+        square_vel()
         print("Landing...")
         set_mode("LAND")
         
