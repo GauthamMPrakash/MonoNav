@@ -9,11 +9,12 @@ Also provides functions to receive pose data from the copter.
 from pymavlink import mavutil
 from numpy import pi
 import time
+import threading
 
 FLTMODES = {"GUIDED": 4, "LOITER":5, "LAND":9, "BRAKE":17}
-DEBUG = True                                               # Whether to print debug messages
 time_boot, x, y, z, roll, pitch, yaw = 0, 0, 0, 0, 0, 0, 0
 heading_offset = 0
+DEBUG = True                                                # Whether to print debug messages
 
 def printd(string):
     """
@@ -24,7 +25,7 @@ def printd(string):
 
 def send_heartbeat():
     """
-    If telemetry is routed through an access point, you may need to send a heartbeat to the autopilot initally to establish conenction using UDP. This is similar in fucntionality to the UDPCl conenction in Mission Planner.
+    If telemetry is routed through an access point, you may need to send a heartbeat to the autopilot initally to establish conenction using UDP. This is similar in fucntionality to the UDPCl connection in Mission Planner.
     """
     drone.mav.heartbeat_send(
         mavutil.mavlink.MAV_TYPE_GCS,
@@ -178,13 +179,6 @@ def set_speed(speed):
         0,0,0,0  # Unused
     )
 
-def land():
-    """
-    Land the vehicle
-    """
-    drone.mav.command_long_send(drone.target_system, drone.target_component, mavutil.mavlink.MAV_CMD_NAV_LAND, 0,0,0,0,0,0,0,0)
-    printd("Landing...")
-
 def en_pose_stream(freq=15):
     """
     Enable both LOCAL_NED and heading messages to be sent from the autopilot at freqency 'freq'.
@@ -247,6 +241,21 @@ def heading_offset_init():
     pose = get_pose()
     heading_offset = pose[4]
 
+def timesync():
+    """
+    Time synchronization message. The message is used for both timesync requests and responses. The request is sent with ts1=syncing 
+    component timestamp and tc1=0
+    """
+    drone.mav.command_long_send(
+        drone.target_system,
+        drone.target_component,
+        mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL,
+        0,0,                                # tc1, tc2
+        drone.target_system,
+        drone.target_component,
+    )
+
+
 def test(): 
     try:
         # Arbitrary location for EKF Origin
@@ -255,7 +264,7 @@ def test():
         IP = "udpout:192.168.199.51:14550"  # Drone IP
         connect_drone(IP)
         set_ekf_origin(EKF_LAT, EKF_LON, 0)
-        set_mode("GUIDED")
+        set_mode('GUIDED')
         en_pose_stream()
         print("Checking telemetry:")
         # for i in range(20):
@@ -269,35 +278,39 @@ def test():
         """
         Move along a square
 
-        WARNING: Ensure drone has space to move. Note that the movement may not move exactly along a sqaure                 and this will cause the drone to move at an angel. SO DO NOT run both functions unless you                 have tested that the drone will land with an acceptable heading that gives it space for                    another round.
+        WARNING: Ensure drone has lots of  space to move. Note that the movement may not move exactly along a square and this will cause the 
+                 drone to move at an angel. DO NOT run both functions unless you have tested that the drone will land with an acceptable heading'                 that gives it space for another round.
         """
-        def square_pos()
-            send_body_offset_ned_pos(0.5,0)
+        yaw_rate = 0
+        length = 1
+        vel = 
+        def square_pos():
+            send_body_offset_ned_pos(length,0,yaw_rate=yaw_rate)
             time.sleep(2)
-            send_body_offset_ned_pos(0,0.5)
+            send_body_offset_ned_pos(0,length,yaw_rate=yaw_rate)
             time.sleep(2)
-            send_body_offset_ned_pos(-0.5,0)
+            send_body_offset_ned_pos(-length,0,yaw_rate=yaw_rate)
             time.sleep(2)
-            send_body_offset_ned_pos(0,-0.5)
+            send_body_offset_ned_pos(0,-length,yaw_rate=yaw_rate)
             time.sleep(2)
         def square_vel():
-            send_body_offset_ned_vel(0.5,0,duration=1)
+            send_body_offset_ned_vel(0.5,0,duration=1,yaw_rate=yaw_rate)
             time.sleep(2)
-            send_body_offset_ned_pos(0,0.5, duration=1)
+            send_body_offset_ned_vel(0,0.5, duration=1,yaw_rate=yaw_rate)
             time.sleep(2)
-            send_body_offset_ned_pos(-0.5,0,duration=1)
+            send_body_offset_ned_vel(-0.5,0,duration=1,yaw_rate=yaw_rate)
             time.sleep(2)
-            send_body_offset_ned_pos(0,-0.5,duration=1)
+            send_body_offset_ned_vel(0,-0.5,duration=1,yaw_rate=yaw_rate)
             time.sleep(2)
         square_vel()
         print("Landing...")
-        set_mode("LAND")
+        set_mode('LAND')
         
     except:
         print("Emergency")
-        land()
+        set_mode('LAND')
         arm(0) 
  
-if __name__ == "__main__":
+if __name__ == '__main__':
     test()
 

@@ -375,7 +375,7 @@ def main():
             traj_index = max_traj_idx
         elif last_key_pressed == 'c': #end control and land
             print("Pressed c. Ending control.")
-            mav.land()
+            mav.set_mode('LAND')
             break
         # elif last_key_pressed == 'q': #end flight immediately
         #     print("Pressed q. EMERGENCY STOP.")
