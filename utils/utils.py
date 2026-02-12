@@ -28,19 +28,25 @@ import yaml, json
 # from cflib.crazyflie.log import LogConfig
 # from cflib.crazyflie.syncLogger import SyncLogger
 
-# import the mavlink helper script
-import mavlink_control as mav
+import queue, threading                # For bufferless video capture
 
-# For bufferless video capture
-import queue, threading
+"""
+Compute depth from an RGB image using DepthAnythingV2
+Returns depth_numpy (uint16 in mm), depth_colormap (for visualization)
+"""
+def compute_depth(depth_anything, frame, size, make_colormap=True):
+    # Compute depth
+    depth = depth_anything.infer_image(frame, size)  # as torch tensor
+    depth_numpy = np.asarray(depth) # Convert to numpy array
+    depth_numpy = 1000*depth_numpy # Convert to mm
+    depth_numpy = depth_numpy.astype(np.uint16) # Convert to uint16
 
-# DepthAnythingV2 model configurations. You typically only need small or base models
-model_configs = {
-    'vits': {'encoder': 'vits', 'features': 64, 'out_channels': [48, 96, 192, 384]},
-    'vitb': {'encoder': 'vitb', 'features': 128, 'out_channels': [96, 192, 384, 768]},
-    'vitl': {'encoder': 'vitl', 'features': 256, 'out_channels': [256, 512, 1024, 1024]},
-    # 'vitg': {'encoder': 'vitg', 'features': 384, 'out_channels': [1536, 1536, 1536, 1536]}
-}
+    if make_colormap:
+        depth_colormap = cv2.applyColorMap(cv2.convertScaleAbs(depth_numpy, alpha=0.03), cv2.COLORMAP_JET)
+    else:
+        depth_colormap = None
+
+    return depth_numpy, depth_colormap
 
 """
 VoxelBlockGrid class (adapted from Open3D) for ease of initialization and integration.
@@ -261,25 +267,6 @@ def get_drone_pose():
     Hmtrx = np.hstack((R, xyz.reshape(3,1)))
     # return camera position
     return np.vstack((Hmtrx, np.array([0, 0, 0, 1])))
-
-"""
-Compute depth from an RGB image using DepthAnythingV2
-Returns depth_numpy (uint16 in mm), depth_colormap (for visualization)
-"""
-
-def compute_depth(depth_anything, frame, size, make_colormap=True):
-    # Compute depth
-    depth = depth_anything.infer_image(frame, size)  # as torch tensor
-    depth_numpy = np.asarray(depth) # Convert to numpy array
-    depth_numpy = 1000*depth_numpy # Convert to mm
-    depth_numpy = depth_numpy.astype(np.uint16) # Convert to uint16
-
-    if make_colormap:
-        depth_colormap = cv2.applyColorMap(cv2.convertScaleAbs(depth_numpy, alpha=0.03), cv2.COLORMAP_JET)
-    else:
-        depth_colormap = None
-
-    return depth_numpy, depth_colormap
     
 """
 Load the poses (after navigation, for analysis) from the posedir.

@@ -31,7 +31,7 @@ import os
 import open3d as o3d
 import sys
 
-# Add path to DepthAnythingV2
+# Add DepthAnythingV2-metric path
 repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 metric_depth_path = os.path.join(repo_root, 'metric_depth')
 sys.path.insert(0, metric_depth_path)
@@ -46,21 +46,45 @@ from depth_anything_v2.dpt import DepthAnythingV2
 # from cflib.crazyflie.syncCrazyflie import SyncCrazyflie
 # from cflib.utils import uri_helper
 
-import mavlink_control as mav
-
-# Keyboard control
-from pynput import keyboard
+import mavlink_control as mav          # import the mavlink helper script          
+from pynput import keyboard            # Keyboard control
 
 # helper functions
 from utils.utils import *
 
+# LOAD VALUES FROM CONFIG FILE
+config = load_config('config.yml')
+
+INPUT_SIZE = config['INPUT_SIZE']      # Image size
+CHECKPOINT = config['DA2_CHECKPOINT']  # path to checkpoint for DepthAnythingV2
+ENCODER = CHECKPOINT[-8:-3]            # extract encoder type from checkpoint filename (assumes format "DA2_{ENCODER}_checkpoint.pth")  
+MAX_DEPTH = 20
+DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
+
+# DepthAnythingV2 model configurations. You typically only need small or base models
+model_configs = {
+    'vits': {'encoder': 'vits', 'features': 64, 'out_channels': [48, 96, 192, 384]},
+    'vitb': {'encoder': 'vitb', 'features': 128, 'out_channels': [96, 192, 384, 768]},
+    'vitl': {'encoder': 'vitl', 'features': 256, 'out_channels': [256, 512, 1024, 1024]},
+    # 'vitg': {'encoder': 'vitg', 'features': 384, 'out_channels': [1536, 1536, 1536, 1536]}
+}
+
+# Initialize the DepthAnythingV2 model and load the checkpoint
+depth_anything = DepthAnythingV2(**{**model_configs[config['DA2_ENCODER']], 'max_depth': MAX_DEPTH})
+depth_anything.load_state_dict(torch.load(CHECKPOINT, map_location='cpu'))
+depth_anything = depth_anything.to(DEVICE).eval()
+model_device = next(depth_anything.parameters()).device
+
+print(f"[device] torch.cuda.is_available()={torch.cuda.is_available()}")
+print(f"[device] selected DEVICE={DEVICE}, model_device={model_device}")
+if torch.cuda.is_available():
+    print(f"[device] cuda_name={torch.cuda.get_device_name(torch.cuda.current_device())}")
+if model_device.type != 'cuda' and torch.cuda.is_available():
+    print("[warning] CUDA is available but model is not on CUDA.")
+
 # GLOBAL VARIABLES
 last_key_pressed = None  # store the last key pressed
 shouldStop = False
-
-# LOAD VALUES FROM CONFIG FILE
-CONFIG_PATH = 'config.yml'
-config = load_config('config.yml')
 
 # URI = uri_helper.uri_from_env(default=config['radio_uri'])
 # logging.basicConfig(level=logging.ERROR)
@@ -91,25 +115,8 @@ kinect = o3d.camera.PinholeCameraIntrinsic(o3d.camera.PinholeCameraIntrinsicPara
 # zoe = model_zoe.to(DEVICE)
 
 STREAM_URL = config['camera_ip']       # YOUR ESP32 HTTP MJPEG stream
-INPUT_SIZE = config['INPUT_SIZE']      # Image size
-CHECKPOINT = config['DA2_CHECKPOINT']  # path to checkpoint for DepthAnythingV2
-ENCODER = CHECKPOINT[-8:-3]             # extract encoder type from checkpoint filename (assumes format "DA2_{ENCODER}_checkpoint.pth")  
-MAX_DEPTH = 20
-GRAYSCALE = False
-DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 #OUTDIR = './esp32_depth'
 #os.makedirs(OUTDIR, exist_ok=True)
-
-depth_anything = DepthAnythingV2(**{**model_configs[config['DA2_ENCODER']], 'max_depth': MAX_DEPTH})
-depth_anything.load_state_dict(torch.load(CHECKPOINT, map_location='cpu'))
-depth_anything = depth_anything.to(DEVICE).eval()
-model_device = next(depth_anything.parameters()).device
-print(f"[device] torch.cuda.is_available()={torch.cuda.is_available()}")
-print(f"[device] selected DEVICE={DEVICE}, model_device={model_device}")
-if torch.cuda.is_available():
-    print(f"[device] cuda_name={torch.cuda.get_device_name(torch.cuda.current_device())}")
-if model_device.type != 'cuda' and torch.cuda.is_available():
-    print("[warning] CUDA is available but model is not on CUDA.")
 
 # Initialize VoxelBlockGrid
 depth_scale = config['VoxelBlockGrid']['depth_scale']
@@ -179,20 +186,18 @@ def main():
     # Run the depth model a few times (the first inference is slow), and skip the first few frames
     cap = VideoCapture(STREAM_URL)
     for i in range(0, config['num_pre_depth_frames']):
-        rgb = cap.read()
+        bgr = cap.read()
         # COMPUTE DEPTH
         start_time_test = time.time()
-        depth_numpy, depth_colormap = compute_depth(depth_anything, rgb, INPUT_SIZE)
+        depth_numpy, depth_colormap = compute_depth(depth_anything, bgr, INPUT_SIZE)
         print("TIME TO COMPUTE DEPTH:",time.time()-start_time_test)
-        cv2.imshow("frame", rgb)
+        cv2.imshow("frame", bgr)
         cv2.waitKey(1)
     cv2.destroyAllWindows()
 
     # CRAZYFLIE CONTROL
     # Initialize the low-level drivers
     #cflib.crtp.init_drivers()
-
-
 
     # with SyncCrazyflie(URI, cf=Crazyflie(rw_cache='./cache')) as scf:
     #     cf = scf.cf
@@ -385,7 +390,7 @@ def main():
             start_time = time.time()
             while time.time() - start_time < period:
                 if FLY_VEHICLE:
-                    mav.send_body_offset_ned_vel_once(0, 0, 0, yaw_rate=0)
+                    mav.send_body_offset_ned_vel(0, 0, 0, yaw_rate=0)
                 idle_bgr = cap.read()
                 cv2.imshow("frame", idle_bgr)
                 cv2.waitKey(1)
@@ -434,7 +439,7 @@ def main():
             # kinect_bgr = cv2.cvtColor(kinect_rgb, cv2.COLOR_RGB2BGR)
             # compute depth
             depth_start = time.time()
-            depth_numpy, depth_colormap = compute_dezpth(
+            depth_numpy, depth_colormap = compute_depth(
                 depth_anything,
                 bgr,
                 INPUT_SIZE,

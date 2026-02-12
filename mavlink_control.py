@@ -117,7 +117,7 @@ def takeoff(target_alt):
             break
         time.sleep(0.1)
 
-def send_body_offset_ned_vel(vx, vy, vz=0, duration=0, yaw=0, yaw_rate = 0):
+def send_body_offset_ned_vel(vx, vy, vz=0, yaw_rate = 0):
     """
     Send velocity in BODY_NED frame (forward/back,left/right,up/down).
     Not absolute NED, but with respect to the drone's current heading.
@@ -304,6 +304,7 @@ def test():
         length = 1
         vel = 0.5 
         duration = length/vel
+        period = 1
         def square_pos():
             send_body_offset_ned_pos(length,0)
             time.sleep(5)
@@ -325,7 +326,7 @@ def test():
         #square_vel()
         start=time.time()
         while time.time() - start < 2:
-            send_body_offset_ned_vel(0.5, 0, yaw_rate=6*np.sin(np.pi/1*(time.time() - start)))
+            send_body_offset_ned_vel(0.5, 0, yaw_rate=6*np.sin(np.pi/period*(time.time() - start)))
             time.sleep(0.1)
         print("Landing...")
         set_mode('LAND')

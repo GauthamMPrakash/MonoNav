@@ -5,13 +5,13 @@ save_dir_prefix: 'data/mononav-'
 camera_num: 0                        # camera number index (test with utils/test_camera.py), try (-1, 0, 1, 2, ...)
 camera_source: 'esp32-cam'                                        # used for naming files
 camera_calibration_path: 'utils/calibration/demo_intrinsics.json' # camera calibration file (for undistortion)
-camera_ip: 'http://10.208.153.56:81/stream'                        # IP camera stream URL (if using an IP camera, otherwise leave blank)   
+camera_ip: 'http://10.208.153.56:81/stream'                       # IP camera stream URL (if using an IP camera, otherwise leave blank)   
 
-# ZoeDepth Settings
+# Depth Model Settings
 # zoedepth_mode: "eval" # "eval" or "infer" - see ZoeDepth documentation for other settings
 num_pre_depth_frames: 5       # how many times to run the depth model before starting (the first few inferences are much slower)
 # DA2_ENCODER: 'vitb'         # which encoder to use for DepthAnythingV2, options are 'vits', 'vitb', 'vitl', 'vitg'
-INPUT_SIZE: 252               # input and output size for DepthAnythingV2
+INPUT_SIZE: 238               # Multiple of 14. Scales the image by INPUT_SIZE/smaller image dimension
 DA2_CHECKPOINT: "checkpoints/depth_anything_v2_metric_hypersim_vitb.pth" # path to checkpoint for DepthAnythingV2, make sure it matches the encoder you choose
 PRINT_TIMING: True            # print per-frame timing breakdown (capture, pose, depth, fuse, save)
 LOG_EVERY_N_FRAMES: 15        # reduce stdout overhead by printing timing every N frames
@@ -50,7 +50,7 @@ min_dist2goal: 0.3            # termination condition for reaching the goal, met
 # IP and port of the telemetry module on the drone. Set appropriate connection strings.
 # Replace with serial port name (ex: 'COM9') if using serial telemetry on the PC
 IP: "udpout:10.208.153.51:14550" 
-baud: 115200               # Set baud, only for serial telemetry
+baud: 115200               # Set baud, only required for serial telemetry
 height: 1.0                # flight altitude, meters
 
 # Arbitrary EKF origin
