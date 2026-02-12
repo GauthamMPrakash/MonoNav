@@ -80,7 +80,9 @@ class VideoCapture:
 
   def __init__(self, name):
     self.cap = cv2.VideoCapture(name)
-    self.q = queue.Queue()
+    self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+    self.q = queue.Queue(maxsize=1)
+    self.last_frame = None
     t = threading.Thread(target=self._reader)
     t.daemon = True
     t.start()
@@ -91,15 +93,21 @@ class VideoCapture:
       ret, frame = self.cap.read()
       if not ret:
         break
-      if not self.q.empty():
+      self.last_frame = frame
+      if self.q.full():
         try:
           self.q.get_nowait()   # discard previous (unprocessed) frame
         except queue.Empty:
           pass
-      self.q.put(frame)
+      self.q.put_nowait(frame)
 
-  def read(self):
-    return self.q.get()
+  def read(self, timeout=1.0):
+    try:
+      return self.q.get(timeout=timeout)
+    except queue.Empty:
+      if self.last_frame is not None:
+        return self.last_frame
+      raise RuntimeError("VideoCapture timeout: no frame available")
 
 # Author: MiniMax
 """
@@ -251,15 +259,17 @@ Compute depth from an RGB image using DepthAnythingV2
 Returns depth_numpy (uint16 in mm), depth_colormap (for visualization)
 """
 
-def compute_depth(depth_anything, frame, size):
+def compute_depth(depth_anything, frame, size, make_colormap=True):
     # Compute depth
     depth = depth_anything.infer_image(frame, size)  # as torch tensor
     depth_numpy = np.asarray(depth) # Convert to numpy array
     depth_numpy = 1000*depth_numpy # Convert to mm
     depth_numpy = depth_numpy.astype(np.uint16) # Convert to uint16
 
-    # Save images and depth array
-    depth_colormap = cv2.applyColorMap(cv2.convertScaleAbs(depth_numpy, alpha=0.03), cv2.COLORMAP_JET)
+    if make_colormap:
+        depth_colormap = cv2.applyColorMap(cv2.convertScaleAbs(depth_numpy, alpha=0.03), cv2.COLORMAP_JET)
+    else:
+        depth_colormap = None
 
     return depth_numpy, depth_colormap
     

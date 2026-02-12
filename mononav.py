@@ -70,6 +70,11 @@ FLY_VEHICLE = config['FLY_VEHICLE']
 baud = config['baud']
 EKF_LAT = config['EKF_LAT']
 EKF_LON = config['EKF_LON']
+SAVE_FRAME_DATA = config.get('SAVE_FRAME_DATA', False)
+SAVE_EVERY_N = max(1, int(config.get('SAVE_EVERY_N', 1)))
+INTEGRATE_EVERY_N = max(1, int(config.get('INTEGRATE_EVERY_N', 1)))
+PRINT_TIMING = config.get('PRINT_TIMING', True)
+LOG_EVERY_N_FRAMES = max(1, int(config.get('LOG_EVERY_N_FRAMES', 15)))
 
 # Camera Settings for Undistortion
 camera_num = config['camera_num']
@@ -94,7 +99,6 @@ GRAYSCALE = False
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 #OUTDIR = './esp32_depth'
 #os.makedirs(OUTDIR, exist_ok=True)
-cmap = matplotlib.colormaps.get_cmap('Spectral')
 
 model_configs = {
         'vits': {'encoder': 'vits', 'features': 64, 'out_channels': [48, 96, 192, 384]},
@@ -106,6 +110,13 @@ model_configs = {
 depth_anything = DepthAnythingV2(**{**model_configs[config['DA2_ENCODER']], 'max_depth': MAX_DEPTH})
 depth_anything.load_state_dict(torch.load(CHECKPOINT, map_location='cpu'))
 depth_anything = depth_anything.to(DEVICE).eval()
+model_device = next(depth_anything.parameters()).device
+print(f"[device] torch.cuda.is_available()={torch.cuda.is_available()}")
+print(f"[device] selected DEVICE={DEVICE}, model_device={model_device}")
+if torch.cuda.is_available():
+    print(f"[device] cuda_name={torch.cuda.get_device_name(torch.cuda.current_device())}")
+if model_device.type != 'cuda' and torch.cuda.is_available():
+    print("[warning] CUDA is available but model is not on CUDA.")
 
 # Initialize VoxelBlockGrid
 depth_scale = config['VoxelBlockGrid']['depth_scale']
@@ -342,9 +353,9 @@ def main():
     frame_number = 0
     start_flight_time = time.time()
 
+    mav.connect_drone(IP, baud=baud)
+    mav.set_ekf_origin(EKF_LAT, EKF_LON, 0)
     if FLY_VEHICLE:
-        mav.connect_drone(IP, baud=baud)
-        mav.set_ekf_origin(EKF_LAT, EKF_LON, 0)
         mav.set_mode("GUIDED")
         time.sleep(0.5)
         mav.arm()
@@ -358,20 +369,16 @@ def main():
 #   start_time = time.time() # seconds
 
     while not shouldStop:
-        cv2.imshow("frame", cap.read())
+        preview_bgr = cap.read()
+        cv2.imshow("frame", preview_bgr)
         cv2.waitKey(1)
-        print("shouldStop: ", shouldStop)
         if last_key_pressed == 'a':
-            print("Pressed a. Going left.")
             traj_index = 0 # left
         elif last_key_pressed == 'w':
-            print("Pressed w. Going straight.")
             traj_index = int(len(traj_list)/2) # straight
         elif last_key_pressed == 'd':
-            print("Pressed d. Going right.")
             traj_index = len(traj_list)-1 # right
-        if last_key_pressed == 'g':
-            print("Pressed g. Using MonoNav.")
+        elif last_key_pressed == 'g':
             traj_index = max_traj_idx
         elif last_key_pressed == 'c': #end control and land
             print("Pressed c. Ending control.")
@@ -381,14 +388,16 @@ def main():
         #     print("Pressed q. EMERGENCY STOP.")
         #     cf.commander.send_stop_setpoint()
         #     break
-        # else:
-        #     print("Else: Staying put.")
-        #     start_time = time.time()
-        #     while time.time() - start_time < period:
-        #         if FLY_VEHICLE:
-        #             cf.commander.send_hover_setpoint(0, 0, 0, height)
-        #         time.sleep(0.1)
-        #     continue
+        else:
+            start_time = time.time()
+            while time.time() - start_time < period:
+                if FLY_VEHICLE:
+                    mav.send_body_offset_ned_vel_once(0, 0, 0, yaw_rate=0)
+                idle_bgr = cap.read()
+                cv2.imshow("frame", idle_bgr)
+                cv2.waitKey(1)
+                time.sleep(0.1)
+            continue
         
         # Save trajectory information
         row = np.array([frame_number, int(max_traj_idx), time.time()-start_flight_time]) # time since start of flight
@@ -403,17 +412,24 @@ def main():
             yawrate = amplitudes[traj_index]*np.sin(np.pi/period*(time.time() - start_time)) # rad/s
             # yvel = yawrate*config['yvel_gain']
             # yawrate = yawrate*config['yawrate_gain']
-            print("last_key_pressed = ", last_key_pressed)
             if FLY_VEHICLE:
                 #cf.commander.send_hover_setpoint(forward_speed, yvel, yawrate, height)
-                mav.send_body_offset_ned_pos_vel(forward_speed, 0, 0, yaw_rate = yawrate)
+                mav.send_body_offset_ned_vel_once(forward_speed, 0, 0, yaw_rate=yawrate)
             # get camera capture and transform intrinsics
             # rgb = cap.read()
+            frame_start = time.time()
             bgr = cap.read()
+            cv2.imshow("frame", bgr)
+            cv2.waitKey(1)
+            capture_dt = time.time() - frame_start
+
+            pose_start = time.time()
             camera_position = get_drone_pose() # get camera position immediately
+            pose_dt = time.time() - pose_start
             if goal_position is not None:
                 dist_to_goal = np.linalg.norm(camera_position[0:-1, -1]-goal_position[0])
-                print("dist_to_goal: ", dist_to_goal)
+                if PRINT_TIMING and (frame_number % LOG_EVERY_N_FRAMES == 0):
+                    print(f"[goal] dist_to_goal={dist_to_goal:.3f} m")
                 if dist_to_goal < min_dist2goal:
                     print("Reached goal!")
                     shouldStop = True
@@ -421,20 +437,47 @@ def main():
                     break
             # Transform Camera Image to Kinect Image
             # kinect_rgb = transform_image(np.asarray(rgb), mtx, dist, kinect)
-            kinect_rgb = transform_image(np.asarray(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)), mtx, dist, kinect)
+            kinect_rgb = None
             # kinect_bgr = cv2.cvtColor(kinect_rgb, cv2.COLOR_RGB2BGR)
             # compute depth
-            depth_numpy, depth_colormap = compute_depth(depth_anything, bgr, INPUT_SIZE)
+            depth_start = time.time()
+            depth_numpy, depth_colormap = compute_depth(
+                depth_anything,
+                bgr,
+                INPUT_SIZE,
+                make_colormap=(SAVE_FRAME_DATA and (frame_number % SAVE_EVERY_N == 0))
+            )
+            depth_dt = time.time() - depth_start
 
             # SAVE DATA TO FILE
-            cv2.imwrite(img_dir + '/frame-%06d.rgb.jpg'%(frame_number), rgb)
-            cv2.imwrite(kinect_img_dir + '/kinect_frame-%06d.rgb.jpg'%(frame_number), kinect_rgb)
-            cv2.imwrite(kinect_depth_dir + '/' + 'kinect_frame-%06d.depth.jpg'%(frame_number), depth_colormap)
-            np.save(kinect_depth_dir + '/' + 'kinect_frame-%06d.depth.npy'%(frame_number), depth_numpy) # saved in meters
-            np.savetxt(pose_dir + '/frame-%06d.pose.txt'%(frame_number), camera_position)
+            save_dt = 0.0
+            if SAVE_FRAME_DATA and (frame_number % SAVE_EVERY_N == 0):
+                save_start = time.time()
+                rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+                kinect_rgb = transform_image(np.asarray(rgb), mtx, dist, kinect)
+                cv2.imwrite(img_dir + '/frame-%06d.rgb.jpg'%(frame_number), bgr)
+                cv2.imwrite(kinect_img_dir + '/kinect_frame-%06d.rgb.jpg'%(frame_number), kinect_rgb)
+                if depth_colormap is not None:
+                    cv2.imwrite(kinect_depth_dir + '/' + 'kinect_frame-%06d.depth.jpg'%(frame_number), depth_colormap)
+                np.save(kinect_depth_dir + '/' + 'kinect_frame-%06d.depth.npy'%(frame_number), depth_numpy) # saved in meters
+                np.savetxt(pose_dir + '/frame-%06d.pose.txt'%(frame_number), camera_position)
+                save_dt = time.time() - save_start
             
             # integrate the vbg (prefers bgr)
-            vbg.integration_step(bgr, depth_numpy, camera_position)
+            fuse_dt = 0.0
+            if frame_number % INTEGRATE_EVERY_N == 0:
+                fuse_start = time.time()
+                vbg.integration_step(bgr, depth_numpy, camera_position)
+                fuse_dt = time.time() - fuse_start
+
+            if PRINT_TIMING and (frame_number % LOG_EVERY_N_FRAMES == 0):
+                total_dt = time.time() - frame_start
+                fps = 1.0 / max(total_dt, 1e-6)
+                print(
+                    f"[timing] cap={capture_dt:.3f}s pose={pose_dt:.3f}s "
+                    f"depth={depth_dt:.3f}s fuse={fuse_dt:.3f}s save={save_dt:.3f}s "
+                    f"loop={total_dt:.3f}s ({fps:.2f} FPS)"
+                )
 
             frame_number += 1
         traj_counter += 1
