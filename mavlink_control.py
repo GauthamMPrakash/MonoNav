@@ -7,7 +7,7 @@ Also provides functions to receive pose data from the copter.
 """
 
 from pymavlink import mavutil
-from numpy import pi
+import numpy as np
 import time
 import threading
 
@@ -117,44 +117,22 @@ def takeoff(target_alt):
             break
         time.sleep(0.1)
 
-def send_body_offset_ned_vel(vx, vy, vz=0, duration=0, yaw_rate = 0):
+def send_body_offset_ned_vel(vx, vy, vz=0, duration=0, yaw=0, yaw_rate = 0):
     """
     Send velocity in BODY_NED frame (forward/back,left/right,up/down).
     Not absolute NED, but with respect to the drone's current heading.
     """
     type_mask = 0b010111000111  # use velocity only
     printd(f"Sending BODY_NED velocity vx={vx}, vy={vy}, vz={vz} for {duration}s")
-    start = time.time()
-    while time.time() - start < duration:
-        drone.mav.set_position_target_local_ned_send(
-            0,
-            drone.target_system,
-            drone.target_component,
-            mavutil.mavlink.MAV_FRAME_BODY_OFFSET_NED,
-            type_mask,
-            0,0,0,     # pos ignored
-            vx,vy,vz,  # velocity
-            0,0,0,     # acceleration ignored
-            0,         # yaw ignored
-            yaw_rate
-        )
-        time.sleep(0.1)
-
-def send_body_offset_ned_vel_once(vx, vy, vz=0, yaw_rate=0):
-    """
-    Send one BODY_NED velocity setpoint packet (non-blocking).
-    Useful for high-rate control loops that call this every iteration.
-    """
-    type_mask = 0b010111000111  # use velocity only
     drone.mav.set_position_target_local_ned_send(
         0,
         drone.target_system,
         drone.target_component,
         mavutil.mavlink.MAV_FRAME_BODY_OFFSET_NED,
         type_mask,
-        0, 0, 0,   # pos ignored
-        vx, vy, vz,
-        0, 0, 0,   # acceleration ignored
+        0,0,0,     # pos ignored
+        vx,vy,vz,  # velocity
+        0,0,0,     # acceleration ignored
         0,         # yaw ignored
         yaw_rate
     )
@@ -164,7 +142,7 @@ def send_body_offset_ned_pos(x, y, z=0, speed=0, yaw=0, yaw_rate = 0):
     Send velocity in BODY_NED frame (forward/back, left/right, up/down).
     The local origin is not the EKF origin, but rather with respect to the current position and heading of the drone.
     """
-    type_mask = 0b010111000000
+    type_mask = 0b000111000000
     vx = speed if x > 0 else -speed if x < 0 else 0
     vy = speed if y > 0 else -speed if y < 0 else 0 
     
@@ -178,7 +156,7 @@ def send_body_offset_ned_pos(x, y, z=0, speed=0, yaw=0, yaw_rate = 0):
         x,y,z,     # pos
         vx,vy,0,   # velocity
         0,0,0,     # acceleration ignored
-        yaw,         # yaw
+        yaw,       
         yaw_rate   
     )
 
@@ -238,9 +216,9 @@ def get_pose(blocking=False):
     """
     global time_boot, x, y, z, roll, pitch, yaw
     while True:
-        msg = drone.recv_match(type=["LOCAL_POSITION_NED", "ATTITUDE"], blocking=False)
+        msg = drone.recv_match(type=["LOCAL_POSITION_NED", "ATTITUDE"], blocking=blocking, timeout=0.2)
         
-        if not msg or msg.get_type == "BAD_DATA":
+        if not msg or msg.get_type() == "BAD_DATA":
             break
 
         else:    
@@ -260,38 +238,59 @@ def heading_offset_init():
     pose = get_pose()
     heading_offset = pose[4]
 
-def timesync():
+def timesync(timeout_s=0.5):
     """
-    Time synchronization message. The message is used for both timesync requests and responses. The request is sent with ts1=syncing 
-    component timestamp and tc1=0
+    Send a TIMESYNC request, wait for the matching reply, and return the clock offset.
+
+    Returns:
+        offset_ns (int): Estimated AP-local offset in nanoseconds.
+                 AP time ~= local_time + offset_ns
+                 local_time ~= AP time - offset_ns
+        None: If no matching reply is received before timeout.
     """
-    drone.mav.command_long_send(
-        drone.target_system,
-        drone.target_component,
-        mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL,
-        0,0,                                # tc1, tc2
-        drone.target_system,
-        drone.target_component,
+    t1_ns = time.monotonic_ns()
+    drone.mav.timesync_send(
+        0,      # tc1=0 indicates request
+        t1_ns   # ts1 = local timestamp (ns)
     )
 
+    deadline = time.monotonic() + timeout_s
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return None
+
+        msg = drone.recv_match(type='TIMESYNC', blocking=True, timeout=remaining)
+        if msg is None:
+            return None
+
+        if msg.tc1 == 0:
+            continue
+
+        if msg.ts1 != t1_ns:
+            continue
+
+        t4_ns = time.monotonic_ns()
+        local_mid_ns = (t1_ns + t4_ns) // 2
+        offset_ns = msg.tc1 - local_mid_ns
+        return offset_ns
 
 def test(): 
     try:
         # Arbitrary location for EKF Origin
         EKF_LAT = 8.4723591
         EKF_LON = 76.9295203
-        IP = "udpout:10.208.153.51:14550"  # Drone IP
+        IP = "udpout:192.168.199.51:14550"  # Drone IP
         connect_drone(IP)
         set_ekf_origin(EKF_LAT, EKF_LON, 0)
         set_mode('GUIDED')
         en_pose_stream()
-        print("Checking telemetry:")
+        # print("Checking telemetry:")
         # for i in range(20):
         #     print(get_pose()[1:])
         #     time.sleep(0.1)
         arm()
         takeoff(0.7)
-
         set_speed(0.25)
         time.sleep(0.2)
         #send_body_offset_ned_pos_vel(0.7, 0, pos_or_vel="pos", speed=0.3)
@@ -301,35 +300,33 @@ def test():
         WARNING: Ensure drone has lots of  space to move. Note that the movement may not move exactly along a square and this will cause the 
                  drone to move at an angel. DO NOT run both functions unless you have tested that the drone will land with an acceptable heading'                 that gives it space for another round.
         """
-        yaw_rate = 1
-        length = 0.7
-        vel = 0.3
-        duration = 1
+        yaw_rate = 0
+        length = 1
+        vel = 0.5 
+        duration = length/vel
         def square_pos():
-            send_body_offset_ned_pos(length,0,yaw_rate=yaw_rate)
-            time.sleep(2)
-            send_body_offset_ned_pos(0,length,yaw_rate=yaw_rate)
-            time.sleep(2)
-            send_body_offset_ned_pos(-length,0,yaw_rate=yaw_rate)
-            time.sleep(2)
-            send_body_offset_ned_pos(0,-length,yaw_rate=yaw_rate)
-            time.sleep(2)
+            send_body_offset_ned_pos(length,0)
+            time.sleep(5)
+            send_body_offset_ned_pos(0,length)
+            time.sleep(5)
+            send_body_offset_ned_pos(-length,0)
+            time.sleep(5)
+            send_body_offset_ned_pos(0,-length)
+            time.sleep(5)
         def square_vel():
-            send_body_offset_ned_vel(0.5,0,duration=1,yaw_rate=yaw_rate)
-            time.sleep(2)
-            send_body_offset_ned_vel(0,0.5, duration=1,yaw_rate=yaw_rate)
-            time.sleep(2)
-            send_body_offset_ned_vel(-0.5,0,duration=1,yaw_rate=yaw_rate)
-            time.sleep(2)
-            send_body_offset_ned_vel(0,-0.5,duration=1,yaw_rate=yaw_rate)
-            time.sleep(2)
+            send_body_offset_ned_vel(0.5,0,duration=duration)
+            time.sleep(5)
+            send_body_offset_ned_vel(0,0.5, duration=duration)
+            time.sleep(5)
+            send_body_offset_ned_vel(-0.5,0,duration=duration)
+            time.sleep(5)
+            send_body_offset_ned_vel(0,-0.5,duration=duration)
+            time.sleep(5)
         #square_vel()
-        send_body_offset_ned_pos(length,0,0,yaw_rate=0)
-        time.sleep(2)
-        send_body_offset_ned_pos(0,0,0,yaw=90,yaw_rate=1)
-        time.sleep(2)
-        send_body_offset_ned_pos(length,0,0,yaw_rate=0)
-        time.sleep(2)
+        start=time.time()
+        while time.time() - start < 2:
+            send_body_offset_ned_vel(0.5, 0, yaw_rate=6*np.sin(np.pi/1*(time.time() - start)))
+            time.sleep(0.1)
         print("Landing...")
         set_mode('LAND')
         

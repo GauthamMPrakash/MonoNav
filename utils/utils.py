@@ -34,6 +34,14 @@ import mavlink_control as mav
 # For bufferless video capture
 import queue, threading
 
+# DepthAnythingV2 model configurations. You typically only need small or base models
+model_configs = {
+    'vits': {'encoder': 'vits', 'features': 64, 'out_channels': [48, 96, 192, 384]},
+    'vitb': {'encoder': 'vitb', 'features': 128, 'out_channels': [96, 192, 384, 768]},
+    'vitl': {'encoder': 'vitl', 'features': 256, 'out_channels': [256, 512, 1024, 1024]},
+    # 'vitg': {'encoder': 'vitg', 'features': 384, 'out_channels': [1536, 1536, 1536, 1536]}
+}
+
 """
 VoxelBlockGrid class (adapted from Open3D) for ease of initialization and integration.
 You can read more about the VoxelBlockGrid here:

@@ -90,22 +90,15 @@ kinect = o3d.camera.PinholeCameraIntrinsic(o3d.camera.PinholeCameraIntrinsicPara
 # print("Device is: ", DEVICE)
 # zoe = model_zoe.to(DEVICE)
 
-STREAM_URL = config['camera_ip']        # YOUR ESP32 HTTP MJPEG stream
-INPUT_SIZE = config['INPUT_SIZE']       # Image size
-ENCODER = config['DA2_ENCODER']       # must match your checkpoint
-CHECKPOINT = config['DA2_CHECKPOINT'] # path to checkpoint for DepthAnythingV2
+STREAM_URL = config['camera_ip']       # YOUR ESP32 HTTP MJPEG stream
+INPUT_SIZE = config['INPUT_SIZE']      # Image size
+CHECKPOINT = config['DA2_CHECKPOINT']  # path to checkpoint for DepthAnythingV2
+ENCODER = CHECKPOINT[-8:-3]             # extract encoder type from checkpoint filename (assumes format "DA2_{ENCODER}_checkpoint.pth")  
 MAX_DEPTH = 20
 GRAYSCALE = False
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 #OUTDIR = './esp32_depth'
 #os.makedirs(OUTDIR, exist_ok=True)
-
-model_configs = {
-        'vits': {'encoder': 'vits', 'features': 64, 'out_channels': [48, 96, 192, 384]},
-        'vitb': {'encoder': 'vitb', 'features': 128, 'out_channels': [96, 192, 384, 768]},
-        'vitl': {'encoder': 'vitl', 'features': 256, 'out_channels': [256, 512, 1024, 1024]},
-        'vitg': {'encoder': 'vitg', 'features': 384, 'out_channels': [1536, 1536, 1536, 1536]}
-    }
 
 depth_anything = DepthAnythingV2(**{**model_configs[config['DA2_ENCODER']], 'max_depth': MAX_DEPTH})
 depth_anything.load_state_dict(torch.load(CHECKPOINT, map_location='cpu'))
@@ -441,7 +434,7 @@ def main():
             # kinect_bgr = cv2.cvtColor(kinect_rgb, cv2.COLOR_RGB2BGR)
             # compute depth
             depth_start = time.time()
-            depth_numpy, depth_colormap = compute_depth(
+            depth_numpy, depth_colormap = compute_dezpth(
                 depth_anything,
                 bgr,
                 INPUT_SIZE,
