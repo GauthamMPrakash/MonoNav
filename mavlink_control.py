@@ -9,7 +9,6 @@ Also provides functions to receive pose data from the copter.
 from pymavlink import mavutil
 import numpy as np
 import time
-import threading
 
 FLTMODES = {"GUIDED": 4, "LOITER":5, "LAND":9, "BRAKE":17}
 time_boot, x, y, z, roll, pitch, yaw = 0, 0, 0, 0, 0, 0, 0
@@ -244,61 +243,53 @@ def heading_offset_init():
     """
     pose = get_pose()
     heading_offset = pose[4]
-
+    
 def timesync(timeout_s=0.5):
     """
-    Send a TIMESYNC request, wait for the matching reply, and return the clock offset.
-
-    Returns:
-        offset_ns (int): Estimated AP-local offset in nanoseconds.
-                 AP time ~= local_time + offset_ns
-                 local_time ~= AP time - offset_ns
-        None: If no matching reply is received before timeout.
+    Query the autopilot TIMESYNC and return (ap_time_ns, offset_ns).
+    - ap_time_ns: estimated current AP clock (nanoseconds)
+    - offset_ns: ap_time - local_monotonic_midpoint
+    Returns (None, None) on timeout/failure.
+    Requires a global `drone` mavlink connection.
     """
     t1_ns = time.monotonic_ns()
-    drone.mav.timesync_send(
-        0,      # tc1=0 indicates request
-        t1_ns   # ts1 = local timestamp (ns)
-    )
-
+    drone.mav.timesync_send(0, t1_ns)
     deadline = time.monotonic() + timeout_s
     while True:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            return None
-
+            return None, None
         msg = drone.recv_match(type='TIMESYNC', blocking=True, timeout=remaining)
         if msg is None:
-            return None
-
+            return None, None
         if msg.tc1 == 0:
             continue
-
         if msg.ts1 != t1_ns:
             continue
-
         t4_ns = time.monotonic_ns()
         local_mid_ns = (t1_ns + t4_ns) // 2
-        offset_ns = msg.tc1 - local_mid_ns
-        return offset_ns
-
+        offset_ns = int(msg.tc1 - local_mid_ns)
+        ap_ns = int(time.monotonic_ns() + offset_ns)
+        return ap_ns, offset_ns
+    
 def test(): 
     try:
         # Arbitrary location for EKF Origin
         EKF_LAT = 8.4723591
         EKF_LON = 76.9295203
-        IP = "udpout:10.208.153.51:14550"  # Drone IP
+        IP = "udpout:192.168.53.51:14550"  # Drone IP
         connect_drone(IP)
         set_ekf_origin(EKF_LAT, EKF_LON, 0)
         set_mode('GUIDED')
         en_pose_stream()
-        # print("Checking telemetry:")
-        # for i in range(20):
-        #     print(get_pose()[1:])
-        #     time.sleep(0.1)
-        arm()
-        takeoff(0.7)
-
+        print("Checking telemetry:")
+        for i in range(20):
+            print(get_pose()[1:])
+            time.sleep(0.1)
+        print("Timesync offset:", timesync())
+        #arm()
+        print(get_ap_time_ns())
+        takeoff(1)
         set_speed(0.25)
         time.sleep(0.2)
         #send_body_offset_ned_pos_vel(0.7, 0, pos_or_vel="pos", speed=0.3)
@@ -330,19 +321,14 @@ def test():
             time.sleep(2)
             send_body_offset_ned_vel(0, -0.5, yaw_rate=yaw_rate)
             time.sleep(2)
-        #square_vel()
-        send_body_offset_ned_pos(length, 0, 0, yaw_rate=0)
-        time.sleep(2)
-        send_body_offset_ned_pos(0, 0, 0, yaw=90, yaw_rate=1)
-        time.sleep(2)
-        send_body_offset_ned_pos(length, 0, 0, yaw_rate=0)
-        time.sleep(2)
+        square_pos()
         print("Landing...")
         set_mode('LAND')
         
-    except:
-        print("Emergency")
+    except Exception as e:
         set_mode('LAND')
+        print("Emergency")
+        print("Exception occurred:", e)
         arm(0) 
  
 if __name__ == '__main__':
