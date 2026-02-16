@@ -233,7 +233,7 @@ def get_pose(blocking=False):
                 time_boot, x, y, z = msg.time_boot_ms, msg.x, msg.y, msg.z
                 
             elif msg.get_type() == "ATTITUDE":
-                roll, pitch, yaw = msg.roll*180/pi, msg.pitch*180/pi, msg.yaw*180/pi
+                roll, pitch, yaw = msg.roll*180/np.pi, msg.pitch*180/np.pi, msg.yaw*180/np.pi
     return time_boot, x, y, z, yaw, pitch, roll
 
 def heading_offset_init():

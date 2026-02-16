@@ -5,7 +5,7 @@ save_dir_prefix: 'data/mononav-'
 camera_num: 0                        # camera number index (test with utils/test_camera.py), try (-1, 0, 1, 2, ...)
 camera_source: 'esp32-cam'                                        # used for naming files
 camera_calibration_path: 'utils/calibration/intrinsics.json' # camera calibration file (for undistortion)
-camera_ip: 'http://10.208.153.56:81/stream'                        # IP camera stream URL (if using an IP camera, otherwise leave blank)
+camera_ip: 'http://10.42.0.29:81/stream'                        # IP camera stream URL (if using an IP camera, otherwise leave blank)
 
 # Depth Model Settings
 # zoedepth_mode: "eval" # "eval" or "infer" - see ZoeDepth documentation for other settings
@@ -48,7 +48,7 @@ min_dist2goal: 0.3            # termination condition for reaching the goal, met
 
 # IP and port of the telemetry module on the drone. Set appropriate connection strings.
 # Replace with serial port name (ex: 'COM9') if using serial telemetry on the PC
-IP: "udpout:10.208.153.51:14550"
+IP: "udpout:10.42.0.110:14550"
 baud: 115200               # Set baud, only for serial telemetry
 height: 1.0                # flight altitude, meters
 

@@ -28,6 +28,8 @@ import yaml, json
 # from cflib.crazyflie.log import LogConfig
 # from cflib.crazyflie.syncLogger import SyncLogger
 
+import mavlink_control as mav
+
 import queue, threading                # For bufferless video capture
 
 """
