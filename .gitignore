@@ -15,6 +15,8 @@
 /utils/calibration/output/*
 /utils/calibration/undistort_output/*
 
+/checkpoints/
+
 # Byte-compiled / optimized / DLL files
 cache/*
 __pycache__/
