@@ -57,7 +57,7 @@ config = load_config('config.yml')
 
 INPUT_SIZE = config['INPUT_SIZE']      # Image size
 CHECKPOINT = config['DA2_CHECKPOINT']  # path to checkpoint for DepthAnythingV2
-ENCODER = CHECKPOINT[-8:-3]            # extract encoder type from checkpoint filename (assumes format "DA2_{ENCODER}_checkpoint.pth")  
+ENCODER = CHECKPOINT[-8:-4]            # extract encoder type from checkpoint filename (assumes format "DA2_{ENCODER}_checkpoint.pth")  
 MAX_DEPTH = 20
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 
@@ -70,7 +70,7 @@ model_configs = {
 }
 
 # Initialize the DepthAnythingV2 model and load the checkpoint
-depth_anything = DepthAnythingV2(**{**model_configs[config['DA2_ENCODER']], 'max_depth': MAX_DEPTH})
+depth_anything = DepthAnythingV2(**{**model_configs[ENCODER], 'max_depth': MAX_DEPTH})
 depth_anything.load_state_dict(torch.load(CHECKPOINT, map_location='cpu'))
 depth_anything = depth_anything.to(DEVICE).eval()
 model_device = next(depth_anything.parameters()).device
@@ -117,6 +117,7 @@ kinect = o3d.camera.PinholeCameraIntrinsic(o3d.camera.PinholeCameraIntrinsicPara
 STREAM_URL = config['camera_ip']       # YOUR ESP32 HTTP MJPEG stream
 #OUTDIR = './esp32_depth'
 #os.makedirs(OUTDIR, exist_ok=True)
+
 # Initialize VoxelBlockGrid
 depth_scale = config['VoxelBlockGrid']['depth_scale']
 depth_max = config['VoxelBlockGrid']['depth_max']
@@ -376,7 +377,6 @@ def main():
         elif last_key_pressed == 'd':
             traj_index = len(traj_list)-1 # right
         elif last_key_pressed == 'g':
-            print("Pressed g. Using MonoNav.")
             traj_index = max_traj_idx
         elif last_key_pressed == 'c': #end control and land
             print("Pressed c. Ending control.")
@@ -390,20 +390,20 @@ def main():
             start_time = time.time()
             while time.time() - start_time < period:
                 if FLY_VEHICLE:
-                    mav.send_body_offset_ned_vel_once(0, 0, 0, yaw_rate=0)
+                    mav.send_body_offset_ned_vel(0, 0, 0, yaw_rate=0)
                 idle_bgr = cap.read()
                 cv2.imshow("frame", idle_bgr)
                 cv2.waitKey(1)
                 time.sleep(0.1)
             continue
-
+        
         # Save trajectory information
         row = np.array([frame_number, int(max_traj_idx), time.time()-start_flight_time]) # time since start of flight
         with open(save_dir + '/trajectories.csv', 'a') as file:
             np.savetxt(file, row.reshape(1, -1), delimiter=',', fmt='%s')
 
         # Fly the selected trajectory, as applicable.
-        start_time = time.time()
+        start_time = time.time()            
         while time.time() - start_time < period:
             # WARNING: This controller is tuned to work for the Crazyflie 2.1.
             # You must check whether your robot follows the open-loop trajectory.
@@ -412,7 +412,7 @@ def main():
             # yawrate = yawrate*config['yawrate_gain']
             if FLY_VEHICLE:
                 #cf.commander.send_hover_setpoint(forward_speed, yvel, yawrate, height)
-                mav.send_body_offset_ned_vel_once(forward_speed, 0, 0, yaw_rate=yawrate)
+                mav.send_body_offset_ned_vel(forward_speed, 0, yaw_rate=yawrate)
             # get camera capture and transform intrinsics
             # rgb = cap.read()
             frame_start = time.time()
@@ -460,6 +460,7 @@ def main():
                 np.save(kinect_depth_dir + '/' + 'kinect_frame-%06d.depth.npy'%(frame_number), depth_numpy) # saved in meters
                 np.savetxt(pose_dir + '/frame-%06d.pose.txt'%(frame_number), camera_position)
                 save_dt = time.time() - save_start
+            
             # integrate the vbg (prefers bgr)
             fuse_dt = 0.0
             if frame_number % INTEGRATE_EVERY_N == 0:
@@ -494,7 +495,7 @@ def main():
     if FLY_VEHICLE:
         # Stopping sequence
         print("Landing.")
-        mav.land()
+        mav.set_mode('LAND')
         mav.arm(0)
 
     print("Releasing camera capture.")

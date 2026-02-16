@@ -10,7 +10,6 @@ camera_ip: 'http://10.208.153.56:81/stream'                        # IP camera s
 # Depth Model Settings
 # zoedepth_mode: "eval" # "eval" or "infer" - see ZoeDepth documentation for other settings
 num_pre_depth_frames: 5       # how many times to run the depth model before starting (the first few inferences are much slower)
-DA2_ENCODER: 'vitb'           # which encoder to use for DepthAnythingV2, options are 'vits', 'vitb', 'vitl', 'vitg'
 INPUT_SIZE: 238               # Multiple of 14. Scales the image by INPUT_SIZE/smaller image dimension
 DA2_CHECKPOINT: "checkpoints/depth_anything_v2_metric_hypersim_vitb.pth" # path to checkpoint for DepthAnythingV2, make sure it matches the encoder you choose
 PRINT_TIMING: True            # print per-frame timing breakdown (capture, pose, depth, fuse, save)
