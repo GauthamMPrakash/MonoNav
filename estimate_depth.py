@@ -56,7 +56,7 @@ print("Saving Depth images to: ", kinect_depth_dir)
 
 # Load the calibration values
 camera_calibration_path = config["camera_calibration_path"]
-mtx, dist = get_calibration_values(camera_calibration_path)
+mtx, dist, undist_mtx = get_calibration_values(camera_calibration_path)
 # Kinect intrinsic matrix
 kinect = o3d.camera.PinholeCameraIntrinsic(o3d.camera.PinholeCameraIntrinsicParameters.PrimeSenseDefault)
 
@@ -79,7 +79,7 @@ for frame_number in range(0, end_frame):
     # Read in image with Pillow and convert to RGB
     crazyflie_rgb = Image.open(filename)#.convert("RGB")  # load
     # Resize, Undistort, and Warp image to kinect's dimensions and intrinsics
-    kinect_rgb = transform_image(np.asarray(crazyflie_rgb), mtx, dist, kinect)
+    kinect_rgb = transform_image(np.asarray(crazyflie_rgb), mtx, dist, kinect, undist_mtx=undist_mtx)
     kinect_rgb = cv2.cvtColor(kinect_rgb, cv2.COLOR_BGR2RGB)
     # Compute depth
     depth_numpy, depth_colormap = compute_depth(kinect_rgb, zoe)

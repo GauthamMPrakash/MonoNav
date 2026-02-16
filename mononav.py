@@ -42,7 +42,7 @@ from depth_anything_v2.dpt import DepthAnythingV2
 
 # import cflib.crtp
 # from cflib.crazyflie import Crazyflie
-# from cflib.crazyflie.log import LogConfig
+# from cconfig[flib.crazyflie.log import LogConfig
 # from cflib.crazyflie.syncCrazyflie import SyncCrazyflie
 # from cflib.utils import uri_helper
 
@@ -104,7 +104,7 @@ LOG_EVERY_N_FRAMES = max(1, int(config.get('LOG_EVERY_N_FRAMES', 15)))
 camera_num = config['camera_num']
 # Intrinsics for undistortion
 camera_calibration_path = config['camera_calibration_path']
-mtx, dist = get_calibration_values(camera_calibration_path) # for the robot's camera
+mtx, dist, undist_mtx = get_calibration_values(camera_calibration_path) # for the robot's camera
 kinect = o3d.camera.PinholeCameraIntrinsic(o3d.camera.PinholeCameraIntrinsicParameters.PrimeSenseDefault) # for the kinect
 
 # # Initialize Zoedepth Model & Move to device

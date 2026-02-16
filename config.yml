@@ -4,7 +4,7 @@ save_dir_prefix: 'data/mononav-'
 # Camera Settings
 camera_num: 0                        # camera number index (test with utils/test_camera.py), try (-1, 0, 1, 2, ...)
 camera_source: 'esp32-cam'                                        # used for naming files
-camera_calibration_path: 'utils/calibration/demo_intrinsics.json' # camera calibration file (for undistortion)
+camera_calibration_path: 'utils/calibration/intrinsics.json' # camera calibration file (for undistortion)
 camera_ip: 'http://10.208.153.56:81/stream'                        # IP camera stream URL (if using an IP camera, otherwise leave blank)
 
 # Depth Model Settings

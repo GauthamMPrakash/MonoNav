@@ -29,7 +29,7 @@ calibration_files = sorted(calibration_files)
 camera_calibration_path = "intrinsics.json"#os.path.join('../../',config["camera_calibration_path"])
 intrinsic_filename = os.path.basename(camera_calibration_path)
 print("Loading intrinsics from: ", intrinsic_filename)
-mtx, dist = get_calibration_values(camera_calibration_path) # for the robot's camera
+mtx, dist, undist_mtx = get_calibration_values(camera_calibration_path) # for the robot's camera
 # Kinect intrinsic matrix
 kinect = o3d.camera.PinholeCameraIntrinsic(o3d.camera.PinholeCameraIntrinsicParameters.PrimeSenseDefault)
 
@@ -44,6 +44,6 @@ for filename in calibration_files:
     # Read in the image
     img = cv2.imread(os.path.join(calibration_dir, filename))
     # transform
-    transformed_image = transform_image(np.asarray(img), mtx, dist, kinect)
+    transformed_image = transform_image(np.asarray(img), mtx, dist, kinect, undist_mtx=undist_mtx)
     # write image
     cv2.imwrite(os.path.join(transform_dir, filename), transformed_image)
