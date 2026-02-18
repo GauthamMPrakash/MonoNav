@@ -252,7 +252,7 @@ ArduPilot frame: (X, Y, Z) is NORTH EAST DOWN (NED)
 Open3D frame: (X, Y, Z) is RIGHT DOWN FRONT (RDF)
 """
 def get_drone_pose():
-    time_boot, _x, _y, _z, _yaw, _pitch, _roll = mav.get_pose()
+    _x, _y, _z, _yaw, _pitch, _roll = mav.get_pose()
     # Convert position from AP to TSDF frame
     xyz = np.array([_y, _z, _x]) # Convert to TSDF frame
     # Convert rotation from AP to TSDF frame
@@ -407,8 +407,11 @@ def choose_primitive(vbg, camera_position, traj_linesets, goal_position, dist_th
     max_traj_score = -np.inf # track best trajectory
     min_goal_score = np.inf # track proximity to goal
     max_traj_idx = None # track the index of the best trajectory
+    straight_idx = len(traj_linesets) // 2  # index of the straight trajectory
 
-    # iterate over the sorted traj linesets
+    # First pass: collect all safe trajectories (those that clear obstacles)
+    safe_trajectories = []  # list of (traj_idx, nearest_voxel_dist, goal_dist)
+    
     for traj_idx, traj_linset in enumerate(traj_linesets):
         traj_lineset_copy = copy.deepcopy(traj_linset)
         traj_lineset_copy.transform(camera_position) # transform the lineset (copy) to the camera position
@@ -416,23 +419,29 @@ def choose_primitive(vbg, camera_position, traj_linesets, goal_position, dist_th
         tmp = distance.cdist(voxel_coords_numpy, pts, "sqeuclidean") # compute the distance between all voxels and all points in the trajectory
         voxel_idx, pt_idx = np.unravel_index(np.argmin(tmp), tmp.shape) # extract indices of the nearest voxel to and nearest point in the trajectory
         nearest_voxel_dist = np.sqrt(tmp[voxel_idx, pt_idx])
+        
         if nearest_voxel_dist > dist_threshold:
-            # the trajectory meets the dist_threshold criterion
+            # This trajectory is safe (clears obstacles)
             if goal_position is not None:
-                # the trajectory satisfies the dist_threshold; let's compute the goal score
                 tmp_to_goal = distance.cdist(goal_position, pts, "sqeuclidean")
                 dst_to_goal = np.sqrt(np.min(tmp_to_goal))
-                if dst_to_goal < min_goal_score:
-                    # we have a trajectory that gets us closer to the goal
-                    # print("traj %d gets us closer to the goal: %f"%(traj_idx, dst_to_goal))
-                    max_traj_idx = traj_idx
-                    min_goal_score = dst_to_goal
             else:
-                # no goal position, choose the index that maximizes distance from the obstacles
-                if max_traj_score < nearest_voxel_dist:
-                    # we have found a trajectory that gets us closer to goal
-                    max_traj_idx = traj_idx
-                    max_traj_score = nearest_voxel_dist
+                dst_to_goal = None
+            safe_trajectories.append((traj_idx, nearest_voxel_dist, dst_to_goal))
+    
+    # Second pass: select best trajectory among safe ones
+    if len(safe_trajectories) > 0:
+        if goal_position is not None:
+            # Find the minimum goal distance among safe trajectories
+            min_goal_dist = min(t[2] for t in safe_trajectories)
+            # Allow trajectories within 0.5m of the best goal distance (tolerance for preferring straighter paths)
+            goal_tolerance = 0.5
+            candidates = [t for t in safe_trajectories if t[2] <= min_goal_dist + goal_tolerance]
+            # Among candidates, prefer the one closest to straight (index closest to middle)
+            max_traj_idx = min(candidates, key=lambda t: abs(t[0] - straight_idx))[0]
+        else:
+            # No goal position: among safe trajectories, prefer the one closest to straight
+            max_traj_idx = min(safe_trajectories, key=lambda t: abs(t[0] - straight_idx))[0]
 
     if max_traj_idx is None:
         # No trajectory meets the dist_threshold criterion, crazyflie should stop.
