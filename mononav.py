@@ -390,13 +390,14 @@ def main():
         elif last_key_pressed == 'g':
             traj_index = max_traj_idx
         elif last_key_pressed == 'c': #end control and land
-            print("Pressed c. Ending control.")
             mav.set_mode('LAND')
+            print("Pressed c. Ending control.")
             break
-        # elif last_key_pressed == 'q': #end flight immediately
-        #     print("Pressed q. EMERGENCY STOP.")
-        #     cf.commander.send_stop_setpoint()
-        #     break
+        elif last_key_pressed == 'q': #end flight immediately
+            mav.eSTOP()
+            print("Pressed q. EMERGENCY STOP.")
+            # cf.commander.send_stop_setpoint()
+            break
         else:
             start_time = time.time()
             while time.time() - start_time < period:
@@ -419,13 +420,13 @@ def main():
             # WARNING: This controller is tuned to work for the Crazyflie 2.1.
             # You must check whether your robot follows the open-loop trajectory.
             yawrate = amplitudes[traj_index]*np.sin(np.pi/period*(time.time() - start_time)) # rad/s
-            # yvel = yawrate*config['yvel_gain']
-            # yawrate = yawrate*config['yawrate_gain']
+            yvel = yawrate*config['yvel_gain']
+            yawrate = yawrate*config['yawrate_gain']
             if FLY_VEHICLE:
                 #cf.commander.send_hover_setpoint(forward_speed, yvel, yawrate, height)
-                mav.send_body_offset_ned_vel(forward_speed, 0, yaw_rate=yawrate)
+                mav.send_body_offset_ned_vel(forward_speed, yvel, yaw_rate=yawrate)
+
             # get camera capture and transform intrinsics
-            # rgb = cap.read()
             frame_start = time.time()
             bgr = cap.read()
             cv2.imshow("frame", bgr)

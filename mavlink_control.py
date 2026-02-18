@@ -10,7 +10,7 @@ from pymavlink import mavutil
 import numpy as np
 import time
 
-FLTMODES = {"GUIDED": 4, "LOITER":5, "LAND":9, "BRAKE":17}
+FLTMODES = {'GUIDED': 4, 'LOITER':5, 'LAND':9, 'BRAKE':17, 'SmartRTL':21}
 time_boot, x, y, z, roll, pitch, yaw = 0, 0, 0, 0, 0, 0, 0
 heading_offset = 0
 DEBUG = True                                                # Whether to print debug messages
@@ -111,7 +111,7 @@ def takeoff(target_alt):
     # Wait until drone reaches target altitude
     while True:
         msg = drone.recv_match(type="VFR_HUD", blocking=True)
-        if msg.alt >= target_alt * 0.95:
+        if msg.alt > target_alt * 0.95:
             printd("Target altitude reached")
             break
         time.sleep(0.1)
@@ -121,30 +121,32 @@ def send_body_offset_ned_vel(vx, vy, vz=0, yaw_rate=0):
     Send one BODY_NED velocity setpoint packet (non-blocking).
     Useful for high-rate control loops that call this every iteration.
     """
-    type_mask = 0b010111000111  # use velocity only
+
+    printd(f"Sending BODY_NED vel x={x}, y={y}, z={z}")
+    type_mask = 0b010111000111  # use velocity and yaw-rate only
     drone.mav.set_position_target_local_ned_send(
         0,
         drone.target_system,
         drone.target_component,
         mavutil.mavlink.MAV_FRAME_BODY_OFFSET_NED,
         type_mask,
-        0, 0, 0,   # pos ignored
+        0, 0, 0,                # pos ignored
         vx, vy, vz,
-        0, 0, 0,   # acceleration ignored
-        0,         # yaw ignored
+        0, 0, 0,                # acceleration ignored
+        0,                      # yaw ignored
         yaw_rate
     )
 
 def send_body_offset_ned_pos(x, y, z=0, speed=0, yaw=0, yaw_rate=0):
     """
-    Send velocity in BODY_NED frame (forward/back, left/right, up/down).
+    Send position in BODY_NED frame (forward/back, left/right, up/down).
     The local origin is not the EKF origin, but rather with respect to the current position and heading of the drone.
     """
     type_mask = 0b000111000000
     vx = speed if x > 0 else -speed if x < 0 else 0
     vy = speed if y > 0 else -speed if y < 0 else 0 
     
-    #printd(f"Sending BODY_NED pos x={x}, y={y}, z={z}")
+    printd(f"Sending BODY_NED pos x={x}, y={y}, z={z}")
     drone.mav.set_position_target_local_ned_send(
         0,
         drone.target_system,
@@ -221,11 +223,13 @@ def get_pose(blocking=False):
 
         else:    
             if msg.get_type() == "LOCAL_POSITION_NED":
-                time_boot, x, y, z = msg.time_boot_ms, msg.x, msg.y, msg.z
+              # time_boot = msg.time_boot_ms
+                x, y, z = msg.x, msg.y, msg.z
                 
             elif msg.get_type() == "ATTITUDE":
                 roll, pitch, yaw = msg.roll*180/np.pi, msg.pitch*180/np.pi, msg.yaw*180/np.pi
-    return time_boot, x, y, z, yaw, pitch, roll
+    printd(f"x={x} y={y} z={z} yaw={yaw} pitch={pitch} roll={roll}")
+    return x, y, z, yaw, pitch, roll
 
 def heading_offset_init():
     global heading_offset
@@ -235,11 +239,18 @@ def heading_offset_init():
     """
     pose = get_pose()
     heading_offset = pose[4]
-    
+
+def eSTOP():
+    """
+    Emergency Motor stop. DISARMS immediately and causes a hard landing. DO NOT USE unless absolutely necessary.
+    """
+    set_mode('BRAKE')
+    arm(0)
+
 def timesync(timeout_s=0.5):
     """
     Query the autopilot TIMESYNC and return (ap_time_ns, offset_ns).
-    - ap_time_ns: estimated current AP clock (nanoseconds)
+    - ap_ns: estimated current AP clock (nanoseconds)
     - offset_ns: ap_time - local_monotonic_midpoint
     Returns (None, None) on timeout/failure.
     Requires a global `drone` mavlink connection.
@@ -278,9 +289,8 @@ def test():
         for i in range(20):
             print(get_pose()[1:])
             time.sleep(0.1)
-        print("Timesync offset:", timesync())
+        print("AP time, offset:", timesync())
         #arm()
-        print(get_ap_time_ns())
         takeoff(1)
         set_speed(0.25)
         time.sleep(0.2)
@@ -288,8 +298,9 @@ def test():
         """
         Move along a square
 
-        WARNING: Ensure drone has lots of  space to move. Note that the movement may not move exactly along a square and this will cause the 
-                 drone to move at an angel. DO NOT run both functions unless you have tested that the drone will land with an acceptable heading'                 that gives it space for another round.
+        WARNING: Ensure drone has lots of  space to move. Note that the movement may not move exactly along a 
+        square and this will cause the drone to move at an angel. DO NOT run both functions unless you have 
+        tested that the drone will land with an acceptable heading' that gives it space for another round.
         """
         yaw_rate = 1
         length = 0.7
@@ -320,8 +331,7 @@ def test():
     except Exception as e:
         set_mode('LAND')
         print("Emergency")
-        print("Exception occurred:", e)
-        arm(0) 
+        print("Exception occurred:", e) 
  
 if __name__ == '__main__':
     test()

@@ -518,7 +518,7 @@ def transform_image(image, mtx, dist, kinect):
         # Resize image to match the kinect dimensions & new intrinsics
         image = cv2.resize(image, (kinect.width, kinect.height))
     # Transform to the kinect camera matrix
-    transformed_image = cv2.undistort(np.asarray(image), mtx, None, None, kinect.intrinsic_matrix)
+    transformed_image = cv2.undistort(np.asarray(image), mtx, dist, None, kinect.intrinsic_matrix)
     return transformed_image
 
 """

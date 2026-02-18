@@ -55,7 +55,7 @@ def compute_obstacles(depth_numpy):
     for i in range(distances_array_length):
         x_start = i * sector_w
         x_end = (i + 1) * sector_w
-        region = depth_m[lower_bound:H, x_start:x_end]
+        region = depth_numpy[lower_bound:H, x_start:x_end]
 
         valid = region[region > 0.1]
         if valid.size == 0:
