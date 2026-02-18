@@ -24,8 +24,7 @@ dependencies:
     - timm==0.6.12
     - tqdm==4.64.1
     - wandb==0.13.9
-    - cflib==0.1.23 # crazyflie
-    - cfclient==2023.6 # crazyflie
+    - pymavlink==2.4.49 
     - open3d==0.18.0 # mononav
     - Pillow==9.4.0 # mononav 
     - pynput==1.7.6 # mononav
