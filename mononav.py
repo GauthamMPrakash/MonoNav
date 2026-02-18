@@ -491,7 +491,12 @@ def main():
     print("Saving finished")
     print("Visualize raw pointcloud.")
     pcd = vbg.vbg.extract_point_cloud(weight_threshold)
-    o3d.visualization.draw([pcd.cpu()])
+    pcd_cpu = pcd.cpu()
+    # Convert tensor point cloud to legacy for reliable visualization
+    pcd_legacy = pcd_cpu.to_legacy()
+    print(f"Point cloud has {len(pcd_legacy.points)} points")
+    if len(pcd_legacy.points) > 0:
+        o3d.visualization.draw_geometries([pcd_legacy], window_name="MonoNav Reconstruction")
 
 if __name__ == "__main__":
     main()
