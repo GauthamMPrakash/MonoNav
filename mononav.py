@@ -358,12 +358,14 @@ def main():
     #     o3d.visualization.draw([pcd.cpu()])
 
         
+    # ARDUCOPTER CONTROL
+    # Connect to the drone
+    mav.connect_drone(IP, baud=baud)
+    mav.set_ekf_origin(EKF_LAT, EKF_LON, 0)
+
     # Initialize lists and frame counter.
     frame_number = 0
     start_flight_time = time.time()
-
-    mav.connect_drone(IP, baud=baud)
-    mav.set_ekf_origin(EKF_LAT, EKF_LON, 0)
     if FLY_VEHICLE==True:
         mav.set_mode("GUIDED")
         time.sleep(0.1)
@@ -382,12 +384,16 @@ def main():
         cv2.imshow("frame", preview_bgr)
         update_key_from_cv(1)
         if last_key_pressed == 'a':
+            print("Pressed a. Going left.")
             traj_index = 0 # left
         elif last_key_pressed == 'w':
+            print("Pressed w. Going straight.")
             traj_index = int(len(traj_list)/2) # straight
         elif last_key_pressed == 'd':
+            print("Pressed d. Going right.")
             traj_index = len(traj_list)-1 # right
         elif last_key_pressed == 'g':
+            print("Pressed g. Using MonoNav.")
             traj_index = max_traj_idx
         elif last_key_pressed == 'c': #end control and land
             mav.set_mode('LAND')
@@ -399,14 +405,14 @@ def main():
             # cf.commander.send_stop_setpoint()
             break
         else:
-            start_time = time.time()
-            while time.time() - start_time < period:
-                #if FLY_VEHICLE:
-                    # mav.send_body_offset_ned_vel(0, 0, 0, yaw_rate=0) # hover in place
-                # idle_bgr = cap.read()
-                # cv2.imshow("frame", idle_bgr)
-                # cv2.waitKey(1)
-                time.sleep(0.1)
+            # start_time = time.time()
+            # while time.time() - start_time < period:
+            #     #if FLY_VEHICLE:
+            #         # mav.send_body_offset_ned_vel(0, 0, 0, yaw_rate=0) # hover in place
+            #     # idle_bgr = cap.read()
+            #     # cv2.imshow("frame", idle_bgr)
+            #     # cv2.waitKey(1)
+            time.sleep(0.1)
             continue
         
         # Save trajectory information
@@ -417,82 +423,47 @@ def main():
         # Fly the selected trajectory, as applicable.
         start_time = time.time()            
         while time.time() - start_time < period:
-            # WARNING: This controller is tuned to work for the Crazyflie 2.1.
+            # WARNING: This controller is tuned for ArduCopter.
             # You must check whether your robot follows the open-loop trajectory.
             yawrate = amplitudes[traj_index]*np.sin(np.pi/period*(time.time() - start_time)) # rad/s
             yvel = yawrate*config['yvel_gain']
             yawrate = yawrate*config['yawrate_gain']
             if FLY_VEHICLE:
-                #cf.commander.send_hover_setpoint(forward_speed, yvel, yawrate, height)
                 mav.send_body_offset_ned_vel(forward_speed, yvel, yaw_rate=yawrate)
 
             # get camera capture and transform intrinsics
-            frame_start = time.time()
             bgr = cap.read()
             cv2.imshow("frame", bgr)
             update_key_from_cv(1)
-            capture_dt = time.time() - frame_start
-
-            pose_start = time.time()
             camera_position = get_drone_pose() # get camera position immediately
-            pose_dt = time.time() - pose_start
             if goal_position is not None:
                 dist_to_goal = np.linalg.norm(camera_position[0:-1, -1]-goal_position[0])
-                # if PRINT_TIMING and (frame_number % LOG_EVERY_N_FRAMES == 0):
-                #     print(f"[goal] dist_to_goal={dist_to_goal:.3f} m")
                 if dist_to_goal < min_dist2goal:
                     print("Reached goal!")
                     shouldStop = True
                     last_key_pressed = 'c'
                     break
             # Transform Camera Image to Kinect Image
-            # kinect_rgb = transform_image(np.asarray(rgb), mtx, dist, kinect)
-            kinect_rgb = None
-            # kinect_bgr = cv2.cvtColor(kinect_rgb, cv2.COLOR_RGB2BGR)
+            rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+            kinect_rgb = transform_image(np.asarray(rgb), mtx, dist, kinect)
+            kinect_bgr = cv2.cvtColor(kinect_rgb, cv2.COLOR_RGB2BGR)
             # compute depth
-            depth_start = time.time()
-            depth_numpy, depth_colormap = compute_depth(
-                depth_anything,
-                bgr,
-                INPUT_SIZE,
-                make_colormap=(SAVE_FRAME_DATA and (frame_number % SAVE_EVERY_N == 0))
-            )
-            depth_dt = time.time() - depth_start
+            depth_numpy, depth_colormap = compute_depth(depth_anything, bgr, INPUT_SIZE)
 
             # SAVE DATA TO FILE
-            save_dt = 0.0
-            if SAVE_FRAME_DATA and (frame_number % SAVE_EVERY_N == 0):
-                save_start = time.time()
-                rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-                kinect_rgb = transform_image(np.asarray(rgb), mtx, dist, kinect)
-                cv2.imwrite(img_dir + '/frame-%06d.rgb.jpg'%(frame_number), bgr)
-                cv2.imwrite(kinect_img_dir + '/kinect_frame-%06d.rgb.jpg'%(frame_number), kinect_rgb)
-                if depth_colormap is not None:
-                    cv2.imwrite(kinect_depth_dir + '/' + 'kinect_frame-%06d.depth.jpg'%(frame_number), depth_colormap)
-                np.save(kinect_depth_dir + '/' + 'kinect_frame-%06d.depth.npy'%(frame_number), depth_numpy) # saved in meters
-                np.savetxt(pose_dir + '/frame-%06d.pose.txt'%(frame_number), camera_position)
-                save_dt = time.time() - save_start
-            
-            # integrate the vbg (prefers bgr)
-            fuse_dt = 0.0
-            if frame_number % INTEGRATE_EVERY_N == 0:
-                fuse_start = time.time()
-                vbg.integration_step(bgr, depth_numpy, camera_position)
-                fuse_dt = time.time() - fuse_start
+            cv2.imwrite(img_dir + '/frame-%06d.rgb.jpg'%(frame_number), bgr)
+            cv2.imwrite(kinect_img_dir + '/kinect_frame-%06d.rgb.jpg'%(frame_number), kinect_rgb)
+            cv2.imwrite(kinect_depth_dir + '/' + 'kinect_frame-%06d.depth.jpg'%(frame_number), depth_colormap)
+            np.save(kinect_depth_dir + '/' + 'kinect_frame-%06d.depth.npy'%(frame_number), depth_numpy) # saved in meters
+            np.savetxt(pose_dir + '/frame-%06d.pose.txt'%(frame_number), camera_position)
 
-            # if PRINT_TIMING and (frame_number % LOG_EVERY_N_FRAMES == 0):
-            #     total_dt = time.time() - frame_start
-            #     fps = 1.0 / max(total_dt, 1e-6)
-            #     print(
-            #         f"[timing] cap={capture_dt:.3f}s pose={pose_dt:.3f}s "
-            #         f"depth={depth_dt:.3f}s fuse={fuse_dt:.3f}s save={save_dt:.3f}s "
-            #         f"loop={total_dt:.3f}s ({fps:.2f} FPS)"
-            #     )
+            # integrate the vbg (prefers bgr)
+            vbg.integration_step(bgr, depth_numpy, camera_position)
 
             frame_number += 1
         traj_counter += 1
 
-        # if crazyflie is not in "GO" (g) mode, reset to stopping mode
+        # if not in "GO" (g) mode, reset to stopping mode
         if last_key_pressed != 'g':
             last_key_pressed = None
 

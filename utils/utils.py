@@ -335,7 +335,7 @@ def get_traj_linesets(traj_list):
     for traj in traj_list:
         # traj_dict = {key: traj[key] for key in traj.files}
         z_tsdf = traj['x_sample']
-        x_tsdf = -traj['y_sample']
+        x_tsdf = traj['y_sample']
         points = []
         lines = []
         for i in range(len(x_tsdf)):
