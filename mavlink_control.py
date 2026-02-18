@@ -111,12 +111,12 @@ def takeoff(target_alt):
     # Wait until drone reaches target altitude
     while True:
         msg = drone.recv_match(type="VFR_HUD", blocking=True)
-        if msg.alt >= target_alt * 0.98:
+        if msg.alt >= target_alt * 0.95:
             printd("Target altitude reached")
             break
         time.sleep(0.1)
 
-def send_body_offset_ned_vel_once(vx, vy, vz=0, yaw_rate=0):
+def send_body_offset_ned_vel(vx, vy, vz=0, yaw_rate=0):
     """
     Send one BODY_NED velocity setpoint packet (non-blocking).
     Useful for high-rate control loops that call this every iteration.
@@ -135,14 +135,6 @@ def send_body_offset_ned_vel_once(vx, vy, vz=0, yaw_rate=0):
         yaw_rate
     )
 
-def send_body_offset_ned_vel(vx, vy, vz=0, yaw_rate=0):
-    """
-    Send velocity in BODY_NED frame (forward/back,left/right,up/down).
-    Not absolute NED, but with respect to the drone's current heading.
-    """
-    printd(f"Sending BODY_NED velocity vx={vx}, vy={vy}, vz={vz}")
-    send_body_offset_ned_vel_once(vx, vy, vz=vz, yaw_rate=yaw_rate)
-
 def send_body_offset_ned_pos(x, y, z=0, speed=0, yaw=0, yaw_rate=0):
     """
     Send velocity in BODY_NED frame (forward/back, left/right, up/down).
@@ -152,7 +144,7 @@ def send_body_offset_ned_pos(x, y, z=0, speed=0, yaw=0, yaw_rate=0):
     vx = speed if x > 0 else -speed if x < 0 else 0
     vy = speed if y > 0 else -speed if y < 0 else 0 
     
-    printd(f"Sending BODY_NED pos x={x}, y={y}, z={z}")
+    #printd(f"Sending BODY_NED pos x={x}, y={y}, z={z}")
     drone.mav.set_position_target_local_ned_send(
         0,
         drone.target_system,

@@ -173,6 +173,17 @@ def on_press(key):
         last_key_pressed = key.char
     except AttributeError:
         last_key_pressed = key
+
+# Fallback key capture from OpenCV window (useful when pynput can't access keyboard,
+# e.g., running with sudo or headless input devices).
+def update_key_from_cv(wait_ms=1):
+    global last_key_pressed
+    k = cv2.waitKey(wait_ms) & 0xFF
+    if k != 255:
+        try:
+            last_key_pressed = chr(k)
+        except ValueError:
+            pass
 # start keyboard listener
 listener = keyboard.Listener(on_press=on_press)
 listener.start()
@@ -353,9 +364,9 @@ def main():
 
     mav.connect_drone(IP, baud=baud)
     mav.set_ekf_origin(EKF_LAT, EKF_LON, 0)
-    if FLY_VEHICLE:
+    if FLY_VEHICLE==True:
         mav.set_mode("GUIDED")
-        time.sleep(0.5)
+        time.sleep(0.1)
         mav.arm()
         print("Taking off.")
         mav.takeoff(height)
@@ -369,7 +380,7 @@ def main():
     while not shouldStop:
         preview_bgr = cap.read()
         cv2.imshow("frame", preview_bgr)
-        cv2.waitKey(1)
+        update_key_from_cv(1)
         if last_key_pressed == 'a':
             traj_index = 0 # left
         elif last_key_pressed == 'w':
@@ -389,11 +400,11 @@ def main():
         else:
             start_time = time.time()
             while time.time() - start_time < period:
-                if FLY_VEHICLE:
-                    mav.send_body_offset_ned_vel(0, 0, 0, yaw_rate=0)
-                idle_bgr = cap.read()
-                cv2.imshow("frame", idle_bgr)
-                cv2.waitKey(1)
+                #if FLY_VEHICLE:
+                    # mav.send_body_offset_ned_vel(0, 0, 0, yaw_rate=0) # hover in place
+                # idle_bgr = cap.read()
+                # cv2.imshow("frame", idle_bgr)
+                # cv2.waitKey(1)
                 time.sleep(0.1)
             continue
         
@@ -418,7 +429,7 @@ def main():
             frame_start = time.time()
             bgr = cap.read()
             cv2.imshow("frame", bgr)
-            cv2.waitKey(1)
+            update_key_from_cv(1)
             capture_dt = time.time() - frame_start
 
             pose_start = time.time()
@@ -426,12 +437,12 @@ def main():
             pose_dt = time.time() - pose_start
             if goal_position is not None:
                 dist_to_goal = np.linalg.norm(camera_position[0:-1, -1]-goal_position[0])
-                if PRINT_TIMING and (frame_number % LOG_EVERY_N_FRAMES == 0):
-                    print(f"[goal] dist_to_goal={dist_to_goal:.3f} m")
+                # if PRINT_TIMING and (frame_number % LOG_EVERY_N_FRAMES == 0):
+                #     print(f"[goal] dist_to_goal={dist_to_goal:.3f} m")
                 if dist_to_goal < min_dist2goal:
                     print("Reached goal!")
                     shouldStop = True
-                    last_key_pressed = 'q'
+                    last_key_pressed = 'c'
                     break
             # Transform Camera Image to Kinect Image
             # kinect_rgb = transform_image(np.asarray(rgb), mtx, dist, kinect)
@@ -468,14 +479,14 @@ def main():
                 vbg.integration_step(bgr, depth_numpy, camera_position)
                 fuse_dt = time.time() - fuse_start
 
-            if PRINT_TIMING and (frame_number % LOG_EVERY_N_FRAMES == 0):
-                total_dt = time.time() - frame_start
-                fps = 1.0 / max(total_dt, 1e-6)
-                print(
-                    f"[timing] cap={capture_dt:.3f}s pose={pose_dt:.3f}s "
-                    f"depth={depth_dt:.3f}s fuse={fuse_dt:.3f}s save={save_dt:.3f}s "
-                    f"loop={total_dt:.3f}s ({fps:.2f} FPS)"
-                )
+            # if PRINT_TIMING and (frame_number % LOG_EVERY_N_FRAMES == 0):
+            #     total_dt = time.time() - frame_start
+            #     fps = 1.0 / max(total_dt, 1e-6)
+            #     print(
+            #         f"[timing] cap={capture_dt:.3f}s pose={pose_dt:.3f}s "
+            #         f"depth={depth_dt:.3f}s fuse={fuse_dt:.3f}s save={save_dt:.3f}s "
+            #         f"loop={total_dt:.3f}s ({fps:.2f} FPS)"
+            #     )
 
             frame_number += 1
         traj_counter += 1
