@@ -76,7 +76,7 @@ def send_obstacle_distance(depth_numpy):
 
     now_ns = time.monotonic_ns()
     ap_time_ns = now_ns + ap_time_offset_ns
-    time_usec = int(ap_time_ns / 1000)
+    time_usec = int(ap_time_ns * 1000)
 
     conn.mav.obstacle_distance_send(
         time_usec,
@@ -125,4 +125,5 @@ def initialize_mavlink(connection_string, baudrate):
     t.start()
 
     return t
+
 
