@@ -55,8 +55,8 @@ height: 1.0                # flight altitude, meters
 # Arbitrary EKF origin
 EKF_LAT: 8.4723591
 EKF_LON: 76.9295203
-FLY_VEHICLE: False          # whether to actually fly the drone
-forward_speed: 0.3
+FLY_VEHICLE: False         # whether to actually fly the drone
+forward_speed: None        # forward speed in m/s, set to None to use speed defined in generate_primitives.py
 # Control gain settings (YOU MAY NEED TO TUNE THIS YOURSELF)
 yvel_gain: 0.015           # yvel =  -yawrate*yvel_gain  <- for providing sideways velocity so fast drones take a pefect turn. Increase for faster turns.
 yawrate_gain: 1.25         # yawrate = yawrate*yawrate_gain

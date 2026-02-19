@@ -46,7 +46,7 @@ from depth_anything_v2.dpt import DepthAnythingV2
 # from cflib.crazyflie.syncCrazyflie import SyncCrazyflie
 # from cflib.utils import uri_helper
 
-import mavlink_control as mav          # import the mavlink helper script          
+import mavlink_control as mavc         # import the mavlink helper script          
 from pynput import keyboard            # Keyboard control
 
 # helper functions
@@ -94,17 +94,17 @@ FLY_VEHICLE = config['FLY_VEHICLE']
 baud = config['baud']
 EKF_LAT = config['EKF_LAT']
 EKF_LON = config['EKF_LON']
-SAVE_FRAME_DATA = config.get('SAVE_FRAME_DATA', False)
-SAVE_EVERY_N = max(1, int(config.get('SAVE_EVERY_N', 1)))
-INTEGRATE_EVERY_N = max(1, int(config.get('INTEGRATE_EVERY_N', 1)))
-PRINT_TIMING = config.get('PRINT_TIMING', True)
-LOG_EVERY_N_FRAMES = max(1, int(config.get('LOG_EVERY_N_FRAMES', 15)))
+# SAVE_FRAME_DATA = config.get('SAVE_FRAME_DATA', False)
+# SAVE_EVERY_N = max(1, int(config.get('SAVE_EVERY_N', 1)))
+# INTEGRATE_EVERY_N = max(1, int(config.get('INTEGRATE_EVERY_N', 1)))
+# PRINT_TIMING = config.get('PRINT_TIMING', True)
+# LOG_EVERY_N_FRAMES = max(1, int(config.get('LOG_EVERY_N_FRAMES', 15)))
 
 # Camera Settings for Undistortion
 camera_num = config['camera_num']
 # Intrinsics for undistortion
 camera_calibration_path = config['camera_calibration_path']
-mtx, dist, undist_mtx = get_calibration_values(camera_calibration_path) # for the robot's camera
+mtx, dist = get_calibration_values(camera_calibration_path) # for the robot's camera
 kinect = o3d.camera.PinholeCameraIntrinsic(o3d.camera.PinholeCameraIntrinsicParameters.PrimeSenseDefault) # for the kinect
 
 # # Initialize Zoedepth Model & Move to device
@@ -360,19 +360,19 @@ def main():
         
     # ARDUCOPTER CONTROL
     # Connect to the drone
-    mav.connect_drone(IP, baud=baud)
-    mav.set_ekf_origin(EKF_LAT, EKF_LON, 0)
+    mavc.connect_drone(IP, baud=baud)
+    mavc.set_ekf_origin(EKF_LAT, EKF_LON, 0)
 
     # Initialize lists and frame counter.
     frame_number = 0
     start_flight_time = time.time()
     if FLY_VEHICLE==True:
-        mav.set_mode("GUIDED")
+        mavc.set_mode("GUIDED")
         time.sleep(0.1)
-        mav.arm()
+        mavc.arm()
         print("Taking off.")
-        mav.takeoff(height)
-        mav.set_speed(forward_speed)
+        mavc.takeoff(height)
+        # mavc.set_speed(forward_speed)
 
     ##########################################
     print("Starting control.")
@@ -396,11 +396,11 @@ def main():
             print("Pressed g. Using MonoNav.")
             traj_index = max_traj_idx
         elif last_key_pressed == 'c': #end control and land
-            mav.set_mode('LAND')
+            mavc.set_mode('LAND')
             print("Pressed c. Ending control.")
             break
         elif last_key_pressed == 'q': #end flight immediately
-            mav.eSTOP()
+            mavc.eSTOP()
             print("Pressed q. EMERGENCY STOP.")
             # cf.commander.send_stop_setpoint()
             break
@@ -408,7 +408,7 @@ def main():
             # start_time = time.time()
             # while time.time() - start_time < period:
             #     #if FLY_VEHICLE:
-            #         # mav.send_body_offset_ned_vel(0, 0, 0, yaw_rate=0) # hover in place
+            #         # mavc.send_body_offset_ned_vel(0, 0, 0, yaw_rate=0) # hover in place
             #     # idle_bgr = cap.read()
             #     # cv2.imshow("frame", idle_bgr)
             #     # cv2.waitKey(1)
@@ -429,7 +429,7 @@ def main():
             yvel = yawrate*config['yvel_gain']
             yawrate = yawrate*config['yawrate_gain']
             if FLY_VEHICLE:
-                mav.send_body_offset_ned_vel(forward_speed, yvel, yaw_rate=yawrate)
+                mavc.send_body_offset_ned_vel(forward_speed, yvel, yaw_rate=yawrate)
 
             # get camera capture and transform intrinsics
             bgr = cap.read()
@@ -438,7 +438,7 @@ def main():
             camera_position = get_drone_pose() # get camera position immediately
             if goal_position is not None:
                 dist_to_goal = np.linalg.norm(camera_position[0:-1, -1]-goal_position[0])
-                if dist_to_goal < min_dist2goal:
+                if dist_to_goal <= min_dist2goal:
                     print("Reached goal!")
                     shouldStop = True
                     last_key_pressed = 'c'
@@ -478,8 +478,8 @@ def main():
     if FLY_VEHICLE:
         # Stopping sequence
         print("Landing.")
-        mav.set_mode('LAND')
-        mav.arm(0)
+        mavc.set_mode('LAND')
+        mavc.arm(0)
 
     print("Releasing camera capture.")
     cap.cap.release()

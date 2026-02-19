@@ -34,15 +34,16 @@ def send_heartbeat():
 def connect_drone(IP, baud=115200):
     """ 
     To connect to the drone, use the telemetry module's IP with the mavlink conenction string and port.
-    ex: "udpout:192.168.199.51:14550" -> Similar functionality as UDPCl in Misson Planner, but only if a heartbeat is sent from the GCS first if the connection is routed via another Access Point.
+    ex: "udpout:192.168.199.51:14550" -> Similar functionality as UDPCl in Mission Planner, but only if a heartbeat is sent from the GCS first.
     """
     global drone
-    drone = mavutil.mavlink_connection(IP, baud)
+    drone = mavutil.mavlink_connection(IP, baud, autoreconnect=True)
     printd("Connected")
     send_heartbeat()
     printd("Waiting for heartbeat...")
     drone.wait_heartbeat()
     printd(f"Heartbeat received from system {drone.target_system} component {drone.target_component}")
+    return drone
 
 def set_ekf_origin(lat, lon, alt):
     """

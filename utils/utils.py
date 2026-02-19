@@ -125,97 +125,97 @@ class VideoCapture:
         return self.last_frame
       raise RuntimeError("VideoCapture timeout: no frame available")
 
-# Author: MiniMax
-"""
-Conversion functions for coordinate frames.
+# # Author: MiniMax
+# """
+# Conversion functions for coordinate frames.
 
-Aeronautical frame convention (e.g., NED with Z-down):
-- X: Forward (front)
-- Y: Right
-- Z: Down
-- Intrinsic ZYX rotation sequence (yaw-Z, pitch-Y, roll-X)
+# Aeronautical frame convention (e.g., NED with Z-down):
+# - X: Forward (front)
+# - Y: Right
+# - Z: Down
+# - Intrinsic ZYX rotation sequence (yaw-Z, pitch-Y, roll-X)
 
-TSDF/Open3D frame convention:
-- X: Right
-- Y: Down
-- Z: Forward (front)
-- Extrinsic XYZ rotation sequence (equivalent to intrinsic ZYX)
-"""
+# TSDF/Open3D frame convention:
+# - X: Right
+# - Y: Down
+# - Z: Forward (front)
+# - Extrinsic XYZ rotation sequence (equivalent to intrinsic ZYX)
+# """
 
-def aeronautical_to_tsdf(roll, pitch, yaw, x, y, z, degrees=True):
-    """
-    Convert pose from aeronautical frame (X-front, Y-right, Z-down, ZYX intrinsic)
-    to TSDF frame (X-right, Y-down, Z-front).
+# def aeronautical_to_tsdf(roll, pitch, yaw, x, y, z, degrees=True):
+#     """
+#     Convert pose from aeronautical frame (X-front, Y-right, Z-down, ZYX intrinsic)
+#     to TSDF frame (X-right, Y-down, Z-front).
     
-    Args:
-        roll: Roll angle (rotation around X/front axis)
-        pitch: Pitch angle (rotation around Y/right axis)
-        yaw: Yaw angle (rotation around Z/down axis)
-        x: X position in aeronautical frame (forward)
-        y: Y position in aeronautical frame (right)
-        z: Z position in aeronautical frame (down)
-        degrees: If True, angles are in degrees (default: True)
+#     Args:
+#         roll: Roll angle (rotation around X/front axis)
+#         pitch: Pitch angle (rotation around Y/right axis)
+#         yaw: Yaw angle (rotation around Z/down axis)
+#         x: X position in aeronautical frame (forward)
+#         y: Y position in aeronautical frame (right)
+#         z: Z position in aeronautical frame (down)
+#         degrees: If True, angles are in degrees (default: True)
     
-    Returns:
-        4x4 homogeneous transformation matrix in TSDF frame
-    """
-    # Convert angles to rotation matrix using scipy
-    # 'ZYX' with extrinsic=True gives the same rotation as intrinsic ZYX
-    r = Rotation.from_euler('ZYX', [yaw, pitch, roll], degrees=degrees)
-    R_aero = r.as_matrix()
+#     Returns:
+#         4x4 homogeneous transformation matrix in TSDF frame
+#     """
+#     # Convert angles to rotation matrix using scipy
+#     # 'ZYX' with extrinsic=True gives the same rotation as intrinsic ZYX
+#     r = Rotation.from_euler('ZYX', [yaw, pitch, roll], degrees=degrees)
+#     R_aero = r.as_matrix()
     
-    # Transformation matrix between coordinate frames
-    # Maps: X_front -> Z_front, Y_right -> X_right, Z_down -> Y_down
-    M_change = np.array([[0, 0, 1],
-                         [1, 0, 0],
-                         [0, 1, 0]])
+#     # Transformation matrix between coordinate frames
+#     # Maps: X_front -> Z_front, Y_right -> X_right, Z_down -> Y_down
+#     M_change = np.array([[0, 0, 1],
+#                          [1, 0, 0],
+#                          [0, 1, 0]])
     
-    # Convert rotation matrix
-    R_tsdf = M_change @ R_aero @ M_change.T
+#     # Convert rotation matrix
+#     R_tsdf = M_change @ R_aero @ M_change.T
     
-    # Convert position
-    xyz_aero = np.array([x, y, z])
-    xyz_tsdf = M_change @ xyz_aero
+#     # Convert position
+#     xyz_aero = np.array([x, y, z])
+#     xyz_tsdf = M_change @ xyz_aero
     
-    # Create homogeneous transformation matrix
-    H = np.eye(4)
-    H[0:3, 0:3] = R_tsdf
-    H[0:3, 3] = xyz_tsdf
+#     # Create homogeneous transformation matrix
+#     H = np.eye(4)
+#     H[0:3, 0:3] = R_tsdf
+#     H[0:3, 3] = xyz_tsdf
     
-    return H
+#     return H
 
 
-def aeronautical_pose_to_tsdf(pose_aero):
-    """
-    Convert a full 4x4 pose matrix from aeronautical frame to TSDF frame.
+# def aeronautical_pose_to_tsdf(pose_aero):
+#     """
+#     Convert a full 4x4 pose matrix from aeronautical frame to TSDF frame.
     
-    Args:
-        pose_aero: 4x4 homogeneous transformation matrix in aeronautical frame
+#     Args:
+#         pose_aero: 4x4 homogeneous transformation matrix in aeronautical frame
     
-    Returns:
-        4x4 homogeneous transformation matrix in TSDF frame
-    """
-    # Extract rotation matrix and translation vector
-    R_aero = pose_aero[0:3, 0:3]
-    t_aero = pose_aero[0:3, 3]
+#     Returns:
+#         4x4 homogeneous transformation matrix in TSDF frame
+#     """
+#     # Extract rotation matrix and translation vector
+#     R_aero = pose_aero[0:3, 0:3]
+#     t_aero = pose_aero[0:3, 3]
     
-    # Transformation matrix between coordinate frames
-    M_change = np.array([[0, 0, 1],
-                         [1, 0, 0],
-                         [0, 1, 0]])
+#     # Transformation matrix between coordinate frames
+#     M_change = np.array([[0, 0, 1],
+#                          [1, 0, 0],
+#                          [0, 1, 0]])
     
-    # Convert rotation matrix
-    R_tsdf = M_change @ R_aero @ M_change.T
+#     # Convert rotation matrix
+#     R_tsdf = M_change @ R_aero @ M_change.T
     
-    # Convert translation
-    t_tsdf = M_change @ t_aero
+#     # Convert translation
+#     t_tsdf = M_change @ t_aero
     
-    # Create homogeneous transformation matrix
-    H_tsdf = np.eye(4)
-    H_tsdf[0:3, 0:3] = R_tsdf
-    H_tsdf[0:3, 3] = t_tsdf
+#     # Create homogeneous transformation matrix
+#     H_tsdf = np.eye(4)
+#     H_tsdf[0:3, 0:3] = R_tsdf
+#     H_tsdf[0:3, 3] = t_tsdf
     
-    return H_tsdf
+#     return H_tsdf
 
 
 # """
@@ -512,8 +512,7 @@ def get_calibration_values(camera_calibration_path):
         data = json.load(json_file)
     mtx = np.array(data['CameraMatrix'])
     dist = np.array(data['DistortionCoefficients'])
-    undist = np.array(data['undistort_matrix'])
-    return mtx, dist, undist
+    return mtx, dist
 
 """
 Transform the raw image to match the kinect image: dimensions and intrinsics.
