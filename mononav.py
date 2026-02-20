@@ -32,10 +32,10 @@ import open3d as o3d
 import sys
 
 # Add DepthAnythingV2-metric path
-repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
-metric_depth_path = os.path.join(repo_root, 'metric_depth')
-sys.path.insert(0, metric_depth_path)
-from depth_anything_v2.dpt import DepthAnythingV2
+# repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+# metric_depth_path = os.path.join(repo_root, 'metric_depth')
+# sys.path.insert(0, metric_depth_path)
+from metric_depth.depth_anything_v2.dpt import DepthAnythingV2
 
 import mavlink_control as mavc         # import the mavlink helper script          
 from pynput import keyboard            # Keyboard control
@@ -272,7 +272,7 @@ def main():
         frame_number = 0
         start_flight_time = time.time()
         if FLY_VEHICLE==True:
-            mavc.set_mode("GUIDED")
+            mavc.set_mode('GUIDED')
             time.sleep(0.1)
             mavc.arm()
             print("Taking off.")
@@ -286,8 +286,8 @@ def main():
 #   start_time = time.time() # seconds
 
         while not shouldStop:
-            preview_bgr = cap.read()
-            cv2.imshow("frame", preview_bgr)
+            # bgr = cap.read()
+            # cv2.imshow("frame", bgr)
             update_key_from_cv(1)
             if last_key_pressed == 'a':
                 print("Pressed a. Going left.")

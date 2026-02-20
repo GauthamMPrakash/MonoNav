@@ -14,7 +14,7 @@ Functionality should be concentrated here and shared between the scripts.
 
 """
 import time
-import cv2 as cv2
+import cv2
 import numpy as np
 from scipy.spatial.transform import Rotation as Rotation
 from scipy.spatial import distance
@@ -217,35 +217,6 @@ class VideoCapture:
     
 #     return H_tsdf
 
-
-# """
-# Get the global pose from the vehicle, convert to the Open3D frame
-# Crazyflie frame: (X, Y, Z) is FRONT LEFT UP (FLU)
-# Open3D frame: (X, Y, Z) is RIGHT DOWN FRONT (RDF)
-# """
-# def get_crazyflie_pose(scf, logstate):
-#     with SyncLogger(scf, logstate) as logger:
-#         for log_entry in logger:
-#             data = log_entry[1]
-#             _x = data['stateEstimate.x']
-#             _y = data['stateEstimate.y']
-#             _z = data['stateEstimate.z']
-#             _roll = data['stateEstimate.roll']
-#             _pitch = data['stateEstimate.pitch']
-#             _yaw = data['stateEstimate.yaw']
-#             # Convert position from CF to TSDF frame
-#             xyz = np.array([-_y, -_z, _x]) # Convert to TSDF frame
-#             # Convert rotation from CF to TSDF frame
-#             r = Rotation.from_euler('xyz', [_roll, -_pitch, _yaw], degrees=True)
-#             R = r.as_matrix()
-#             M_change = np.array([[0,-1,0],[0,0,-1],[1,0,0]])
-#             R = M_change @ R @ M_change.T
-
-#             # Create a homogeneous matrix
-#             Hmtrx = np.hstack((R, xyz.reshape(3,1)))
-#             # return camera position
-#             return np.vstack((Hmtrx, np.array([0, 0, 0, 1])))
-
 """
 Get the global pose from the vehicle, convert to the Open3D frame
 ArduPilot frame: (X, Y, Z) is NORTH EAST DOWN (NED)
@@ -256,7 +227,7 @@ def get_drone_pose():
     # Convert position from AP to TSDF frame
     xyz = np.array([_y, _z, _x]) # Convert to TSDF frame
     # Convert rotation from AP to TSDF frame
-    r = Rotation.from_euler('xyz', [_roll, _pitch, _yaw], degrees=True)
+    r = Rotation.from_euler('xyz', [_roll, _pitch, _yaw], degrees=False)
     R = r.as_matrix()
     # NED (North, East, Down) -> RDF (Right, Down, Front)
     # Right=East, Down=Down, Front=North
@@ -447,53 +418,6 @@ def choose_primitive(vbg, camera_position, traj_linesets, goal_position, dist_th
         # No trajectory meets the dist_threshold criterion, crazyflie should stop.
         shouldStop = True
     return shouldStop, max_traj_idx
-
-
-# """
-# Upon Crazyflie startup, these helper functions ensure the EKF is properly initialized before takeoff.
-# #  Copyright (C) 2018 Bitcraze AB
-# Taken from several Crazyflie examples, e.g., https://github.com/bitcraze/crazyflie-lib-python/blob/master/examples/autonomy/autonomous_sequence_high_level.py
-# """
-# def reset_estimator(scf):
-#     scf.param.set_value('kalman.resetEstimation', '1')
-#     time.sleep(0.1)
-#     scf.param.set_value('kalman.resetEstimation', '0')
-    
-#     print('Waiting for estimator to find position...')
-
-#     log_config = LogConfig(name='Kalman Variance', period_in_ms=500)
-#     log_config.add_variable('kalman.varPX', 'float')
-#     log_config.add_variable('kalman.varPY', 'float')
-#     log_config.add_variable('kalman.varPZ', 'float')
-
-#     var_y_history = [1000] * 10
-#     var_x_history = [1000] * 10
-#     var_z_history = [1000] * 10
-
-#     threshold = 0.001
-
-#     with SyncLogger(scf, log_config) as logger:
-#         for log_entry in logger:
-#             data = log_entry[1]
-
-#             var_x_history.append(data['kalman.varPX'])
-#             var_x_history.pop(0)
-#             var_y_history.append(data['kalman.varPY'])
-#             var_y_history.pop(0)
-#             var_z_history.append(data['kalman.varPZ'])
-#             var_z_history.pop(0)
-
-#             min_x = min(var_x_history)
-#             max_x = max(var_x_history)
-#             min_y = min(var_y_history)
-#             max_y = max(var_y_history)
-#             min_z = min(var_z_history)
-#             max_z = max(var_z_history)
-
-#             if (max_x - min_x) < threshold and (
-#                     max_y - min_y) < threshold and (
-#                     max_z - min_z) < threshold:
-#                 break
 
 """
 Load config.yml file

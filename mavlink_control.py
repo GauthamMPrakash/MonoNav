@@ -7,7 +7,6 @@ Also provides functions to receive pose data from the copter.
 """
 
 from pymavlink import mavutil
-import numpy as np
 import time
 
 FLTMODES = {'GUIDED': 4, 'LOITER':5, 'LAND':9, 'BRAKE':17, 'SmartRTL':21}
@@ -123,7 +122,7 @@ def send_body_offset_ned_vel(vx, vy, vz=0, yaw_rate=0):
     Useful for high-rate control loops that call this every iteration.
     """
 
-    printd(f"Sending BODY_NED vel x={x}, y={y}, z={z}")
+    printd(f"Sending BODY_NED vel x={vx}, y={vy}, z={vz}")
     type_mask = 0b010111000111  # use velocity and yaw-rate only
     drone.mav.set_position_target_local_ned_send(
         0,
@@ -213,7 +212,7 @@ def en_pose_stream(freq=15):
 
 def get_pose(blocking=False):
     """
-    Return the pose and attitude of the drone
+    Return the position and attitude (in radians) of the drone
     """
     global time_boot, x, y, z, roll, pitch, yaw
     while True:
@@ -228,7 +227,7 @@ def get_pose(blocking=False):
                 x, y, z = msg.x, msg.y, msg.z
                 
             elif msg.get_type() == "ATTITUDE":
-                roll, pitch, yaw = msg.roll*180/np.pi, msg.pitch*180/np.pi, msg.yaw*180/np.pi
+                roll, pitch, yaw = msg.roll, msg.pitch, msg.yaw
     printd(f"x={x} y={y} z={z} yaw={yaw} pitch={pitch} roll={roll}")
     return x, y, z, yaw, pitch, roll
 
@@ -252,7 +251,6 @@ def timesync(timeout_s=0.5):
     """
     Query the autopilot TIMESYNC and return (ap_time_ns, offset_ns).
     - ap_ns: estimated current AP clock (nanoseconds)
-    - offset_ns: ap_time - local_monotonic_midpoint
     Returns (None, None) on timeout/failure.
     Requires a global `drone` mavlink connection.
     """
@@ -274,7 +272,7 @@ def timesync(timeout_s=0.5):
         local_mid_ns = (t1_ns + t4_ns) // 2
         offset_ns = int(msg.tc1 - local_mid_ns)
         ap_ns = int(time.monotonic_ns() + offset_ns)
-        return ap_ns, offset_ns
+        return ap_ns
     
 def test(): 
     try:
