@@ -36,7 +36,7 @@ import queue, threading                # For bufferless video capture
 Compute depth from an RGB image using DepthAnythingV2
 Returns depth_numpy (uint16 in mm), depth_colormap (for visualization)
 """
-def compute_depth(depth_anything, frame, size, make_colormap=True):
+def compute_depth(frame, depth_anything, size, make_colormap=True):
     # Compute depth
     depth = depth_anything.infer_image(frame, size)  # as torch tensor
     depth_numpy = np.asarray(depth) # Convert to numpy array

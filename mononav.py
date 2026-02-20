@@ -37,15 +37,6 @@ metric_depth_path = os.path.join(repo_root, 'metric_depth')
 sys.path.insert(0, metric_depth_path)
 from depth_anything_v2.dpt import DepthAnythingV2
 
-# For Crazyflie logging
-# import logging
-
-# import cflib.crtp
-# from cflib.crazyflie import Crazyflie
-# from cconfig[flib.crazyflie.log import LogConfig
-# from cflib.crazyflie.syncCrazyflie import SyncCrazyflie
-# from cflib.utils import uri_helper
-
 import mavlink_control as mavc         # import the mavlink helper script          
 from pynput import keyboard            # Keyboard control
 
@@ -60,6 +51,13 @@ CHECKPOINT = config['DA2_CHECKPOINT']  # path to checkpoint for DepthAnythingV2
 ENCODER = CHECKPOINT[-8:-4]            # extract encoder type from checkpoint filename (assumes format "DA2_{ENCODER}_checkpoint.pth")  
 MAX_DEPTH = 20
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
+IP = config['IP']
+baud = config['baud']
+height = config['height']
+FLY_VEHICLE = config['FLY_VEHICLE']
+EKF_LAT = config['EKF_LAT']
+EKF_LON = config['EKF_LON']
+STREAM_URL = config['camera_ip']       # YOUR ESP32 HTTP MJPEG stream
 
 # DepthAnythingV2 model configurations. You typically only need small or base models
 model_configs = {
@@ -71,8 +69,8 @@ model_configs = {
 
 # Initialize the DepthAnythingV2 model and load the checkpoint
 depth_anything = DepthAnythingV2(**{**model_configs[ENCODER], 'max_depth': MAX_DEPTH})
-depth_anything.load_state_dict(torch.load(CHECKPOINT, map_location='cpu'))
-depth_anything = depth_anything.to(DEVICE).eval()
+depth_anything.load_state_dict(torch.load(CHECKPOINT, map_location=DEVICE))
+depth_anything.eval()
 model_device = next(depth_anything.parameters()).device
 
 print(f"[device] torch.cuda.is_available()={torch.cuda.is_available()}")
@@ -86,37 +84,10 @@ if model_device.type != 'cuda' and torch.cuda.is_available():
 last_key_pressed = None  # store the last key pressed
 shouldStop = False
 
-# URI = uri_helper.uri_from_env(default=config['radio_uri'])
-# logging.basicConfig(level=logging.ERROR)
-IP = config['IP']
-height = config['height']
-FLY_VEHICLE = config['FLY_VEHICLE']
-baud = config['baud']
-EKF_LAT = config['EKF_LAT']
-EKF_LON = config['EKF_LON']
-# SAVE_FRAME_DATA = config.get('SAVE_FRAME_DATA', False)
-# SAVE_EVERY_N = max(1, int(config.get('SAVE_EVERY_N', 1)))
-# INTEGRATE_EVERY_N = max(1, int(config.get('INTEGRATE_EVERY_N', 1)))
-# PRINT_TIMING = config.get('PRINT_TIMING', True)
-# LOG_EVERY_N_FRAMES = max(1, int(config.get('LOG_EVERY_N_FRAMES', 15)))
-
-# Camera Settings for Undistortion
-camera_num = config['camera_num']
 # Intrinsics for undistortion
 camera_calibration_path = config['camera_calibration_path']
 mtx, dist = get_calibration_values(camera_calibration_path) # for the robot's camera
 kinect = o3d.camera.PinholeCameraIntrinsic(o3d.camera.PinholeCameraIntrinsicParameters.PrimeSenseDefault) # for the kinect
-
-# # Initialize Zoedepth Model & Move to device
-# conf = get_config('zoedepth', config['zoedepth_mode']) # NOTE: "eval" runs slightly slower, but is stated to be more metrically accurate
-# model_zoe = build_model(conf)
-# DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
-# print("Device is: ", DEVICE)
-# zoe = model_zoe.to(DEVICE)
-
-STREAM_URL = config['camera_ip']       # YOUR ESP32 HTTP MJPEG stream
-#OUTDIR = './esp32_depth'
-#os.makedirs(OUTDIR, exist_ok=True)
 
 # Initialize VoxelBlockGrid
 depth_scale = config['VoxelBlockGrid']['depth_scale']
@@ -196,83 +167,16 @@ def main():
 
     # Run the depth model a few times (the first inference is slow), and skip the first few frames
     cap = VideoCapture(STREAM_URL)
-    for i in range(0, config['num_pre_depth_frames']):
-        bgr = cap.read()
-        # COMPUTE DEPTH
-        start_time_test = time.time()
-        depth_numpy, depth_colormap = compute_depth(depth_anything, bgr, INPUT_SIZE)
-        print("TIME TO COMPUTE DEPTH:",time.time()-start_time_test)
-        cv2.imshow("frame", bgr)
-        cv2.waitKey(1)
-    cv2.destroyAllWindows()
-
-    # CRAZYFLIE CONTROL
-    # Initialize the low-level drivers
-    #cflib.crtp.init_drivers()
-
-    # with SyncCrazyflie(URI, cf=Crazyflie(rw_cache='./cache')) as scf:
-    #     cf = scf.cf
-    #     reset_estimator(cf)
-    #     # Set up log conf
-    #     logstate = LogConfig(name='state', period_in_ms=10)
-    #     logstate.add_variable('stateEstimate.x', 'float')
-    #     logstate.add_variable('stateEstimate.y', 'float')
-    #     logstate.add_variable('stateEstimate.z', 'float')
-    #     logstate.add_variable('stateEstimate.roll', 'float')
-    #     logstate.add_variable('stateEstimate.pitch', 'float')
-    #     logstate.add_variable('stateEstimate.yaw', 'float')
-
-    #     # Initialize lists and frame counter.
-    #     frame_number = 0
-
-    #     start_flight_time = time.time()
-    #     if FLY_CRAZYFLIE:
-    #         print("Taking off.")
-    #         # Takeoff Sequence
-    #         for y in np.linspace(0, height, 21):
-    #             cf.commander.send_hover_setpoint(0, 0, 0, y)
-    #             time.sleep(0.1)
-
-    #         for _ in range(20):
-    #             cf.commander.send_hover_setpoint(0, 0, 0, height)
-    #             time.sleep(0.1)
-
-    #     ##########################################
-    #     print("Starting control.")
-    #     traj_counter = 0 # how many trajectory iterations have we done?
-    #     start_time = time.time() # seconds
-
-    #     while not shouldStop:
-    #         cv2.imshow('frame', cap.read())
-    #         cv2.waitKey(1)
-    #         print("shouldStop: ", shouldStop)
-    #         if last_key_pressed == 'a':
-    #             print("Pressed a. Going left.")
-    #             traj_index = 0 # left
-    #         elif last_key_pressed == 'w':
-    #             print("Pressed w. Going straight.")
-    #             traj_index = int(len(traj_list)/2) # straight
-    #         elif last_key_pressed == 'd':
-    #             print("Pressed d. Going right.")
-    #             traj_index = len(traj_list)-1 # right
-    #         elif last_key_pressed == 'g':
-    #             print("Pressed g. Using MonoNav.")
-    #             traj_index = max_traj_idx
-    #         elif last_key_pressed == 'c': #end control and land
-    #             print("Pressed c. Ending control.")
-    #             break
-    #         elif last_key_pressed == 'q': #end flight immediately
-    #             print("Pressed q. EMERGENCY STOP.")
-    #             cf.commander.send_stop_setpoint()
-    #             break
-    #         else:
-    #             print("Else: Staying put.")
-    #             start_time = time.time()
-    #             while time.time() - start_time < period:
-    #                 if FLY_CRAZYFLIE:
-    #                     cf.commander.send_hover_setpoint(0, 0, 0, height)
-    #                 time.sleep(0.1)
-    #             continue
+    try:
+        for i in range(0, config['num_pre_depth_frames']):
+            bgr = cap.read()
+            # COMPUTE DEPTH
+            start_time_test = time.time()
+            depth_numpy, depth_colormap = compute_depth(bgr, depth_anything, INPUT_SIZE)
+            print("TIME TO COMPUTE DEPTH:",time.time()-start_time_test)
+            cv2.imshow("frame", bgr)
+            cv2.waitKey(1)
+        cv2.destroyAllWindows()
             
     #         # Save trajectory information
     #         row = np.array([frame_number, int(max_traj_idx), time.time()-start_flight_time]) # time since start of flight
@@ -291,7 +195,7 @@ def main():
     #             if FLY_CRAZYFLIE:
     #                 cf.commander.send_hover_setpoint(forward_speed, yvel, yawrate, height)
     #             # get camera capture and transform intrinsics
-    #             crazyflie_rgb = cap.read()
+    #             crazyflie_bgr = cap.read()
     #             camera_position = get_crazyflie_pose(scf, logstate) # get camera position immediately
     #             if goal_position is not None:
     #                 dist_to_goal = np.linalg.norm(camera_position[0:-1, -1]-goal_position[0])
@@ -302,13 +206,13 @@ def main():
     #                     last_key_pressed = 'q'
     #                     break
     #             # Transform Crazyflie Image to Kinect Image
-    #             kinect_rgb = transform_image(np.asarray(crazyflie_rgb), mtx, dist, kinect)
+    #             kinect_rgb = transform_image(np.asarray(crazyflie_bgr), mtx, dist, kinect)
     #             kinect_bgr = cv2.cvtColor(kinect_rgb, cv2.COLOR_RGB2BGR)
     #             # compute depth
     #             depth_numpy, depth_colormap = compute_depth(kinect_rgb, zoe)
 
     #             # SAVE DATA TO FILE
-    #             cv2.imwrite(crazyflie_img_dir + "/crazyflie_frame-%06d.rgb.jpg"%(frame_number), crazyflie_rgb)
+    #             cv2.imwrite(crazyflie_img_dir + "/crazyflie_frame-%06d.rgb.jpg"%(frame_number), crazyflie_bgr)
     #             cv2.imwrite(kinect_img_dir + "/kinect_frame-%06d.rgb.jpg"%(frame_number), kinect_rgb)
     #             cv2.imwrite(kinect_depth_dir + '/' + 'kinect_frame-%06d.depth.jpg'%(frame_number), depth_colormap)
     #             np.save(kinect_depth_dir + '/' + 'kinect_frame-%06d.depth.npy'%(frame_number), depth_numpy) # saved in meters
@@ -360,143 +264,148 @@ def main():
         
     # ARDUCOPTER CONTROL
     # Connect to the drone
-    mavc.connect_drone(IP, baud=baud)
-    mavc.set_ekf_origin(EKF_LAT, EKF_LON, 0)
-
+        mavc.connect_drone(IP, baud=baud)
+        mavc.set_ekf_origin(EKF_LAT, EKF_LON, 0)
+        mavc.en_pose_stream()
+    
     # Initialize lists and frame counter.
-    frame_number = 0
-    start_flight_time = time.time()
-    if FLY_VEHICLE==True:
-        mavc.set_mode("GUIDED")
-        time.sleep(0.1)
-        mavc.arm()
-        print("Taking off.")
-        mavc.takeoff(height)
-        # mavc.set_speed(forward_speed)
+        frame_number = 0
+        start_flight_time = time.time()
+        if FLY_VEHICLE==True:
+            mavc.set_mode("GUIDED")
+            time.sleep(0.1)
+            mavc.arm()
+            print("Taking off.")
+            mavc.takeoff(height)
+            # mavc.set_speed(forward_speed)
 
     ##########################################
-    print("Starting control.")
-    traj_counter = 0         # how many trajectory iterations have we done?
+        print("Starting control.")
+        traj_counter = 0         # how many trajectory iterations have we done?
+        no_safe_traj = False
 #   start_time = time.time() # seconds
 
-    while not shouldStop:
-        preview_bgr = cap.read()
-        cv2.imshow("frame", preview_bgr)
-        update_key_from_cv(1)
-        if last_key_pressed == 'a':
-            print("Pressed a. Going left.")
-            traj_index = 0 # left
-        elif last_key_pressed == 'w':
-            print("Pressed w. Going straight.")
-            traj_index = int(len(traj_list)/2) # straight
-        elif last_key_pressed == 'd':
-            print("Pressed d. Going right.")
-            traj_index = len(traj_list)-1 # right
-        elif last_key_pressed == 'g':
-            print("Pressed g. Using MonoNav.")
-            traj_index = max_traj_idx
-        elif last_key_pressed == 'c': #end control and land
-            mavc.set_mode('LAND')
-            print("Pressed c. Ending control.")
-            break
-        elif last_key_pressed == 'q': #end flight immediately
-            mavc.eSTOP()
-            print("Pressed q. EMERGENCY STOP.")
-            # cf.commander.send_stop_setpoint()
-            break
-        else:
-            # start_time = time.time()
-            # while time.time() - start_time < period:
-            #     #if FLY_VEHICLE:
-            #         # mavc.send_body_offset_ned_vel(0, 0, 0, yaw_rate=0) # hover in place
-            #     # idle_bgr = cap.read()
-            #     # cv2.imshow("frame", idle_bgr)
-            #     # cv2.waitKey(1)
-            time.sleep(0.1)
-            continue
+        while not shouldStop:
+            preview_bgr = cap.read()
+            cv2.imshow("frame", preview_bgr)
+            update_key_from_cv(1)
+            if last_key_pressed == 'a':
+                print("Pressed a. Going left.")
+                traj_index = 0 # left
+            elif last_key_pressed == 'w':
+                print("Pressed w. Going straight.")
+                traj_index = int(len(traj_list)/2) # straight
+            elif last_key_pressed == 'd':
+                print("Pressed d. Going right.")
+                traj_index = len(traj_list)-1 # right
+            elif last_key_pressed == 'g':
+                print("Pressed g. Using MonoNav.")
+                if no_safe_traj:
+                    if FLY_VEHICLE:
+                        mavc.send_body_offset_ned_vel(0, 0, 0, yaw_rate=0)
+                    time.sleep(0.1)
+                    continue
+                traj_index = max_traj_idx
+            elif last_key_pressed == 'c': #end control and land
+                mavc.set_mode('LAND')
+                print("Pressed c. Ending control.")
+                break
+            elif last_key_pressed == 'q': #end flight immediately
+                mavc.eSTOP()
+                print("Pressed q. EMERGENCY STOP.")
+                break
+            else:
+                time.sleep(0.1)
+                continue
         
         # Save trajectory information
-        row = np.array([frame_number, int(max_traj_idx), time.time()-start_flight_time]) # time since start of flight
-        with open(save_dir + '/trajectories.csv', 'a') as file:
-            np.savetxt(file, row.reshape(1, -1), delimiter=',', fmt='%s')
+            traj_idx_to_log = max_traj_idx if max_traj_idx is not None else -1
+            row = np.array([frame_number, int(traj_idx_to_log), time.time()-start_flight_time]) # time since start of flight
+            with open(save_dir + '/trajectories.csv', 'a') as file:
+                np.savetxt(file, row.reshape(1, -1), delimiter=',', fmt='%s')
 
         # Fly the selected trajectory, as applicable.
-        start_time = time.time()            
-        while time.time() - start_time < period:
-            # WARNING: This controller is tuned for ArduCopter.
-            # You must check whether your robot follows the open-loop trajectory.
-            yawrate = amplitudes[traj_index]*np.sin(np.pi/period*(time.time() - start_time)) # rad/s
-            yvel = yawrate*config['yvel_gain']
-            yawrate = yawrate*config['yawrate_gain']
-            if FLY_VEHICLE:
-                mavc.send_body_offset_ned_vel(forward_speed, yvel, yaw_rate=yawrate)
+            start_time = time.time()            
+            while time.time() - start_time < period:
+                # WARNING: This controller is tuned for ArduCopter.
+                # You must check whether your robot follows the open-loop trajectory.
+                yawrate = amplitudes[traj_index]*np.sin(np.pi/period*(time.time() - start_time)) # rad/s
+                yvel = yawrate*config['yvel_gain']
+                yawrate = yawrate*config['yawrate_gain']
+                if FLY_VEHICLE:
+                    mavc.send_body_offset_ned_vel(forward_speed, yvel, yaw_rate=yawrate)
 
             # get camera capture and transform intrinsics
-            bgr = cap.read()
-            cv2.imshow("frame", bgr)
-            update_key_from_cv(1)
-            camera_position = get_drone_pose() # get camera position immediately
-            if goal_position is not None:
-                dist_to_goal = np.linalg.norm(camera_position[0:-1, -1]-goal_position[0])
-                if dist_to_goal <= min_dist2goal:
-                    print("Reached goal!")
-                    shouldStop = True
-                    last_key_pressed = 'c'
-                    break
-            # Transform Camera Image to Kinect Image
-            rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-            kinect_rgb = transform_image(np.asarray(rgb), mtx, dist, kinect)
-            kinect_bgr = cv2.cvtColor(kinect_rgb, cv2.COLOR_RGB2BGR)
-            # compute depth
-            depth_numpy, depth_colormap = compute_depth(depth_anything, bgr, INPUT_SIZE)
+                bgr = cap.read()
+                cv2.imshow("frame", bgr)
+                update_key_from_cv(1)
+                camera_position = get_drone_pose() # get camera position immediately
+                if goal_position is not None:
+                    dist_to_goal = np.linalg.norm(camera_position[0:-1, -1]-goal_position[0])
+                    if dist_to_goal <= min_dist2goal:
+                        print("Reached goal!")
+                        shouldStop = True
+                        last_key_pressed = 'c'
+                        break
+                # Transform Camera Image to Kinect Image
+                kinect_rgb = transform_image(np.asarray(bgr), mtx, dist, kinect)
+                kinect_bgr = cv2.cvtColor(kinect_rgb, cv2.COLOR_RGB2BGR)
+                # compute depth
+                depth_numpy, depth_colormap = compute_depth(kinect_rgb, depth_anything, INPUT_SIZE)
 
             # SAVE DATA TO FILE
-            cv2.imwrite(img_dir + '/frame-%06d.rgb.jpg'%(frame_number), bgr)
-            cv2.imwrite(kinect_img_dir + '/kinect_frame-%06d.rgb.jpg'%(frame_number), kinect_rgb)
-            cv2.imwrite(kinect_depth_dir + '/' + 'kinect_frame-%06d.depth.jpg'%(frame_number), depth_colormap)
-            np.save(kinect_depth_dir + '/' + 'kinect_frame-%06d.depth.npy'%(frame_number), depth_numpy) # saved in meters
-            np.savetxt(pose_dir + '/frame-%06d.pose.txt'%(frame_number), camera_position)
+                cv2.imwrite(img_dir + '/frame-%06d.rgb.jpg'%(frame_number), bgr)
+                cv2.imwrite(kinect_img_dir + '/kinect_frame-%06d.rgb.jpg'%(frame_number), kinect_rgb)
+                cv2.imwrite(kinect_depth_dir + '/' + 'kinect_frame-%06d.depth.jpg'%(frame_number), depth_colormap)
+                np.save(kinect_depth_dir + '/' + 'kinect_frame-%06d.depth.npy'%(frame_number), depth_numpy) # saved in meters
+                np.savetxt(pose_dir + '/frame-%06d.pose.txt'%(frame_number), camera_position)
 
             # integrate the vbg (prefers bgr)
-            vbg.integration_step(bgr, depth_numpy, camera_position)
+                vbg.integration_step(kinect_bgr, depth_numpy, camera_position)
 
-            frame_number += 1
-        traj_counter += 1
+                frame_number += 1
+            traj_counter += 1
 
         # if not in "GO" (g) mode, reset to stopping mode
-        if last_key_pressed != 'g':
-            last_key_pressed = None
+            if last_key_pressed != 'g':
+                last_key_pressed = None
 
-        shouldStop, max_traj_idx = choose_primitive(vbg.vbg, camera_position, traj_linesets, goal_position, min_dist2obs, filterYvals, filterWeights, filterTSDF, weight_threshold)
-        print("SELECTED max_traj_idx: ", max_traj_idx)
+            shouldStop, max_traj_idx = choose_primitive(vbg.vbg, camera_position, traj_linesets, goal_position, min_dist2obs, filterYvals, filterWeights, filterTSDF, weight_threshold)
+            if max_traj_idx is None:
+                no_safe_traj = True
+                shouldStop = False
+                print("No safe trajectory. Hovering in place.")
+            else:
+                no_safe_traj = False
+            print("SELECTED max_traj_idx: ", max_traj_idx)
 
     # Exited while(!shouldStop); end control!
-    print("shouldStop: ", shouldStop)
-    print("Reached goal OR too close to obstacles.")
-    print("End control.")
+        print("shouldStop: ", shouldStop)
+        print("Reached goal OR too close to obstacles.")
+        print("End control.")
 
-    if FLY_VEHICLE:
-        # Stopping sequence
-        print("Landing.")
-        mavc.set_mode('LAND')
-        mavc.arm(0)
+        if FLY_VEHICLE:
+            # Stopping sequence
+            print("Landing.")
+            mavc.set_mode('LAND')
+            mavc.arm(0)
 
-    print("Releasing camera capture.")
-    cap.cap.release()
-    cv2.destroyAllWindows()
-
-    # save and view vbg
-    print("Saving to {}...".format(npz_save_filename))
-    vbg.vbg.save(npz_save_filename)
-    print("Saving finished")
-    print("Visualize raw pointcloud.")
-    pcd = vbg.vbg.extract_point_cloud(weight_threshold)
-    pcd_cpu = pcd.cpu()
-    # Convert tensor point cloud to legacy for reliable visualization
-    pcd_legacy = pcd_cpu.to_legacy()
-    print(f"Point cloud has {len(pcd_legacy.points)} points")
-    if len(pcd_legacy.points) > 0:
-        o3d.visualization.draw_geometries([pcd_legacy], window_name="MonoNav Reconstruction")
+        # save and view vbg
+        print("Saving to {}...".format(npz_save_filename))
+        vbg.vbg.save(npz_save_filename)
+        print("Saving finished")
+        print("Visualize raw pointcloud.")
+        pcd = vbg.vbg.extract_point_cloud(weight_threshold)
+        pcd_cpu = pcd.cpu()
+        # Convert tensor point cloud to legacy for reliable visualization
+        pcd_legacy = pcd_cpu.to_legacy()
+        print(f"Point cloud has {len(pcd_legacy.points)} points")
+        if len(pcd_legacy.points) > 0:
+            o3d.visualization.draw_geometries([pcd_legacy], window_name="MonoNav Reconstruction")
+    finally:
+        print("Releasing camera capture.")
+        cap.cap.release()
+        cv2.destroyAllWindows()
 
 if __name__ == "__main__":
     main()
