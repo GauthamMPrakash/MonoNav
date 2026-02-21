@@ -8,6 +8,7 @@ Also provides functions to receive pose data from the copter.
 
 from pymavlink import mavutil
 import time
+from numpy import pi
 
 FLTMODES = {'GUIDED': 4, 'LOITER':5, 'LAND':9, 'BRAKE':17, 'SmartRTL':21}
 time_boot, x, y, z, roll, pitch, yaw = 0, 0, 0, 0, 0, 0, 0
@@ -111,7 +112,7 @@ def takeoff(target_alt):
     # Wait until drone reaches target altitude
     while True:
         msg = drone.recv_match(type="VFR_HUD", blocking=True)
-        if msg.alt > target_alt * 0.95:
+        if msg.alt > target_alt * 0.9:
             printd("Target altitude reached")
             break
         time.sleep(0.1)
@@ -122,7 +123,7 @@ def send_body_offset_ned_vel(vx, vy, vz=0, yaw_rate=0):
     Useful for high-rate control loops that call this every iteration.
     """
 
-    printd(f"Sending BODY_NED vel x={vx}, y={vy}, z={vz}")
+    #printd(f"Sending BODY_NED vel x={vx}, y={vy}, z={vz}")
     type_mask = 0b010111000111  # use velocity and yaw-rate only
     drone.mav.set_position_target_local_ned_send(
         0,
@@ -228,7 +229,7 @@ def get_pose(blocking=False):
                 
             elif msg.get_type() == "ATTITUDE":
                 roll, pitch, yaw = msg.roll, msg.pitch, msg.yaw
-    printd(f"x={x} y={y} z={z} yaw={yaw} pitch={pitch} roll={roll}")
+    #printd(f"x={x} y={y} z={z} yaw={yaw*180/pi} pitch={pitch*180/pi} roll={roll*180/pi}")
     return x, y, z, yaw, pitch, roll
 
 def heading_offset_init():

@@ -32,10 +32,10 @@ import open3d as o3d
 import sys
 
 # Add DepthAnythingV2-metric path
-# repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
-# metric_depth_path = os.path.join(repo_root, 'metric_depth')
-# sys.path.insert(0, metric_depth_path)
-from metric_depth.depth_anything_v2.dpt import DepthAnythingV2
+repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+metric_depth_path = os.path.join(repo_root, 'metric_depth')
+sys.path.insert(0, metric_depth_path)
+from depth_anything_v2.dpt import DepthAnythingV2
 
 import mavlink_control as mavc         # import the mavlink helper script          
 from pynput import keyboard            # Keyboard control
@@ -70,7 +70,7 @@ model_configs = {
 # Initialize the DepthAnythingV2 model and load the checkpoint
 depth_anything = DepthAnythingV2(**{**model_configs[ENCODER], 'max_depth': MAX_DEPTH})
 depth_anything.load_state_dict(torch.load(CHECKPOINT, map_location=DEVICE))
-depth_anything.eval()
+depth_anything = depth_anything.to(DEVICE).eval()
 model_device = next(depth_anything.parameters()).device
 
 print(f"[device] torch.cuda.is_available()={torch.cuda.is_available()}")
@@ -337,7 +337,7 @@ def main():
 
             # get camera capture and transform intrinsics
                 bgr = cap.read()
-                cv2.imshow("frame", bgr)
+                #cv2.imshow("frame", bgr)
                 update_key_from_cv(1)
                 camera_position = get_drone_pose() # get camera position immediately
                 if goal_position is not None:
@@ -350,8 +350,10 @@ def main():
                 # Transform Camera Image to Kinect Image
                 kinect_rgb = transform_image(np.asarray(bgr), mtx, dist, kinect)
                 kinect_bgr = cv2.cvtColor(kinect_rgb, cv2.COLOR_RGB2BGR)
+
                 # compute depth
                 depth_numpy, depth_colormap = compute_depth(kinect_rgb, depth_anything, INPUT_SIZE)
+                cv2.imshow("frame",depth_colormap)
 
             # SAVE DATA TO FILE
                 cv2.imwrite(img_dir + '/frame-%06d.rgb.jpg'%(frame_number), bgr)
