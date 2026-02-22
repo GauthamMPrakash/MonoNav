@@ -280,13 +280,14 @@ def test():
         # Arbitrary location for EKF Origin
         EKF_LAT = 8.4723591
         EKF_LON = 76.9295203
-        IP = "udpout:192.168.53.51:14550"  # Drone IP
+        IP = "udpout:10.42.0.110:14550"  # Drone IP
         connect_drone(IP)
         set_ekf_origin(EKF_LAT, EKF_LON, 0)
         set_mode('GUIDED')
         en_pose_stream()
         print("Checking telemetry:")
-        for i in range(20):
+        # for i in range(20):
+        while True:
             print(get_pose()[1:])
             time.sleep(0.1)
         print("AP time, offset:", timesync())

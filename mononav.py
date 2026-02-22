@@ -109,7 +109,7 @@ filterYvals = config['filterYvals']
 filterWeights = config['filterWeights']
 filterTSDF = config['filterTSDF']
 if 'goal_position' in config:
-    goal_position = np.array(config['goal_position']).reshape(1, 3)#np.array([-5., -0.4, 10.0]).reshape(1, 3) # OpenCV frame: +X RIGHT, +Y DOWN, +Z FORWARD
+    goal_position = np.array(config['goal_position']).reshape(1, 3)  # np.array([-5., -0.4, 10.0]).reshape(1, 3) # OpenCV frame: +X RIGHT, +Y DOWN, +Z FORWARD
 else:
     goal_position = None # non-directed exploration
 print("Goal position: ", goal_position)

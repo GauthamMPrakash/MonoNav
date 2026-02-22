@@ -10,7 +10,7 @@ camera_ip: 'http://10.42.0.29:81/stream'                  # IP camera stream URL
 # Depth Model Settings
 # zoedepth_mode: "eval" # "eval" or "infer" - see ZoeDepth documentation for other settings
 num_pre_depth_frames: 5       # how many times to run the depth model before starting (the first few inferences are much slower)
-INPUT_SIZE: 308               # Multiple of 14. Scales the image by INPUT_SIZE/smaller image dimension
+INPUT_SIZE: 256             # Multiple of 14. Scales the image by INPUT_SIZE/smaller image dimension
 DA2_CHECKPOINT: "checkpoints/depth_anything_v2_metric_hypersim_vitb.pth" # path to checkpoint for DepthAnythingV2, make sure it matches the encoder you choose
 #PRINT_TIMING: True            # print per-frame timing breakdown (capture, pose, depth, fuse, save)
 #LOG_EVERY_N_FRAMES: 15        # reduce stdout overhead by printing timing every N frames
@@ -36,7 +36,7 @@ trajlib_dir: "utils/trajlib/" # where to save & retrieve the trajectory library 
 goal_position: # goal position in meters
  - 0 # +X RIGHT
  - 0 # +Y DOWN (HEIGHT)
- - 10.0 # +Z FORWARD
+ - -10.0 # +Z FORWARD
 
 min_dist2obs: 0.5             # minimum acceptable distance from obstacles, meters (for primitive selection)
 min_dist2goal: 0.5            # termination condition for reaching the goal, meters
@@ -50,12 +50,12 @@ min_dist2goal: 0.5            # termination condition for reaching the goal, met
 # Replace with serial port name (ex: 'COM9') if using serial telemetry on the PC
 IP: "udpout:10.42.0.110:14550" 
 baud: 115200               # Set baud, only required for serial telemetry
-height: 0.9                # flight altitude, meters
+height: 1.2                # flight altitude, meters
 
 # Arbitrary EKF origin
 EKF_LAT: 8.4723591
 EKF_LON: 76.9295203
-FLY_VEHICLE: True        # whether to actually fly the drone
+FLY_VEHICLE: True     # whether to actually fly the drone
 forward_speed: None        # forward speed in m/s, set to None to use speed defined in generate_primitives.py
 # Control gain settings (YOU MAY NEED TO TUNE THIS YOURSELF)
 yvel_gain: 0.015           # yvel =  -yawrate*yvel_gain  <- for providing sideways velocity so fast drones take a pefect turn. Increase for faster turns.

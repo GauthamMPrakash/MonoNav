@@ -44,7 +44,7 @@ def compute_depth(frame, depth_anything, size, make_colormap=True):
     depth_numpy = depth_numpy.astype(np.uint16) # Convert to uint16
 
     if make_colormap:
-        depth_colormap = cv2.applyColorMap(cv2.convertScaleAbs(depth_numpy, alpha=0.03), cv2.COLORMAP_JET)
+        depth_colormap = cv2.applyColorMap(255 - cv2.convertScaleAbs(depth_numpy, alpha=0.03), cv2.COLORMAP_JET)
     else:
         depth_colormap = None
 
