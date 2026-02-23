@@ -44,7 +44,7 @@ def compute_depth(frame, depth_anything, size, make_colormap=True):
     depth_numpy = depth_numpy.astype(np.uint16) # Convert to uint16
 
     if make_colormap:
-        depth_colormap = cv2.applyColorMap(255 - cv2.convertScaleAbs(depth_numpy, alpha=0.03), cv2.COLORMAP_RAINBOW)
+        depth_colormap = cv2.applyColorMap(255 - cv2.convertScaleAbs(depth_numpy, alpha=0.03), cv2.COLORMAP_JET)
     else:
         depth_colormap = None
 
@@ -222,18 +222,12 @@ Get the global pose from the vehicle, convert to the Open3D frame
 ArduPilot frame: (X, Y, Z) is NORTH EAST DOWN (NED)
 Open3D frame: (X, Y, Z) is RIGHT DOWN FRONT (RDF)
 """
-def get_drone_pose(negate_position=True):
-    """
-    Depending on optical flow output, the position outputs may be negated. This cannot be corrected by setting the FLOW_ORIENT_YAW param in ArduPilot
-    """
+def get_drone_pose():
     _x, _y, _z, _yaw, _pitch, _roll = mav.get_pose()
     # Convert position from AP to TSDF frame
-    xyz = np.array([-_y, _z, -_x]) if negate_position else np.array([_y, _z, _x]) # Convert to TSDF frame
+    xyz = np.array([_y, _z, _x]) # Convert to TSDF frame
     # Convert rotation from AP to TSDF frame
-    """
-    ArduPilot pitch is inverted
-    """
-    r = Rotation.from_euler('xyz', [_roll, -_pitch, _yaw], degrees=False)
+    r = Rotation.from_euler('xyz', [_roll, _pitch, _yaw], degrees=False)
     R = r.as_matrix()
     # NED (North, East, Down) -> RDF (Right, Down, Front)
     # Right=East, Down=Down, Front=North

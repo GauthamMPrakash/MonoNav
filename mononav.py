@@ -109,7 +109,10 @@ filterYvals = config['filterYvals']
 filterWeights = config['filterWeights']
 filterTSDF = config['filterTSDF']
 if 'goal_position' in config:
-    goal_position = np.array(config['goal_position']).reshape(1, 3)  # np.array([-5., -0.4, 10.0]).reshape(1, 3) # OpenCV frame: +X RIGHT, +Y DOWN, +Z FORWARD
+    # Negate right (+X, index 0) and forward (+Y, index 2) directions
+    goal_position = np.array(config['goal_position'])
+    goal_position[[0, 2]] *= -1
+    goal_position = goal_position.reshape(1, 3)
 else:
     goal_position = None # non-directed exploration
 print("Goal position: ", goal_position)
@@ -174,7 +177,7 @@ def main():
             start_time_test = time.time()
             depth_numpy, depth_colormap = compute_depth(bgr, depth_anything, INPUT_SIZE)
             print("TIME TO COMPUTE DEPTH:",time.time()-start_time_test)
-            cv2.imshow("frame", bgr)
+            cv2.imshow("test", bgr)
             cv2.waitKey(1)
         cv2.destroyAllWindows()
             
@@ -307,10 +310,12 @@ def main():
             elif last_key_pressed == 'c': #end control and land
                 mavc.set_mode('LAND')
                 print("Pressed c. Ending control.")
+                shouldStop = True
                 break
             elif last_key_pressed == 'q': #end flight immediately
                 mavc.eSTOP()
                 print("Pressed q. EMERGENCY STOP.")
+                shouldStop = True
                 break
             else:
                 time.sleep(0.1)
@@ -347,11 +352,11 @@ def main():
                         break
                 # Transform Camera Image to Kinect Image
                 kinect_bgr = transform_image(np.asarray(bgr), mtx, dist, kinect)
-                kinect_rgb = cv2.cvtColor(kinect_bgr, cv2.COLOR_BGR2RGB)
+                kinect_rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
 
                 # compute depth
                 depth_numpy, depth_colormap = compute_depth(kinect_bgr, depth_anything, INPUT_SIZE)
-                cv2.imshow("frame",depth_colormap)
+                cv2.imshow("frame", depth_colormap)
 
             # SAVE DATA TO FILE
                 cv2.imwrite(img_dir + '/frame-%06d.rgb.jpg'%(frame_number), bgr)
@@ -401,7 +406,20 @@ def main():
         pcd_legacy = pcd_cpu.to_legacy()
         print(f"Point cloud has {len(pcd_legacy.points)} points")
         if len(pcd_legacy.points) > 0:
-            o3d.visualization.draw_geometries([pcd_legacy], window_name="MonoNav Reconstruction")
+        #    o3d.visualization.draw_geometries([pcd_legacy], window_name="MonoNav Reconstruction")
+        
+            vis = o3d.visualization.Visualizer()
+            vis.create_window(window_name="MonoNav Reconstruction")
+            vis.add_geometry(pcd_legacy)
+            view_ctl = vis.get_view_control()
+            # Set 'top-up' view: looking forward along Z, Y up
+            view_ctl.set_front([0, 0, -1])   # Look forward along Z
+            view_ctl.set_lookat([0, 0, 0])  # Center at origin
+            view_ctl.set_up([0, 1, 0])      # Y axis is up
+            view_ctl.set_zoom(0.8)
+            vis.run()
+            vis.destroy_window()
+
     finally:
         print("Releasing camera capture.")
         cap.cap.release()
