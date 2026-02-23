@@ -265,15 +265,15 @@ def main():
     # ARDUCOPTER CONTROL
     # Connect to the drone
         mavc.connect_drone(IP, baud=baud)
-        mavc.set_ekf_origin(EKF_LAT, EKF_LON, 0)
-        mavc.en_pose_stream()
+        mavc.en_pose_stream()                    # Commands AP to stream poses at a deafult value of 15 Hz
+        mavc.reboot_if_EKF_origin()              # Call this function after enabling pose_stream
+        mavc.set_ekf_origin(EKF_LAT, EKF_LON, 0) # Ignored if already close to the previous origin, if set
     
     # Initialize lists and frame counter.
         frame_number = 0
         start_flight_time = time.time()
         if FLY_VEHICLE==True:
             mavc.set_mode('GUIDED')
-            time.sleep(0.1)
             mavc.arm()
             print("Taking off.")
             mavc.takeoff(height)
@@ -286,8 +286,6 @@ def main():
 #   start_time = time.time() # seconds
 
         while not shouldStop:
-            # bgr = cap.read()
-            # cv2.imshow("frame", bgr)
             update_key_from_cv(1)
             if last_key_pressed == 'a':
                 print("Pressed a. Going left.")
@@ -348,22 +346,22 @@ def main():
                         last_key_pressed = 'c'
                         break
                 # Transform Camera Image to Kinect Image
-                kinect_rgb = transform_image(np.asarray(bgr), mtx, dist, kinect)
-                kinect_bgr = cv2.cvtColor(kinect_rgb, cv2.COLOR_RGB2BGR)
+                kinect_bgr = transform_image(np.asarray(bgr), mtx, dist, kinect)
+                kinect_rgb = cv2.cvtColor(kinect_bgr, cv2.COLOR_BGR2RGB)
 
                 # compute depth
-                depth_numpy, depth_colormap = compute_depth(kinect_rgb, depth_anything, INPUT_SIZE)
+                depth_numpy, depth_colormap = compute_depth(kinect_bgr, depth_anything, INPUT_SIZE)
                 cv2.imshow("frame",depth_colormap)
 
             # SAVE DATA TO FILE
                 cv2.imwrite(img_dir + '/frame-%06d.rgb.jpg'%(frame_number), bgr)
-                cv2.imwrite(kinect_img_dir + '/kinect_frame-%06d.rgb.jpg'%(frame_number), kinect_rgb)
+                cv2.imwrite(kinect_img_dir + '/kinect_frame-%06d.rgb.jpg'%(frame_number), kinect_bgr)
                 cv2.imwrite(kinect_depth_dir + '/' + 'kinect_frame-%06d.depth.jpg'%(frame_number), depth_colormap)
                 np.save(kinect_depth_dir + '/' + 'kinect_frame-%06d.depth.npy'%(frame_number), depth_numpy) # saved in meters
                 np.savetxt(pose_dir + '/frame-%06d.pose.txt'%(frame_number), camera_position)
 
-            # integrate the vbg (prefers bgr)
-                vbg.integration_step(kinect_bgr, depth_numpy, camera_position)
+            # integrate the vbg (prefers rgb)
+                vbg.integration_step(kinect_rgb, depth_numpy, camera_position)
 
                 frame_number += 1
             traj_counter += 1
@@ -375,7 +373,7 @@ def main():
             shouldStop, max_traj_idx = choose_primitive(vbg.vbg, camera_position, traj_linesets, goal_position, min_dist2obs, filterYvals, filterWeights, filterTSDF, weight_threshold)
             if max_traj_idx is None:
                 no_safe_traj = True
-                shouldStop = False
+                shouldStop = True
                 print("No safe trajectory. Hovering in place.")
             else:
                 no_safe_traj = False

@@ -71,7 +71,7 @@ def set_mode(mode_name):
         mode_id
     )
     printd(f"Switching to {mode_name}...")
-    time.sleep(0.1)
+    time.sleep(0.05)
 
 def arm(arm_state=1):
     """
@@ -279,7 +279,7 @@ def timesync(timeout_s=0.5):
         ap_ns = int(time.monotonic_ns() + offset_ns)
         return ap_ns, offset_ns
 
-def reboot_if_no_EKF_origin(tolerance=0.1):
+def reboot_if_EKF_origin(tolerance=0.1):
     """
     Read the current local‑position and, if either x or y deviates from
     zero by more than `tolerance`, request a reboot so the EKF origin can
