@@ -8,7 +8,6 @@ Also provides functions to receive pose data from the copter.
 
 from pymavlink import mavutil
 import time
-from numpy import pi
 
 FLTMODES = {'GUIDED': 4, 'LOITER':5, 'LAND':9, 'BRAKE':17, 'SmartRTL':21}
 time_boot, x, y, z, roll, pitch, yaw = 0, 0, 0, 0, 0, 0, 0
@@ -235,11 +234,13 @@ def get_pose(blocking=False):
 def heading_offset_init():
     global heading_offset
     """
-    Call once to get initial absolute heading.
-    Subsequently subtract heading_offset from the absolute heading (ATTITUDE.yaw) to get relative heading
+    Call once to get initial absolute heading.  Subsequently subtract
+    heading_offset from the absolute heading (ATTITUDE.yaw) to get
+    relative heading.
     """
-    pose = get_pose()
-    heading_offset = pose[4]
+    # get_pose returns (x, y, z, yaw, pitch, roll)
+    _, _, _, yaw, _, _ = get_pose()
+    heading_offset = yaw
 
 def eSTOP():
     """
@@ -251,9 +252,12 @@ def eSTOP():
 def timesync(timeout_s=0.5):
     """
     Query the autopilot TIMESYNC and return (ap_time_ns, offset_ns).
-    - ap_ns: estimated current AP clock (nanoseconds)
-    Returns (None, None) on timeout/failure.
-    Requires a global `drone` mavlink connection.
+
+    - ap_time_ns: estimated current AP clock (nanoseconds)
+    - offset_ns: estimated offset between local and AP clocks
+
+    Returns `(None, None)` on timeout/failure.  Requires a global
+    `drone` mavlink connection.
     """
     t1_ns = time.monotonic_ns()
     drone.mav.timesync_send(0, t1_ns)
@@ -273,23 +277,53 @@ def timesync(timeout_s=0.5):
         local_mid_ns = (t1_ns + t4_ns) // 2
         offset_ns = int(msg.tc1 - local_mid_ns)
         ap_ns = int(time.monotonic_ns() + offset_ns)
-        return ap_ns
-    
+        return ap_ns, offset_ns
+
+def reboot_if_no_EKF_origin(tolerance=0.1):
+    """
+    Read the current local‑position and, if either x or y deviates from
+    zero by more than `tolerance`, request a reboot so the EKF origin can
+    be reset.
+
+    The globals x/y start at 0 and stay there until a LOCAL_POSITION_NED
+    message is received.  Calling `get_pose(blocking=True)` ensures we
+    wait for the first packet; without that the coordinates will be zero
+    and `abs()` will trivially return 0.
+    """
+
+    for i in range(5):
+        x, y, _, _, _, _ = get_pose()
+        time.sleep(0.05)
+    printd(f"reboot check – x={x:.3f}, y={y:.3f}")
+    if abs(x) > tolerance or abs(y) > tolerance:
+        printd(f"deviation exceeds {tolerance}, rebooting")
+        drone.mav.command_long_send(
+            drone.target_system,
+            drone.target_component,
+            mavutil.mavlink.MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN,
+            0,
+            1,
+            0, 0, 0,
+            0, 0, 0
+        )
+
 def test(): 
     try:
         # Arbitrary location for EKF Origin
         EKF_LAT = 8.4723591
         EKF_LON = 76.9295203
-        IP = "udpout:10.42.0.110:14550"  # Drone IP
+        IP = "udpout:192.168.53.51:14550"  # Drone IP
         connect_drone(IP)
+        en_pose_stream()
+        reboot_if_no_EKF_origin()
         set_ekf_origin(EKF_LAT, EKF_LON, 0)
         set_mode('GUIDED')
-        en_pose_stream()
         print("Checking telemetry:")
         # for i in range(20):
         while True:
-            print(get_pose()[1:])
-            time.sleep(0.1)
+            pose = get_pose()
+            print(pose)
+            time.sleep(0.2)
         print("AP time, offset:", timesync())
         #arm()
         takeoff(1)
