@@ -1,0 +1,26 @@
+{
+    "refined_matrix": [
+        [
+            467.2496700496738,
+            0.0,
+            266.7748760155754
+        ],
+        [
+            0.0,
+            469.2504610084111,
+            159.88384559730667
+        ],
+        [
+            0.0,
+            0.0,
+            1.0
+        ]
+    ],
+    "roi": [
+        0,
+        0,
+        479,
+        319
+    ],
+    "explanation": "Use this matrix and ROI for measurements on undistorted images."
+}

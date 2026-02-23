@@ -434,8 +434,8 @@ def get_calibration_values(camera_calibration_path):
     # Load the camera calibration file
     with open(camera_calibration_path, "r") as json_file:
         data = json.load(json_file)
-    mtx = np.array(data['CameraMatrix'])
-    dist = np.array(data['DistortionCoefficients'])
+    mtx = np.array(data['camera_matrix'])
+    dist = np.array(data['dist_coeffs'])
     return mtx, dist
 
 """
