@@ -17,12 +17,11 @@ filterYvals: True             # this helps filter out the ground / ceiling (for 
 filterWeights: True           # this helps filter out low-weight voxels
 filterTSDF: True
 weight_threshold: 1.          # determine the weight threshold for filtering (higher threshold -> fewer points)
-INTEGRATE_EVERY_N: 1          # fuse depth into TSDF once every N frames (increase to improve FPS)
 VoxelBlockGrid:
   depth_scale: 1000.0         # 1000.0 is default (mm to m), scale factor for depth values during integration
-  depth_max: 10.0              # max depth to include in the reconstruction
+  depth_max: 20.0              # max depth to include in the reconstruction
   trunc_voxel_multiplier: 8.0
-  device: "CPU:0"            # "CUDA:0" (faster) or "CPU:0" (if no GPU is available)
+  device: "CUDA:0"            # "CUDA:0" (faster) or "CPU:0" (if no GPU is available)
 
 # Planning Settings
 trajlib_dir: "utils/trajlib/" # where to save & retrieve the trajectory library (motion primitives)
