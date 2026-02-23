@@ -3,6 +3,8 @@ import numpy as np
 import json
 import os
 import time
+import queue
+import threading
 
 # Force X11 to avoid the Wayland/Qt crash
 os.environ["QT_QPA_PLATFORM"] = "xcb"
@@ -10,17 +12,48 @@ os.environ["QT_QPA_PLATFORM"] = "xcb"
 # --- CONFIG ---
 URL = "http://192.168.53.56:81/stream"
 SQUARES_X, SQUARES_Y = 10, 7
-SQUARE_LENGTH, MARKER_LENGTH = 0.04, 0.03
+SQUARE_LENGTH, MARKER_LENGTH = 0.024, 0.018
 DICT = cv.aruco.getPredefinedDictionary(cv.aruco.DICT_4X4_50)
 
 board = cv.aruco.CharucoBoard((SQUARES_X, SQUARES_Y), SQUARE_LENGTH, MARKER_LENGTH, DICT)
 detector = cv.aruco.CharucoDetector(board)
 
+class VideoCapture:
+
+  def __init__(self, name):
+    self.cap = cv.VideoCapture(name)
+    self.cap.set(cv.CAP_PROP_BUFFERSIZE, 1)
+    self.q = queue.Queue(maxsize=1)
+    self.last_frame = None
+    t = threading.Thread(target=self._reader)
+    t.daemon = True
+    t.start()
+
+  # read frames as soon as they are available, keeping only most recent one
+  def _reader(self):
+    while True:
+      ret, frame = self.cap.read()
+      if not ret:
+        break
+      self.last_frame = frame
+      if self.q.full():
+        try:
+          self.q.get_nowait()   # discard previous (unprocessed) frame
+        except queue.Empty:
+          pass
+      self.q.put_nowait(frame)
+
+  def read(self, timeout=1.0):
+    try:
+      return self.q.get(timeout=timeout)
+    except queue.Empty:
+      if self.last_frame is not None:
+        return self.last_frame
+      raise RuntimeError("VideoCapture timeout: no frame available")
+
+
 def main():
-    cap = cv.VideoCapture(URL)
-    if not cap.isOpened():
-        print("Error: Could not connect to stream.")
-        return
+    cap = VideoCapture(URL)
 
     # Standardize Window
     win_name = "OpenCV Calibration Suite"
@@ -36,8 +69,7 @@ def main():
     print("Move camera. Capture 15+ frames. Press [ENTER] to switch to Live Preview.")
 
     while True:
-        ret, frame = cap.read()
-        if not ret: break
+        frame = cap.read()
         
         if imsize is None:
             imsize = (frame.shape[1], frame.shape[0])

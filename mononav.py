@@ -269,7 +269,7 @@ def main():
     # Connect to the drone
         mavc.connect_drone(IP, baud=baud)
         mavc.en_pose_stream()                    # Commands AP to stream poses at a deafult value of 15 Hz
-        mavc.reboot_if_EKF_origin()              # Call this function after enabling pose_stream
+        mavc.reboot_if_EKF_origin(0.3)              # Call this function after enabling pose_stream
         mavc.set_ekf_origin(EKF_LAT, EKF_LON, 0) # Ignored if already close to the previous origin, if set
     
     # Initialize lists and frame counter.
@@ -355,8 +355,9 @@ def main():
                 kinect_rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
 
                 # compute depth
-                depth_numpy, depth_colormap = compute_depth(kinect_bgr, depth_anything, INPUT_SIZE)
-                cv2.imshow("frame", depth_colormap)
+            #   depth_numpy, depth_colormap = compute_depth(bgr, depth_anything, INPUT_SIZE)
+                depth_numpy, depth_colormap = compute_depth(bgr, depth_anything, INPUT_SIZE)
+                cv2.imshow("frame", kinect_bgr)
 
             # SAVE DATA TO FILE
                 cv2.imwrite(img_dir + '/frame-%06d.rgb.jpg'%(frame_number), bgr)
