@@ -1,20 +1,16 @@
-import os
-import sys
-import cv2
 from utils.utils import *
 import numpy as np
 import time
 import threading
-import torch
 from pymavlink import mavutil
 from depth_anything_v2.dpt import DepthAnythingV2
-from mavlink_control import timesync
+from mavlink_control import timesync, printd
 
 # =========================
 # Obstacle config
 # =========================
 distances_array_length = 72
-MAX_RANGE_M = 6.0
+MAX_RANGE_M = 7.0
 min_depth_cm = 0
 max_depth_cm = int(MAX_RANGE_M * 100)
 angle_offset = -30.0

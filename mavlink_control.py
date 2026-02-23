@@ -77,7 +77,10 @@ def arm(arm_state=1):
     """
     Arm the drone
     """
-    printd("Arming motors...")
+    if arm_state:
+        printd("Arming motors...")
+    else:
+        printd("Disarming")
     drone.mav.command_long_send(
         drone.target_system,
         drone.target_component,
@@ -279,7 +282,7 @@ def timesync(timeout_s=0.5):
         ap_ns = int(time.monotonic_ns() + offset_ns)
         return ap_ns, offset_ns
 
-def reboot_if_EKF_origin(tolerance=0.1):
+def reboot_if_EKF_origin(tolerance=0.2):
     """
     Read the current local‑position and, if either x or y deviates from
     zero by more than `tolerance`, request a reboot so the EKF origin can
@@ -315,12 +318,11 @@ def test():
         IP = "udpout:192.168.53.51:14550"  # Drone IP
         connect_drone(IP)
         en_pose_stream()
-        reboot_if_no_EKF_origin()
+        reboot_if_EKF_origin()
         set_ekf_origin(EKF_LAT, EKF_LON, 0)
         set_mode('GUIDED')
         print("Checking telemetry:")
-        # for i in range(20):
-        while True:
+        for i in range(20):
             pose = get_pose()
             print(pose)
             time.sleep(0.2)
