@@ -2,13 +2,12 @@
 data_dir: 'data/mononav-2026-02-21-11-19-52'
 save_dir_prefix: 'data/mononav-'
 # Camera Settings
-camera_num: 0               # camera number index (test with utils/test_camera.py), try (-1, 0, 1, 2, ...)
 camera_source: 'esp32-cam'                                   # used for naming files
 camera_calibration_path: 'utils/calibration/intrinsics.json' # camera calibration file (for undistortion)
-camera_ip: 'http://192.168.53.56:81/stream'                  # IP camera stream URL (if using an IP camera, otherwise leave blank)   
+camera_ip: 'http://192.168.53.56:81/stream'                  # camera stream URL (otherwise enter integer for camera index)   
 
 # Depth Model Settings
-num_pre_depth_frames: 5       # how many times to run the depth model before starting (the first few inferences are much slower)
+num_pre_depth_frames: 3       # how many times to run the depth model before starting (the first few inferences are much slower)
 INPUT_SIZE: 280               # Multiple of 14. Scales the image by INPUT_SIZE/smaller image dimension
 DA2_CHECKPOINT: "../checkpoints/depth_anything_v2_metric_hypersim_vits.pth" # path to checkpoint for DepthAnythingV2, make sure it matches the encoder you choose
 

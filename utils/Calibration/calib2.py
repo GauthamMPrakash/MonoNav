@@ -6,8 +6,12 @@ import time
 import queue
 import threading
 
-# Force X11 to avoid the Wayland/Qt crash
-os.environ["QT_QPA_PLATFORM"] = "xcb"
+# Dynamically set Qt platform for OpenCV display compatibility
+import platform
+if os.environ.get("WAYLAND_DISPLAY"):
+  os.environ["QT_QPA_PLATFORM"] = "wayland"
+else:
+  os.environ["QT_QPA_PLATFORM"] = "xcb"
 
 # --- CONFIG ---
 URL = "http://192.168.53.56:81/stream"

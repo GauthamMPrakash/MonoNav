@@ -186,90 +186,6 @@ def main():
             cv2.imshow("test", bgr)
             cv2.waitKey(1)
         cv2.destroyAllWindows()
-            
-    #         # Save trajectory information
-    #         row = np.array([frame_number, int(max_traj_idx), time.time()-start_flight_time]) # time since start of flight
-    #         with open(save_dir + "/crazyflie_trajectories.csv", "a") as file:
-    #             np.savetxt(file, row.reshape(1, -1), delimiter=',', fmt='%s')
-
-    #         # Fly the selected trajectory, as applicable.
-    #         start_time = time.time()            
-    #         while time.time() - start_time < period:
-    #             # WARNING: This controller is tuned to work for the Crazyflie 2.1.
-    #             # You must check whether your robot follows the open-loop trajectory.
-    #             yawrate = -amplitudes[traj_index]*np.sin(np.pi/period*(time.time() - start_time))*180/np.pi # deg/s
-    #             yvel =  -yawrate*config['yvel_gain']
-    #             yawrate = yawrate*config['yawrate_gain']
-    #             print("last_key_pressed = ", last_key_pressed)
-    #             if FLY_CRAZYFLIE:
-    #                 cf.commander.send_hover_setpoint(forward_speed, yvel, yawrate, height)
-    #             # get camera capture and transform intrinsics
-    #             crazyflie_bgr = cap.read()
-    #             camera_position = get_crazyflie_pose(scf, logstate) # get camera position immediately
-    #             if goal_position is not None:
-    #                 dist_to_goal = np.linalg.norm(camera_position[0:-1, -1]-goal_position[0])
-    #                 print("dist_to_goal: ", dist_to_goal)
-    #                 if dist_to_goal < min_dist2goal:
-    #                     print("Reached goal!")
-    #                     shouldStop = True
-    #                     last_key_pressed = 'q'
-    #                     break
-    #             # Transform Crazyflie Image to Kinect Image
-    #             kinect_rgb = transform_image(np.asarray(crazyflie_bgr), mtx, dist, kinect)
-    #             kinect_bgr = cv2.cvtColor(kinect_rgb, cv2.COLOR_RGB2BGR)
-    #             # compute depth
-    #             depth_numpy, depth_colormap = compute_depth(kinect_rgb, zoe)
-
-    #             # SAVE DATA TO FILE
-    #             cv2.imwrite(crazyflie_img_dir + "/crazyflie_frame-%06d.rgb.jpg"%(frame_number), crazyflie_bgr)
-    #             cv2.imwrite(kinect_img_dir + "/kinect_frame-%06d.rgb.jpg"%(frame_number), kinect_rgb)
-    #             cv2.imwrite(kinect_depth_dir + '/' + 'kinect_frame-%06d.depth.jpg'%(frame_number), depth_colormap)
-    #             np.save(kinect_depth_dir + '/' + 'kinect_frame-%06d.depth.npy'%(frame_number), depth_numpy) # saved in meters
-    #             np.savetxt(crazyflie_pose_dir + "/crazyflie_frame-%06d.pose.txt"%(frame_number), camera_position)
-                
-    #             # integrate the vbg (prefers bgr)
-    #             vbg.integration_step(kinect_bgr, depth_numpy, camera_position)
-
-    #             frame_number += 1
-    #         traj_counter += 1
-
-    #         # if crazyflie is not in "GO" (g) mode, reset to stopping mode
-    #         if last_key_pressed != 'g':
-    #             last_key_pressed = None
-
-    #         shouldStop, max_traj_idx = choose_primitive(vbg.vbg, camera_position, traj_linesets, goal_position, min_dist2obs, filterYvals, filterWeights, filterTSDF, weight_threshold)
-    #         print("SELECTED max_traj_idx: ", max_traj_idx)
-
-    #     # Exited while(!shouldStop); end control!
-    #     print("shouldStop: ", shouldStop)
-    #     print("Reached goal OR too close to obstacles.")
-    #     print("End control.")
-
-    #     if FLY_CRAZYFLIE:
-    #         # Stopping sequence
-    #         for _ in range(10):
-    #                 cf.commander.send_hover_setpoint(0, 0, 0, height)
-    #                 time.sleep(0.1)
-    #         print("Landing.")
-    #         # Landing Sequence
-    #         for y in np.linspace(height, 0, 21):
-    #             cf.commander.send_hover_setpoint(0, 0, 0, y)
-    #             time.sleep(0.1)
-
-    #     cf.commander.send_stop_setpoint()
-
-    #     print("Releasing camera capture.")
-    #     cap.cap.release()
-    #     cv2.destroyAllWindows()
-
-    #     # save and view vbg
-    #     print('Saving to {}...'.format(npz_save_filename))
-    #     vbg.vbg.save(npz_save_filename)
-    #     print('Saving finished')
-    #     print("Visualize raw pointcloud.")
-    #     pcd = vbg.vbg.extract_point_cloud(weight_threshold)
-    #     o3d.visualization.draw([pcd.cpu()])
-
         
     # ARDUCOPTER CONTROL
     # Connect to the drone
@@ -422,10 +338,12 @@ def main():
             vis.create_window(window_name="MonoNav Reconstruction")
             vis.add_geometry(pcd_legacy)
             view_ctl = vis.get_view_control()
+            render_opt = vis.get_render_option()
+            render_opt.point_size = 1.0      # Smaller points for higher resolution
             # Set 'top-up' view: looking forward along Z, Y up
             view_ctl.set_front([0, 0, -1])   # Look forward along Z
-            view_ctl.set_lookat([0, 0, 0])  # Center at origin
-            view_ctl.set_up([0, 1, 0])      # Y axis is up
+            view_ctl.set_lookat([0, 0, 0])   # Center at origin
+            view_ctl.set_up([0, 0, 1])       # Y axis is up
             view_ctl.set_zoom(0.8)
             vis.run()
             vis.destroy_window()
