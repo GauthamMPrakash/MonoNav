@@ -1,3 +1,6 @@
+SQUARES_X, SQUARES_Y = 10, 7
+SQUARE_LENGTH, MARKER_LENGTH = 0.024, 0.018
+
 import cv2 as cv
 import numpy as np
 import json
@@ -15,8 +18,6 @@ else:
 
 # --- CONFIG ---
 URL = "http://192.168.53.56:81/stream"
-SQUARES_X, SQUARES_Y = 10, 7
-SQUARE_LENGTH, MARKER_LENGTH = 0.024, 0.018
 DICT = cv.aruco.getPredefinedDictionary(cv.aruco.DICT_4X4_50)
 
 board = cv.aruco.CharucoBoard((SQUARES_X, SQUARES_Y), SQUARE_LENGTH, MARKER_LENGTH, DICT)
@@ -86,7 +87,7 @@ def main():
 
             if charuco_ids is not None:
                 cv.aruco.drawDetectedCornersCharuco(vis, charuco_corners, charuco_ids, (0, 255, 0))
-                if time.time() - last_cap_time > 1.2 and len(charuco_ids) > 6:
+                if time.time() - last_cap_time > 2 and len(charuco_ids) > 6:
                     all_corners.append(charuco_corners)
                     all_ids.append(charuco_ids)
                     last_cap_time = time.time()

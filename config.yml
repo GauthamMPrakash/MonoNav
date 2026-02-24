@@ -1,5 +1,5 @@
 # Directory Settings
-data_dir: 'data/mononav-2026-02-21-11-19-52'
+data_dir: 'data/mononav-2026-02-24-22-35-00'
 save_dir_prefix: 'data/mononav-'
 # Camera Settings
 camera_source: 'esp32-cam'                                   # used for naming files
@@ -15,7 +15,7 @@ DA2_CHECKPOINT: "../checkpoints/depth_anything_v2_metric_hypersim_vits.pth" # pa
 filterYvals: True             # this helps filter out the ground / ceiling (for planar navigation)
 filterWeights: True           # this helps filter out low-weight voxels
 filterTSDF: True
-weight_threshold: 0.2         # determine the weight threshold for filtering (higher threshold -> fewer points)
+weight_threshold: 0.1         # determine the weight threshold for filtering (higher threshold -> fewer points)
 VoxelBlockGrid:
   depth_scale: 1000.0         # 1000.0 is default (mm to m), scale factor for depth values during integration
   depth_max: 20.0             # max depth to include in the reconstruction

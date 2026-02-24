@@ -327,15 +327,27 @@ def main():
         print("Saving finished")
         print("Visualize raw pointcloud.")
         pcd = vbg.vbg.extract_point_cloud(weight_threshold)
-        # Move to CPU only if device is CPU:0 or if CPU is preferred
-        device_str = str(device).lower() if isinstance(device, str) else str(device)
-        if "cpu" in device_str:
-            pcd_cpu = pcd.cpu()
-            print(f"Point cloud has {pcd_cpu.point.positions.shape[0]} points (CPU)")
-            o3d.visualization.O3DVisualizer("MonoNav Reconstruction", 1024, 768).show([pcd_cpu])
-        else:
-            print(f"Point cloud has {pcd.point.positions.shape[0]} points (GPU)")
-            o3d.visualization.O3DVisualizer("MonoNav Reconstruction", 1024, 768).show([pcd])
+        pcd_cpu = pcd.cpu()
+        # Convert tensor point cloud to legacy for reliable visualization
+        pcd_legacy = pcd_cpu.to_legacy()
+        print(f"Point cloud has {len(pcd_legacy.points)} points")
+        if len(pcd_legacy.points) > 0:
+        #    o3d.visualization.draw_geometries([pcd_legacy], window_name="MonoNav Reconstruction")
+            vis = o3d.visualization.Visualizer()
+            vis.create_window(window_name="MonoNav Reconstruction")
+            vis.add_geometry(pcd_legacy)
+            # Set a custom camera view (side or isometric)
+            ctr = vis.get_view_control()
+            # Set camera parameters: lookat, up, front, zoom
+            # These values can be tuned for your data
+            bounds = pcd_legacy.get_axis_aligned_bounding_box()
+            center = bounds.get_center()
+            ctr.set_lookat(center)
+            ctr.set_up([0, 0, 1])  # Z up
+            ctr.set_front([0, -1, 0])  # Look along -Y (forward), Z up
+            ctr.set_zoom(0.7)
+            vis.run()
+            vis.destroy_window()
 
     finally:
         print("Releasing camera capture.")
