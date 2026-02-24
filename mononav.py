@@ -86,7 +86,7 @@ shouldStop = False
 
 # Intrinsics for undistortion
 camera_calibration_path = config['camera_calibration_path']
-mtx, dist = get_calibration_values(camera_calibration_path) # for the robot's camera
+mtx, dist, optimal_mtx = get_calibration_values(camera_calibration_path) # for the robot's camera
 kinect = o3d.camera.PinholeCameraIntrinsic(o3d.camera.PinholeCameraIntrinsicParameters.PrimeSenseDefault) # for the kinect
 
 # Initialize VoxelBlockGrid
@@ -94,7 +94,11 @@ depth_scale = config['VoxelBlockGrid']['depth_scale']
 depth_max = config['VoxelBlockGrid']['depth_max']
 trunc_voxel_multiplier = config['VoxelBlockGrid']['trunc_voxel_multiplier']
 weight_threshold = config['weight_threshold'] # for planning and visualization (!! important !!)
-device = config['VoxelBlockGrid']['device']
+if config['VoxelBlockGrid']['device'] != "None": 
+    device = config['VoxelBlockGrid']['device']
+else:
+    device = 'CUDA:0' if torch.cuda.is_available() else 'CPU:0'
+
 vbg = VoxelBlockGrid(depth_scale, depth_max, trunc_voxel_multiplier, o3d.core.Device(device))
 
 # Initialize Trajectory Library (Motion Primitives)
@@ -170,13 +174,15 @@ def main():
 
     # Run the depth model a few times (the first inference is slow), and skip the first few frames
     cap = VideoCapture(STREAM_URL)
+    # Scale mtx, dist to match current camera resolution
+    # Read one frame to get actual resolution
     try:
         for i in range(0, config['num_pre_depth_frames']):
             bgr = cap.read()
             # COMPUTE DEPTH
             start_time_test = time.time()
             depth_numpy, depth_colormap = compute_depth(bgr, depth_anything, INPUT_SIZE)
-            print("TIME TO COMPUTE DEPTH:",time.time()-start_time_test)
+            print("TIME TO COMPUTE DEPTH:", time.time() - start_time_test)
             cv2.imshow("test", bgr)
             cv2.waitKey(1)
         cv2.destroyAllWindows()
@@ -269,13 +275,14 @@ def main():
     # Connect to the drone
         mavc.connect_drone(IP, baud=baud)
         mavc.en_pose_stream()                    # Commands AP to stream poses at a deafult value of 15 Hz
-        mavc.reboot_if_EKF_origin(0.3)              # Call this function after enabling pose_stream
+        mavc.reboot_if_EKF_origin(0.3)           # Call this function after enabling pose_stream
         mavc.set_ekf_origin(EKF_LAT, EKF_LON, 0) # Ignored if already close to the previous origin, if set
     
     # Initialize lists and frame counter.
         frame_number = 0
         start_flight_time = time.time()
         if FLY_VEHICLE==True:
+            print("Arming Motors!")
             mavc.set_mode('GUIDED')
             mavc.arm()
             print("Taking off.")
@@ -304,6 +311,7 @@ def main():
                 if no_safe_traj:
                     if FLY_VEHICLE:
                         mavc.send_body_offset_ned_vel(0, 0, 0, yaw_rate=0)
+                        mavc.printd("No safe trajectory")
                     time.sleep(0.1)
                     continue
                 traj_index = max_traj_idx
@@ -351,12 +359,13 @@ def main():
                         last_key_pressed = 'c'
                         break
                 # Transform Camera Image to Kinect Image
-                kinect_bgr = transform_image(np.asarray(bgr), mtx, dist, kinect)
-                kinect_rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+                kinect_bgr = transform_image(np.asarray(bgr), mtx, dist, optimal_mtx)
+                kinect_rgb = cv2.cvtColor(kinect_bgr, cv2.COLOR_BGR2RGB)
+                #kinect_rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
 
                 # compute depth
-            #   depth_numpy, depth_colormap = compute_depth(bgr, depth_anything, INPUT_SIZE)
-                depth_numpy, depth_colormap = compute_depth(bgr, depth_anything, INPUT_SIZE)
+            #   depth_numpy, depth_colormap = compute_depth(kinect_bgr, depth_anything, INPUT_SIZE)
+                depth_numpy, depth_colormap = compute_depth(kinect_bgr, depth_anything, INPUT_SIZE)
                 cv2.imshow("frame", kinect_bgr)
 
             # SAVE DATA TO FILE

@@ -259,8 +259,7 @@ def timesync(timeout_s=0.5):
     - ap_time_ns: estimated current AP clock (nanoseconds)
     - offset_ns: estimated offset between local and AP clocks
 
-    Returns `(None, None)` on timeout/failure.  Requires a global
-    `drone` mavlink connection.
+    Returns `(None, None)` on timeout/failure.
     """
     t1_ns = time.monotonic_ns()
     drone.mav.timesync_send(0, t1_ns)
@@ -280,8 +279,8 @@ def timesync(timeout_s=0.5):
         local_mid_ns = (t1_ns + t4_ns) // 2
         offset_ns = int(msg.tc1 - local_mid_ns)
         ap_ns = int(time.monotonic_ns() + offset_ns)
-        return ap_ns, offset_ns
-
+        return ap_ns
+    
 def reboot_if_EKF_origin(tolerance=0.2):
     """
     Read the current local‑position and, if either x or y deviates from

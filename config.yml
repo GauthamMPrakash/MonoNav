@@ -9,19 +9,19 @@ camera_ip: 'http://192.168.53.56:81/stream'                  # IP camera stream 
 
 # Depth Model Settings
 num_pre_depth_frames: 5       # how many times to run the depth model before starting (the first few inferences are much slower)
-INPUT_SIZE: 252               # Multiple of 14. Scales the image by INPUT_SIZE/smaller image dimension
+INPUT_SIZE: 280               # Multiple of 14. Scales the image by INPUT_SIZE/smaller image dimension
 DA2_CHECKPOINT: "../checkpoints/depth_anything_v2_metric_hypersim_vits.pth" # path to checkpoint for DepthAnythingV2, make sure it matches the encoder you choose
 
 # Reconstruction settings
 filterYvals: True             # this helps filter out the ground / ceiling (for planar navigation)
 filterWeights: True           # this helps filter out low-weight voxels
 filterTSDF: True
-weight_threshold: 1.          # determine the weight threshold for filtering (higher threshold -> fewer points)
+weight_threshold: 0.2         # determine the weight threshold for filtering (higher threshold -> fewer points)
 VoxelBlockGrid:
   depth_scale: 1000.0         # 1000.0 is default (mm to m), scale factor for depth values during integration
-  depth_max: 20.0              # max depth to include in the reconstruction
+  depth_max: 20.0             # max depth to include in the reconstruction
   trunc_voxel_multiplier: 8.0
-  device: "CUDA:0"            # "CUDA:0" (faster) or "CPU:0" (if no GPU is available)
+  device: None                # "CUDA:0" (faster) or "CPU:0" (if no GPU is available). None for auto-selection 
 
 # Planning Settings
 trajlib_dir: "utils/trajlib/" # where to save & retrieve the trajectory library (motion primitives)
@@ -48,7 +48,7 @@ OF_Negates: True           # whether the optical flow outputs are negated, this 
 # Arbitrary EKF origin
 EKF_LAT: 8.4723591
 EKF_LON: 76.9295203
-forward_speed: 0.5         # forward speed in m/s, set to None to use speed defined in generate_primitives.py
+forward_speed: 1.0         # forward speed in m/s, set to None to use speed defined in generate_primitives.py
 # Control gain settings (YOU MAY NEED TO TUNE THIS YOURSELF)
 yvel_gain: 0.015           # yvel =  -yawrate*yvel_gain  <- for providing sideways velocity so fast drones take a pefect turn. Increase for faster turns.
 yawrate_gain: 1.25         # yawrate = yawrate*yawrate_gain

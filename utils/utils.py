@@ -13,9 +13,9 @@ Helper functions for the MonoNav project.
 Functionality should be concentrated here and shared between the scripts.
 
 """
-import time
 import cv2
 import numpy as np
+from matplotlib import colormaps
 from scipy.spatial.transform import Rotation as Rotation
 from scipy.spatial import distance
 import os
@@ -28,14 +28,15 @@ import yaml, json
 # from cflib.crazyflie.log import LogConfig
 # from cflib.crazyflie.syncLogger import SyncLogger
 
-import mavlink_control as mav
-
+import mavlink_control as mavc         # ArduCopter MAVLink wrappers
 import queue, threading                # For bufferless video capture
 
 """
 Compute depth from an RGB image using DepthAnythingV2
 Returns depth_numpy (uint16 in mm), depth_colormap (for visualization)
 """
+cmap = colormaps.get_cmap('Spectral')
+
 def compute_depth(frame, depth_anything, size, make_colormap=True):
     # Compute depth
     depth = depth_anything.infer_image(frame, size)  # as torch tensor
@@ -44,7 +45,9 @@ def compute_depth(frame, depth_anything, size, make_colormap=True):
     depth_numpy = depth_numpy.astype(np.uint16) # Convert to uint16
 
     if make_colormap:
-        depth_colormap = cv2.applyColorMap(255 - cv2.convertScaleAbs(depth_numpy, alpha=0.03), cv2.COLORMAP_JET)
+        depth_colormap = ((depth_numpy - depth_numpy.min()) / (depth_numpy.max() - depth_numpy.min()) * 255.0).astype(np.uint8)
+        depth_colormap = (cmap(depth_colormap)[:, :, :3] * 255)[:, :, ::-1].astype(np.uint8)
+        #depth_colormap = cv2.applyColorMap(cv2.convertScaleAbs(depth_colormap, alpha=0.03), cv2.COLORMAP_JET)
     else:
         depth_colormap = None
 
@@ -223,7 +226,7 @@ ArduPilot frame: (X, Y, Z) is NORTH EAST DOWN (NED)
 Open3D frame: (X, Y, Z) is RIGHT DOWN FRONT (RDF)
 """
 def get_drone_pose():
-    _x, _y, _z, _yaw, _pitch, _roll = mav.get_pose()
+    _x, _y, _z, _yaw, _pitch, _roll = mavc.get_pose()
     # Convert position from AP to TSDF frame
     xyz = np.array([_y, _z, _x]) # Convert to TSDF frame
     # Convert rotation from AP to TSDF frame
@@ -436,21 +439,22 @@ def get_calibration_values(camera_calibration_path):
         data = json.load(json_file)
     mtx = np.array(data['camera_matrix'])
     dist = np.array(data['dist_coeffs'])
-    return mtx, dist
+    opt_mtx = np.array(data['refined_matrix'])
+    return mtx, dist, opt_mtx
 
 """
 Transform the raw image to match the kinect image: dimensions and intrinsics.
 This involves resizing the image, scaling the camera matrix, and undistorting the image.
 """
-def transform_image(image, mtx, dist, kinect):
-    if image.shape[0] != kinect.height or image.shape[1] != kinect.width:
-        # Resize the camera matrix to match new dimensions
-        scale_vec = np.array([kinect.width / image.shape[1], kinect.height / image.shape[0], 1]).reshape((3,1))
-        mtx = mtx * scale_vec
-        # Resize image to match the kinect dimensions & new intrinsics
-        image = cv2.resize(image, (kinect.width, kinect.height))
+def transform_image(image, mtx, dist, optimal_matrix):
+    # if image.shape[0] != kinect.height or image.shape[1] != kinect.width:
+    #     # Resize the camera matrix to match new dimensions
+    #     scale_vec = np.array([kinect.width / image.shape[1], kinect.height / image.shape[0], 1]).reshape((3,1))
+    #     mtx = mtx * scale_vec
+    #     # Resize image to match the kinect dimensions & new intrinsics
+    #     image = cv2.resize(image, (kinect.width, kinect.height))
     # Transform to the kinect camera matrix
-    transformed_image = cv2.undistort(np.asarray(image), mtx, dist, None, kinect.intrinsic_matrix)
+    transformed_image = cv2.undistort(np.asarray(image), mtx, dist, None, optimal_matrix)
     return transformed_image
 
 """

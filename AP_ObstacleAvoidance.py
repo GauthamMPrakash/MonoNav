@@ -12,10 +12,10 @@ import open3d as o3d
 import sys
 import signal
 
-# Add DepthAnythingV2-metric path
-# repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
-# metric_depth_path = os.path.join(repo_root, 'metric_depth')
-# sys.path.insert(0, metric_depth_path)
+# Add DepthAnythingV2-metric to path
+repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+metric_depth_path = os.path.join(repo_root, 'metric_depth')
+sys.path.insert(0, metric_depth_path)
 
 from metric_depth.depth_anything_v2.dpt import DepthAnythingV2         
 from pynput import keyboard            # Keyboard control
@@ -24,10 +24,9 @@ from pynput import keyboard            # Keyboard control
 from utils.utils import *
 import mavlink_control as mavc         # import the mavlink helper script 
 
-forward_speed = 0.5
-
 # LOAD VALUES FROM CONFIG FILE
 config = load_config('config.yml')
+forward_speed = config['forward_speed']
 
 INPUT_SIZE = config['INPUT_SIZE']      # Image size
 CHECKPOINT = config['DA2_CHECKPOINT']  # path to checkpoint for DepthAnythingV2
@@ -58,7 +57,6 @@ model_configs = {
     'vits': {'encoder': 'vits', 'features': 64, 'out_channels': [48, 96, 192, 384]},
     'vitb': {'encoder': 'vitb', 'features': 128, 'out_channels': [96, 192, 384, 768]},
     # 'vitl': {'encoder': 'vitl', 'features': 256, 'out_channels': [256, 512, 1024, 1024]},
-    # 'vitg': {'encoder': 'vitg', 'features': 384, 'out_channels': [1536, 1536, 1536, 1536]}
 }
 
 # Initialize the DepthAnythingV2 model and load the checkpoint
@@ -322,11 +320,14 @@ def main():
     vehicle = mavc.connect_drone(IP, baud=baud)
     mavc.set_ekf_origin(EKF_LAT, EKF_LON, 0)
     mavc.en_pose_stream()
+    mavc.reboot_if_EKF_origin(0.3) 
     ap_ns = mavc.timesync()
 
     if FLY_VEHICLE:
+        print("Arming Motors!")
         mavc.set_mode('GUIDED')
         time.sleep(0.1)
+        time.sleep(2)
         mavc.arm()
         mavc.takeoff(height)
         mavc.set_speed(forward_speed)
@@ -364,11 +365,13 @@ def main():
             send_obstacle_distance_message(vehicle)
             last_send_time = time.time()
 
-        kinect_bgr = transform_image(bgr, mtx, dist, kinect)
-        kinect_rgb = cv2.cvtColor(kinect_bgr, cv2.COLOR_BGR2RGB)
-        vbg.integration_step(kinect_bgr, depth_mat, camera_position)
+        # kinect_bgr = transform_image(bgr, mtx, dist, kinect)
+        # kinect_rgb = cv2.cvtColor(kinect_bgr, cv2.COLOR_BGR2RGB)
+
+        vbg.integration_step(bgr, depth_mat, camera_position)
+        # vbg.integration_step(kinect_bgr, depth_mat, camera_position)
         cv2.imwrite(img_dir + '/frame-%06d.rgb.jpg' % (frame_number,), bgr)
-        cv2.imwrite(kinect_img_dir + '/kinect_frame-%06d.rgb.jpg' % (frame_number,), kinect_rgb)
+        # cv2.imwrite(kinect_img_dir + '/kinect_frame-%06d.rgb.jpg' % (frame_number,), kinect_bgr)
         cv2.imwrite(kinect_depth_dir + '/' + 'kinect_frame-%06d.depth.jpg' % (frame_number,), depth_colormap)
         np.save(kinect_depth_dir + '/' + 'kinect_frame-%06d.depth.npy' % (frame_number,), depth_mat)
         np.savetxt(pose_dir + '/frame-%06d.pose.txt' % (frame_number,), camera_position)

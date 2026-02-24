@@ -116,19 +116,22 @@ def main():
                         img_points.append(imgp)
                 
                 ret, mtx, dist, rvecs, tvecs = cv.calibrateCamera(obj_points, img_points, imsize, None, None)
-                new_mtx, _ = cv.getOptimalNewCameraMatrix(mtx, dist, imsize, 1, imsize)
-                
+                new_mtx, roi = cv.getOptimalNewCameraMatrix(mtx, dist, imsize, 1, imsize)
+
                 # --- ADD THIS TO SAVE THE DATA ---
                 calib_data = {
-                    "rms_error": ret,
-                    "camera_matrix": mtx.tolist(),
-                    "dist_coeffs": dist.tolist(),
-                    "resolution": imsize
+                  "rms_error": ret,
+                  "camera_matrix": mtx.tolist(),
+                  "dist_coeffs": dist.tolist(),
+                  "resolution": imsize,
+                  "refined_matrix": new_mtx.tolist(),
+                  "roi": list(roi),
+                  "explanation": "refined_matrix and roi are for undistorted images."
                 }
                 with open("calibration.json", "w") as f:
-                    json.dump(calib_data, f, indent=4)
+                  json.dump(calib_data, f, indent=4)
 
-                print("Data saved to 'calibration.json' in your current folder.")
+                print("Data saved to 'calibration.json' in your current folder (with refined_matrix and roi).")
                 # ---------------------------------
                 calibrated = True
                 print(f"Success! RMS Error: {ret:.4f}")
@@ -137,7 +140,6 @@ def main():
             else:
                 print("Capture more frames first!")
 
-    cap.release()
     cv.destroyAllWindows()
 
 if __name__ == "__main__":
