@@ -128,98 +128,6 @@ class VideoCapture:
         return self.last_frame
       raise RuntimeError("VideoCapture timeout: no frame available")
 
-# # Author: MiniMax
-# """
-# Conversion functions for coordinate frames.
-
-# Aeronautical frame convention (e.g., NED with Z-down):
-# - X: Forward (front)
-# - Y: Right
-# - Z: Down
-# - Intrinsic ZYX rotation sequence (yaw-Z, pitch-Y, roll-X)
-
-# TSDF/Open3D frame convention:
-# - X: Right
-# - Y: Down
-# - Z: Forward (front)
-# - Extrinsic XYZ rotation sequence (equivalent to intrinsic ZYX)
-# """
-
-# def aeronautical_to_tsdf(roll, pitch, yaw, x, y, z, degrees=True):
-#     """
-#     Convert pose from aeronautical frame (X-front, Y-right, Z-down, ZYX intrinsic)
-#     to TSDF frame (X-right, Y-down, Z-front).
-    
-#     Args:
-#         roll: Roll angle (rotation around X/front axis)
-#         pitch: Pitch angle (rotation around Y/right axis)
-#         yaw: Yaw angle (rotation around Z/down axis)
-#         x: X position in aeronautical frame (forward)
-#         y: Y position in aeronautical frame (right)
-#         z: Z position in aeronautical frame (down)
-#         degrees: If True, angles are in degrees (default: True)
-    
-#     Returns:
-#         4x4 homogeneous transformation matrix in TSDF frame
-#     """
-#     # Convert angles to rotation matrix using scipy
-#     # 'ZYX' with extrinsic=True gives the same rotation as intrinsic ZYX
-#     r = Rotation.from_euler('ZYX', [yaw, pitch, roll], degrees=degrees)
-#     R_aero = r.as_matrix()
-    
-#     # Transformation matrix between coordinate frames
-#     # Maps: X_front -> Z_front, Y_right -> X_right, Z_down -> Y_down
-#     M_change = np.array([[0, 0, 1],
-#                          [1, 0, 0],
-#                          [0, 1, 0]])
-    
-#     # Convert rotation matrix
-#     R_tsdf = M_change @ R_aero @ M_change.T
-    
-#     # Convert position
-#     xyz_aero = np.array([x, y, z])
-#     xyz_tsdf = M_change @ xyz_aero
-    
-#     # Create homogeneous transformation matrix
-#     H = np.eye(4)
-#     H[0:3, 0:3] = R_tsdf
-#     H[0:3, 3] = xyz_tsdf
-    
-#     return H
-
-
-# def aeronautical_pose_to_tsdf(pose_aero):
-#     """
-#     Convert a full 4x4 pose matrix from aeronautical frame to TSDF frame.
-    
-#     Args:
-#         pose_aero: 4x4 homogeneous transformation matrix in aeronautical frame
-    
-#     Returns:
-#         4x4 homogeneous transformation matrix in TSDF frame
-#     """
-#     # Extract rotation matrix and translation vector
-#     R_aero = pose_aero[0:3, 0:3]
-#     t_aero = pose_aero[0:3, 3]
-    
-#     # Transformation matrix between coordinate frames
-#     M_change = np.array([[0, 0, 1],
-#                          [1, 0, 0],
-#                          [0, 1, 0]])
-    
-#     # Convert rotation matrix
-#     R_tsdf = M_change @ R_aero @ M_change.T
-    
-#     # Convert translation
-#     t_tsdf = M_change @ t_aero
-    
-#     # Create homogeneous transformation matrix
-#     H_tsdf = np.eye(4)
-#     H_tsdf[0:3, 0:3] = R_tsdf
-#     H_tsdf[0:3, 3] = t_tsdf
-    
-#     return H_tsdf
-
 """
 Get the global pose from the vehicle, convert to the Open3D frame
 ArduPilot frame: (X, Y, Z) is NORTH EAST DOWN (NED)
@@ -440,13 +348,14 @@ def get_calibration_values(camera_calibration_path):
     mtx = np.array(data['camera_matrix'])
     dist = np.array(data['dist_coeffs'])
     opt_mtx = np.array(data['refined_matrix'])
-    return mtx, dist, opt_mtx
+    roi = np.array(data['roi'])
+    return mtx, dist, opt_mtx, roi
 
 """
 Transform the raw image to match the kinect image: dimensions and intrinsics.
 This involves resizing the image, scaling the camera matrix, and undistorting the image.
 """
-def transform_image(image, mtx, dist, optimal_matrix):
+def transform_image(image, mtx, dist, optimal_matrix, roi):
     # if image.shape[0] != kinect.height or image.shape[1] != kinect.width:
     #     # Resize the camera matrix to match new dimensions
     #     scale_vec = np.array([kinect.width / image.shape[1], kinect.height / image.shape[0], 1]).reshape((3,1))
@@ -455,6 +364,10 @@ def transform_image(image, mtx, dist, optimal_matrix):
     #     image = cv2.resize(image, (kinect.width, kinect.height))
     # Transform to the kinect camera matrix
     transformed_image = cv2.undistort(np.asarray(image), mtx, dist, None, optimal_matrix)
+    # Crop the image to the ROI
+    x, y, w, h = roi
+    transformed_image = transformed_image[y:y+h, x:x+w]
+
     return transformed_image
 
 """

@@ -86,8 +86,8 @@ shouldStop = False
 
 # Intrinsics for undistortion
 camera_calibration_path = config['camera_calibration_path']
-mtx, dist, optimal_mtx = get_calibration_values(camera_calibration_path) # for the robot's camera
-kinect = o3d.camera.PinholeCameraIntrinsic(o3d.camera.PinholeCameraIntrinsicParameters.PrimeSenseDefault) # for the kinect
+mtx, dist, optimal_mtx, roi = get_calibration_values(camera_calibration_path) # for the robot's camera
+# kinect = o3d.camera.PinholeCameraIntrinsic(o3d.camera.PinholeCameraIntrinsicParameters.PrimeSenseDefault) # for the kinect
 
 # Initialize VoxelBlockGrid
 depth_scale = config['VoxelBlockGrid']['depth_scale']
@@ -131,13 +131,13 @@ npz_save_filename = save_dir + '/vbg.npz'
 
 img_dir = os.path.join(save_dir, 'rgb-images')
 pose_dir = os.path.join(save_dir, 'poses')
-kinect_img_dir = os.path.join(save_dir, 'kinect-rgb-images')
-kinect_depth_dir = os.path.join(save_dir, 'kinect-depth-images')
+transform_img_dir = os.path.join(save_dir, 'transform-rgb-images')
+transform_depth_dir = os.path.join(save_dir, 'transform-depth-images')
 
 os.makedirs(img_dir, exist_ok=True)
 os.makedirs(pose_dir, exist_ok=True)
-os.makedirs(kinect_img_dir, exist_ok=True)
-os.makedirs(kinect_depth_dir, exist_ok=True)
+os.makedirs(transform_img_dir, exist_ok=True)
+os.makedirs(transform_depth_dir, exist_ok=True)
 
 # Save the run information to a csv
 header = ['frame_number', 'chosen_traj_idx', 'time_elapsed']
@@ -275,24 +275,24 @@ def main():
                         last_key_pressed = 'c'
                         break
                 # Transform Camera Image to Kinect Image
-                kinect_bgr = transform_image(np.asarray(bgr), mtx, dist, optimal_mtx)
-                kinect_rgb = cv2.cvtColor(kinect_bgr, cv2.COLOR_BGR2RGB)
-                #kinect_rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+                transform_bgr = transform_image(np.asarray(bgr), mtx, dist, optimal_mtx, roi)
+                transform_rgb = cv2.cvtColor(transform_bgr, cv2.COLOR_BGR2RGB)
+                #transform_rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
 
                 # compute depth
-            #   depth_numpy, depth_colormap = compute_depth(kinect_bgr, depth_anything, INPUT_SIZE)
-                depth_numpy, depth_colormap = compute_depth(kinect_bgr, depth_anything, INPUT_SIZE)
-                cv2.imshow("frame", kinect_bgr)
+            #   depth_numpy, depth_colormap = compute_depth(transform_bgr, depth_anything, INPUT_SIZE)
+                depth_numpy, depth_colormap = compute_depth(transform_bgr, depth_anything, INPUT_SIZE)
+                cv2.imshow("frame", transform_bgr)
 
             # SAVE DATA TO FILE
                 cv2.imwrite(img_dir + '/frame-%06d.rgb.jpg'%(frame_number), bgr)
-                cv2.imwrite(kinect_img_dir + '/kinect_frame-%06d.rgb.jpg'%(frame_number), kinect_bgr)
-                cv2.imwrite(kinect_depth_dir + '/' + 'kinect_frame-%06d.depth.jpg'%(frame_number), depth_colormap)
-                np.save(kinect_depth_dir + '/' + 'kinect_frame-%06d.depth.npy'%(frame_number), depth_numpy) # saved in meters
+                cv2.imwrite(transform_img_dir + '/transform_frame-%06d.rgb.jpg'%(frame_number), transform_bgr)
+                cv2.imwrite(transform_depth_dir + '/' + 'transform_frame-%06d.depth.jpg'%(frame_number), depth_colormap)
+                np.save(transform_depth_dir + '/' + 'transform_frame-%06d.depth.npy'%(frame_number), depth_numpy) # saved in meters
                 np.savetxt(pose_dir + '/frame-%06d.pose.txt'%(frame_number), camera_position)
 
             # integrate the vbg (prefers rgb)
-                vbg.integration_step(kinect_rgb, depth_numpy, camera_position)
+                vbg.integration_step(transform_rgb, depth_numpy, camera_position)
 
                 frame_number += 1
             traj_counter += 1
