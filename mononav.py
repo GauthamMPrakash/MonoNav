@@ -327,26 +327,15 @@ def main():
         print("Saving finished")
         print("Visualize raw pointcloud.")
         pcd = vbg.vbg.extract_point_cloud(weight_threshold)
-        pcd_cpu = pcd.cpu()
-        # Convert tensor point cloud to legacy for reliable visualization
-        pcd_legacy = pcd_cpu.to_legacy()
-        print(f"Point cloud has {len(pcd_legacy.points)} points")
-        if len(pcd_legacy.points) > 0:
-        #    o3d.visualization.draw_geometries([pcd_legacy], window_name="MonoNav Reconstruction")
-        
-            vis = o3d.visualization.Visualizer()
-            vis.create_window(window_name="MonoNav Reconstruction")
-            vis.add_geometry(pcd_legacy)
-            view_ctl = vis.get_view_control()
-            render_opt = vis.get_render_option()
-            render_opt.point_size = 1.0      # Smaller points for higher resolution
-            # Set 'top-up' view: looking forward along Z, Y up
-            view_ctl.set_front([0, 0, -1])   # Look forward along Z
-            view_ctl.set_lookat([0, 0, 0])   # Center at origin
-            view_ctl.set_up([0, 0, 1])       # Y axis is up
-            view_ctl.set_zoom(0.8)
-            vis.run()
-            vis.destroy_window()
+        # Move to CPU only if device is CPU:0 or if CPU is preferred
+        device_str = str(device).lower() if isinstance(device, str) else str(device)
+        if "cpu" in device_str:
+            pcd_cpu = pcd.cpu()
+            print(f"Point cloud has {pcd_cpu.point.positions.shape[0]} points (CPU)")
+            o3d.visualization.O3DVisualizer("MonoNav Reconstruction", 1024, 768).show([pcd_cpu])
+        else:
+            print(f"Point cloud has {pcd.point.positions.shape[0]} points (GPU)")
+            o3d.visualization.O3DVisualizer("MonoNav Reconstruction", 1024, 768).show([pcd])
 
     finally:
         print("Releasing camera capture.")
