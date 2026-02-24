@@ -121,7 +121,7 @@ def main():
                         img_points.append(imgp)
                 
                 ret, mtx, dist, rvecs, tvecs = cv.calibrateCamera(obj_points, img_points, imsize, None, None)
-                new_mtx, roi = cv.getOptimalNewCameraMatrix(mtx, dist, imsize, 1, imsize)
+                new_mtx, roi = cv.getOptimalNewCameraMatrix(mtx, dist, imsize, 0, imsize)
 
                 # --- ADD THIS TO SAVE THE DATA ---
                 calib_data = {
