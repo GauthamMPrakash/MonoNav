@@ -40,7 +40,7 @@ from depth_anything_v2.dpt import DepthAnythingV2
 import mavlink_control as mavc         # import the mavlink helper script          
 from pynput import keyboard            # Keyboard control
 
-# helper functions
+# helper functions. Core MonoNav algorithms are implemented in utils.py
 from utils.utils import *
 
 # LOAD VALUES FROM CONFIG FILE
