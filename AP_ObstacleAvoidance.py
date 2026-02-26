@@ -1,5 +1,12 @@
 """
- 
+MonoNav - Monocular Vision Obstacle Avoidance for ArduCopter
+Uses DepthAnythingV2 for metric depth estimation and sends OBSTACLE_DISTANCE
+messages to ArduCopter's BendyRuler algorithm for reactive obstacle avoidance.
+
+Requirements:
+- ArduCopter with BendyRuler enabled (OA_TYPE=1, AVOID_ENABLE=7, PRX_TYPE=2)
+- ESP32-CAM or similar IP camera
+- DepthAnythingV2 model checkpoint
 """
 
 import cv2
@@ -87,8 +94,7 @@ DEPTH_HEIGHT = None
 camera_num = config['camera_num']
 # Intrinsics for undistortion
 camera_calibration_path = config['camera_calibration_path']
-mtx, dist = get_calibration_values(camera_calibration_path) # for the robot's camera
-kinect = o3d.camera.PinholeCameraIntrinsic(o3d.camera.PinholeCameraIntrinsicParameters.PrimeSenseDefault) # for the kinect
+mtx, dist, opt_mtx, roi = get_calibration_values(camera_calibration_path) # for the robot's camera
 
 # Initialize VoxelBlockGrid
 vbg_depth_scale = float(config['VoxelBlockGrid']['depth_scale'])
@@ -127,13 +133,13 @@ npz_save_filename = save_dir + '/vbg.npz'
 
 img_dir = os.path.join(save_dir, 'rgb-images')
 pose_dir = os.path.join(save_dir, 'poses')
-kinect_img_dir = os.path.join(save_dir, 'kinect-rgb-images')
-kinect_depth_dir = os.path.join(save_dir, 'kinect-depth-images')
+transform_img_dir = os.path.join(save_dir, 'transform-rgb-images')
+transform_depth_dir = os.path.join(save_dir, 'transform-depth-images')
 
 os.makedirs(img_dir, exist_ok=True)
 os.makedirs(pose_dir, exist_ok=True)
-os.makedirs(kinect_img_dir, exist_ok=True)
-os.makedirs(kinect_depth_dir, exist_ok=True)
+os.makedirs(transform_img_dir, exist_ok=True)
+os.makedirs(transform_depth_dir, exist_ok=True)
 
 # # Save the run information to a csv
 # header = ['frame_number', 'chosen_traj_idx', 'time_elapsed']
@@ -194,6 +200,11 @@ def send_obstacle_distance_message(vehicle):
             angle_offset,       # angle_offset, float,          deg
             12                  # MAV_FRAME, vehicle-front aligned: https://mavlink.io/en/messages/common.html#MAV_FRAME_BODY_FRD    
         )
+        
+        # Log minimum obstacle distance for monitoring
+        min_obstacle_dist = np.min(distances)
+        if min_obstacle_dist < 200:                   # Less than 2 meters
+            mavc.printd(f"[OBSTACLE] Min distance: {min_obstacle_dist} cm")
 
 # Find the height of the horizontal line to calculate the obstacle distances
 #   - Basis: depth camera's vertical FOV, user's input
@@ -310,7 +321,15 @@ def main():
 
     signal.signal(signal.SIGINT, sigint_handler)
 
-    mavc.printd("Starting IP camera + DepthAnythingV2 obstacle distance streaming")
+    # mavc.printd("Starting IP camera + DepthAnythingV2 obstacle distance streaming")
+    # mavc.printd("=" * 70)
+    # mavc.printd("ArduCopter BendyRuler Integration")
+    # mavc.printd("Ensure these parameters are set on ArduCopter:")
+    # mavc.printd("  OA_TYPE = 1           (BendyRuler)")
+    # mavc.printd("  AVOID_ENABLE = 7      (Enable all avoidance)")
+    # mavc.printd("  OA_MARGIN_MAX = 2.0   (2m safety margin)")
+    # mavc.printd("  PRX_TYPE = 2          (MAVLink proximity)")
+    # mavc.printd("=" * 70)
 
     cap = VideoCapture(STREAM_URL)
     for _ in range(0, config['num_pre_depth_frames']):
@@ -338,8 +357,13 @@ def main():
 
     while not main_loop_should_quit:
         bgr = cap.read()
-        camera_position = get_drone_pose()
         if bgr is None:
+            continue
+        
+        try:
+            camera_position = get_drone_pose()
+        except Exception as e:
+            mavc.printd(f"Error getting drone pose: {e}")
             continue
 
         if DEPTH_HEIGHT is None or DEPTH_WIDTH is None:
@@ -365,15 +389,15 @@ def main():
             send_obstacle_distance_message(vehicle)
             last_send_time = time.time()
 
-        # kinect_bgr = transform_image(bgr, mtx, dist, kinect)
-        # kinect_rgb = cv2.cvtColor(kinect_bgr, cv2.COLOR_BGR2RGB)
+        transform_bgr = transform_image(bgr, mtx, dist, opt_mtx, roi)
+        transform_rgb = cv2.cvtColor(transform_bgr, cv2.COLOR_BGR2RGB)
 
-        vbg.integration_step(bgr, depth_mat, camera_position)
-        # vbg.integration_step(kinect_bgr, depth_mat, camera_position)
+        vbg.integration_step(transform_rgb, depth_mat, camera_position)
+        # vbg.integration_step(transform_bgr, depth_mat, camera_position)
         cv2.imwrite(img_dir + '/frame-%06d.rgb.jpg' % (frame_number,), bgr)
-        # cv2.imwrite(kinect_img_dir + '/kinect_frame-%06d.rgb.jpg' % (frame_number,), kinect_bgr)
-        cv2.imwrite(kinect_depth_dir + '/' + 'kinect_frame-%06d.depth.jpg' % (frame_number,), depth_colormap)
-        np.save(kinect_depth_dir + '/' + 'kinect_frame-%06d.depth.npy' % (frame_number,), depth_mat)
+        cv2.imwrite(transform_img_dir + '/transform_frame-%06d.rgb.jpg' % (frame_number,), transform_bgr)
+        cv2.imwrite(transform_depth_dir + '/' + 'transform_frame-%06d.depth.jpg' % (frame_number,), depth_colormap)
+        np.save(transform_depth_dir + '/' + 'transform_frame-%06d.depth.npy' % (frame_number,), depth_mat)
         np.savetxt(pose_dir + '/frame-%06d.pose.txt' % (frame_number,), camera_position)
         frame_number += 1
 
