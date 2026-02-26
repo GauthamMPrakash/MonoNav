@@ -48,7 +48,7 @@ EKF_LAT = config['EKF_LAT']
 EKF_LON = config['EKF_LON']
 STREAM_URL = config['camera_ip']       # YOUR ESP32 HTTP MJPEG stream
 
-DEPTH_RANGE_M = [0.1, 10.0]            # min and max ranges to be computed
+DEPTH_RANGE_M = [0.3, 10.0]            # min and max ranges to be computed
 min_depth_cm = int(DEPTH_RANGE_M[0] * 100)  # In cm
 max_depth_cm = int(DEPTH_RANGE_M[1] * 100)  # In cm, should be a little conservative
 distances_array_length = 72
@@ -63,7 +63,7 @@ display_name  = 'Input/output depth'
 model_configs = {
     'vits': {'encoder': 'vits', 'features': 64, 'out_channels': [48, 96, 192, 384]},
     'vitb': {'encoder': 'vitb', 'features': 128, 'out_channels': [96, 192, 384, 768]},
-    # 'vitl': {'encoder': 'vitl', 'features': 256, 'out_channels': [256, 512, 1024, 1024]},
+#   'vitl': {'encoder': 'vitl', 'features': 256, 'out_channels': [256, 512, 1024, 1024]},
 }
 
 # Initialize the DepthAnythingV2 model and load the checkpoint
@@ -321,26 +321,18 @@ def main():
 
     signal.signal(signal.SIGINT, sigint_handler)
 
-    # mavc.printd("Starting IP camera + DepthAnythingV2 obstacle distance streaming")
-    # mavc.printd("=" * 70)
-    # mavc.printd("ArduCopter BendyRuler Integration")
-    # mavc.printd("Ensure these parameters are set on ArduCopter:")
-    # mavc.printd("  OA_TYPE = 1           (BendyRuler)")
-    # mavc.printd("  AVOID_ENABLE = 7      (Enable all avoidance)")
-    # mavc.printd("  OA_MARGIN_MAX = 2.0   (2m safety margin)")
-    # mavc.printd("  PRX_TYPE = 2          (MAVLink proximity)")
-    # mavc.printd("=" * 70)
-
     cap = VideoCapture(STREAM_URL)
     for _ in range(0, config['num_pre_depth_frames']):
         bgr = cap.read()
         compute_depth(bgr, depth_anything, INPUT_SIZE, make_colormap=False)
+        cv2.waitKey(1)
+    cv2.destroyAllWindows()
 
     vehicle = mavc.connect_drone(IP, baud=baud)
     mavc.set_ekf_origin(EKF_LAT, EKF_LON, 0)
     mavc.en_pose_stream()
     mavc.reboot_if_EKF_origin(0.3) 
-    ap_ns = mavc.timesync()
+    mavc.timesync()
 
     if FLY_VEHICLE:
         print("Arming Motors!")
@@ -354,12 +346,33 @@ def main():
     last_send_time = 0.0
     last_time = time.time()
     frame_number = 0
+    
+    # Scale intrinsics if camera resolution differs from calibration resolution
+    global mtx, dist, opt_mtx, roi
+    first_frame = cap.read()
+    if first_frame is not None:
+        frame_height, frame_width = first_frame.shape[:2]
+        calib_width, calib_height = get_calibration_resolution(camera_calibration_path)
+        if calib_width is not None and calib_height is not None:
+            scale_x = frame_width / calib_width
+            scale_y = frame_height / calib_height
+            if abs(scale_x - 1.0) > 1e-6 or abs(scale_y - 1.0) > 1e-6:
+                mavc.printd(f"Scaling intrinsics: {calib_width}x{calib_height} → {frame_width}x{frame_height}")
+                mtx = scale_intrinsics(mtx, scale_x, scale_y)
+                opt_mtx = scale_intrinsics(opt_mtx, scale_x, scale_y)
+                roi = np.array([
+                    int(round(roi[0] * scale_x)),
+                    int(round(roi[1] * scale_y)),
+                    int(round(roi[2] * scale_x)),
+                    int(round(roi[3] * scale_y)),
+                ], dtype=np.int32)
+                # Update cropped intrinsics for VoxelBlockGrid
+                cropped_mtx = get_cropped_intrinsics(opt_mtx, roi)
+                vbg.intrinsic_matrix = cropped_mtx
+                vbg.depth_intrinsic = o3d.core.Tensor(cropped_mtx, o3d.core.Dtype.Float64)
 
     while not main_loop_should_quit:
         bgr = cap.read()
-        if bgr is None:
-            continue
-        
         try:
             camera_position = get_drone_pose()
         except Exception as e:
@@ -373,7 +386,7 @@ def main():
 
         current_time_us = int(round(time.time() * 1000000))
         update_vehicle_pitch()
-        depth_mat, depth_colormap = compute_depth(bgr, depth_anything, INPUT_SIZE)
+        depth_mat, depth_colormap = compute_depth(transform_bgr, depth_anything, INPUT_SIZE)
 
         obstacle_line_height = find_obstacle_line_height()
         distances_from_depth_image(
@@ -442,7 +455,7 @@ def main():
     pcd_legacy = pcd_cpu.to_legacy()
     mavc.printd("Point cloud has {} points".format(len(pcd_legacy.points)))
     if len(pcd_legacy.points) > 0:
-        o3d.visualization.draw_geometries([pcd_legacy], window_name="MonoNav Reconstruction")
+        o3d.visualization.draw_geometries([pcd_legacy], window_name="Reconstruction")
 
 if __name__ == "__main__":
     main()

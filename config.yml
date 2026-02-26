@@ -15,12 +15,12 @@ DA2_CHECKPOINT: "../checkpoints/depth_anything_v2_metric_hypersim_vits.pth" # pa
 filterYvals: True             # this helps filter out the ground / ceiling (for planar navigation)
 filterWeights: True           # this helps filter out low-weight voxels
 filterTSDF: True
-weight_threshold: 3           # determine the weight threshold for filtering (higher threshold -> fewer points)
+weight_threshold: 3.0         # determine the weight threshold for filtering (higher threshold -> fewer points)
 VoxelBlockGrid:
   depth_scale: 1000.0         # 1000.0 is default (mm to m), scale factor for depth values during integration
-  depth_max: 20.0             # max depth to include in the reconstruction
+  depth_max: 15.0             # max depth to include in the reconstruction
   trunc_voxel_multiplier: 8.0
-  device: None                # "CUDA:0" (faster) or "CPU:0" (if no GPU is available). None for auto-selection 
+  device: None                # "CUDA:0" (faster) or "CPU:0". None for auto-selection (Only selects the first CPU or GPU instance)
 
 # Planning Settings
 trajlib_dir: "utils/trajlib/" # where to save & retrieve the trajectory library (motion primitives)
@@ -29,10 +29,10 @@ trajlib_dir: "utils/trajlib/" # where to save & retrieve the trajectory library 
 # goal_position: # goal position in meters
 #  - 0.0   # +X RIGHT
 #  - -1.0  # +Z DOWN (HEIGHT)
-#  - -7.0   # +Y FORWARD
+#  - -10.0   # +Y FORWARD
 
-min_dist2obs: 0.7             # minimum acceptable distance from obstacles, meters (for primitive selection)
-min_dist2goal: 0.8            # termination condition for reaching the goal, meters
+min_dist2obs: 1.0             # minimum acceptable distance from obstacles, meters (for primitive selection)
+min_dist2goal: 1.0            # termination condition for reaching the goal, meters
 
 # Drone Settings
 # --------------
