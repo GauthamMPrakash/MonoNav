@@ -59,14 +59,26 @@ You can read more about the VoxelBlockGrid here:
 https://www.open3d.org/docs/latest/tutorial/t_reconstruction_system/voxel_block_grid.html
 """
 class VoxelBlockGrid:
-    def __init__(self, depth_scale=1000.0, depth_max=5.0, trunc_voxel_multiplier=8.0, device=o3d.core.Device("CUDA:0")):
+    def __init__(
+        self,
+        depth_scale=1000.0,
+        depth_max=5.0,
+        trunc_voxel_multiplier=8.0,
+        device=o3d.core.Device("CUDA:0"),
+        intrinsic_matrix=None,
+    ):
         # Reconstruction Information
         self.depth_scale = depth_scale
         self.depth_max = depth_max
         self.trunc_voxel_multiplier = trunc_voxel_multiplier
         self.device = device
-        self.camera = o3d.camera.PinholeCameraIntrinsic(o3d.camera.PinholeCameraIntrinsicParameters.PrimeSenseDefault) # Kinect Intrinsics (default)
-        self.depth_intrinsic = o3d.core.Tensor(self.camera.intrinsic_matrix, o3d.core.Dtype.Float64)
+        self.camera = o3d.camera.PinholeCameraIntrinsic(
+            o3d.camera.PinholeCameraIntrinsicParameters.PrimeSenseDefault
+        )  # Kinect Intrinsics (default)
+        if intrinsic_matrix is None:
+            intrinsic_matrix = self.camera.intrinsic_matrix
+        self.intrinsic_matrix = np.asarray(intrinsic_matrix, dtype=np.float64)
+        self.depth_intrinsic = o3d.core.Tensor(self.intrinsic_matrix, o3d.core.Dtype.Float64)
 
         # Initialize the VoxelBlockGrid
         self.vbg = o3d.t.geometry.VoxelBlockGrid(
@@ -86,7 +98,7 @@ class VoxelBlockGrid:
         frustum_block_coords = self.vbg.compute_unique_block_coordinates(
             depth, self.depth_intrinsic, extrinsic, self.depth_scale, self.depth_max, self.trunc_voxel_multiplier)
         color = o3d.t.geometry.Image(np.asarray(color)).to(self.device)
-        color_intrinsic = o3d.core.Tensor(self.camera.intrinsic_matrix, o3d.core.Dtype.Float64)
+        color_intrinsic = o3d.core.Tensor(self.intrinsic_matrix, o3d.core.Dtype.Float64)
         self.vbg.integrate(frustum_block_coords, depth, color, self.depth_intrinsic,
                        color_intrinsic, extrinsic, self.depth_scale, self.depth_max, self.trunc_voxel_multiplier)
 
@@ -136,7 +148,7 @@ Open3D frame: (X, Y, Z) is RIGHT DOWN FRONT (RDF)
 def get_drone_pose():
     _x, _y, _z, _yaw, _pitch, _roll = mavc.get_pose()
     # Convert position from AP to TSDF frame
-    xyz = np.array([_y, _z, _x]) # Convert to TSDF frame
+    xyz = np.array([-_y, _z, -_x]) # Convert to TSDF frame
     # Convert rotation from AP to TSDF frame
     r = Rotation.from_euler('xyz', [_roll, _pitch, _yaw], degrees=False)
     R = r.as_matrix()
@@ -350,6 +362,32 @@ def get_calibration_values(camera_calibration_path):
     opt_mtx = np.array(data['refined_matrix'])
     roi = np.array(data['roi'])
     return mtx, dist, opt_mtx, roi
+
+
+def get_calibration_resolution(camera_calibration_path):
+    with open(camera_calibration_path, "r") as json_file:
+        data = json.load(json_file)
+    resolution = data.get("resolution", None)
+    if resolution is None or len(resolution) != 2:
+        return None, None
+    return int(resolution[0]), int(resolution[1])
+
+
+def scale_intrinsics(intrinsic_matrix, scale_x, scale_y):
+    scaled_intrinsic = np.array(intrinsic_matrix, dtype=np.float64, copy=True)
+    scaled_intrinsic[0, 0] *= scale_x
+    scaled_intrinsic[1, 1] *= scale_y
+    scaled_intrinsic[0, 2] *= scale_x
+    scaled_intrinsic[1, 2] *= scale_y
+    return scaled_intrinsic
+
+
+def get_cropped_intrinsics(intrinsic_matrix, roi):
+    cropped_intrinsic = np.array(intrinsic_matrix, dtype=np.float64, copy=True)
+    x, y, _, _ = [int(v) for v in roi]
+    cropped_intrinsic[0, 2] -= x
+    cropped_intrinsic[1, 2] -= y
+    return cropped_intrinsic
 
 """
 Transform the raw image to match the kinect image: dimensions and intrinsics.

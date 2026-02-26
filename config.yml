@@ -1,21 +1,21 @@
 # Directory Settings
-data_dir: 'data/mononav-2026-02-24-22-35-00'
+data_dir: 'data/mononav-2026-02-25-16-23-24'
 save_dir_prefix: 'data/mononav-'
 # Camera Settings
 camera_source: 'esp32-cam'                                   # used for naming files
 camera_calibration_path: 'utils/calibration/intrinsics.json' # camera calibration file (for undistortion)
-camera_ip: 'http://192.168.53.56:81/stream'                  # camera stream URL (otherwise enter integer for camera index)   
+camera_ip: 'http://10.42.0.29:81/stream'                    # camera stream URL (otherwise enter integer for camera index)   
 
 # Depth Model Settings
 num_pre_depth_frames: 3       # how many times to run the depth model before starting (the first few inferences are much slower)
-INPUT_SIZE: 280               # Multiple of 14. Scales the image by INPUT_SIZE/smaller image dimension
+INPUT_SIZE: 294               # Multiple of 14. Scales the image by INPUT_SIZE/smaller image dimension
 DA2_CHECKPOINT: "../checkpoints/depth_anything_v2_metric_hypersim_vits.pth" # path to checkpoint for DepthAnythingV2, make sure it matches the encoder you choose
 
 # Reconstruction settings
 filterYvals: True             # this helps filter out the ground / ceiling (for planar navigation)
 filterWeights: True           # this helps filter out low-weight voxels
 filterTSDF: True
-weight_threshold: 0.1         # determine the weight threshold for filtering (higher threshold -> fewer points)
+weight_threshold: 3           # determine the weight threshold for filtering (higher threshold -> fewer points)
 VoxelBlockGrid:
   depth_scale: 1000.0         # 1000.0 is default (mm to m), scale factor for depth values during integration
   depth_max: 20.0             # max depth to include in the reconstruction
@@ -26,12 +26,12 @@ VoxelBlockGrid:
 trajlib_dir: "utils/trajlib/" # where to save & retrieve the trajectory library (motion primitives)
 
 # comment out goal position for undirected exploration
-goal_position: # goal position in meters
- - 1.0   # +X RIGHT
- - -1.0  # +Z DOWN (HEIGHT)
- - 7.0   # +Y FORWARD
+# goal_position: # goal position in meters
+#  - 0.0   # +X RIGHT
+#  - -1.0  # +Z DOWN (HEIGHT)
+#  - -7.0   # +Y FORWARD
 
-min_dist2obs: 1             # minimum acceptable distance from obstacles, meters (for primitive selection)
+min_dist2obs: 0.7             # minimum acceptable distance from obstacles, meters (for primitive selection)
 min_dist2goal: 0.8            # termination condition for reaching the goal, meters
 
 # Drone Settings
@@ -40,7 +40,7 @@ min_dist2goal: 0.8            # termination condition for reaching the goal, met
 
 # IP and port of the telemetry module on the drone. Set appropriate connection strings.
 # Replace with serial port name (ex: 'COM9') if using serial telemetry on the PC
-IP: "udpout:192.168.53.51:14550" 
+IP: "udpout:10.42.0.110:14550" 
 baud: 115200               # Set baud, only required for serial telemetry
 height: 1.2                # flight altitude, meters
 OF_Negates: True           # whether the optical flow outputs are negated, this cannot be fixed by ArduPilot params and must be corrected in code

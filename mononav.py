@@ -87,6 +87,8 @@ shouldStop = False
 # Intrinsics for undistortion
 camera_calibration_path = config['camera_calibration_path']
 mtx, dist, optimal_mtx, roi = get_calibration_values(camera_calibration_path) # for the robot's camera
+calib_width, calib_height = get_calibration_resolution(camera_calibration_path)
+fusion_intrinsics = get_cropped_intrinsics(optimal_mtx, roi)
 # kinect = o3d.camera.PinholeCameraIntrinsic(o3d.camera.PinholeCameraIntrinsicParameters.PrimeSenseDefault) # for the kinect
 
 # Initialize VoxelBlockGrid
@@ -99,7 +101,13 @@ if config['VoxelBlockGrid']['device'] != "None":
 else:
     device = 'CUDA:0' if torch.cuda.is_available() else 'CPU:0'
 
-vbg = VoxelBlockGrid(depth_scale, depth_max, trunc_voxel_multiplier, o3d.core.Device(device))
+vbg = VoxelBlockGrid(
+    depth_scale,
+    depth_max,
+    trunc_voxel_multiplier,
+    o3d.core.Device(device),
+    intrinsic_matrix=fusion_intrinsics,
+)
 
 # Initialize Trajectory Library (Motion Primitives)
 trajlib_dir = config['trajlib_dir']
@@ -171,14 +179,40 @@ def main():
     global shouldStop
     global last_key_pressed
     global max_traj_idx
+    global mtx
+    global optimal_mtx
+    global roi
 
     # Run the depth model a few times (the first inference is slow), and skip the first few frames
     cap = VideoCapture(STREAM_URL)
+    first_bgr = cap.read()
+    frame_height, frame_width = first_bgr.shape[:2]
+
+    if calib_width is not None and calib_height is not None:
+        scale_x = frame_width / calib_width
+        scale_y = frame_height / calib_height
+        if abs(scale_x - 1.0) > 1e-6 or abs(scale_y - 1.0) > 1e-6:
+            mtx = scale_intrinsics(mtx, scale_x, scale_y)
+            optimal_mtx = scale_intrinsics(optimal_mtx, scale_x, scale_y)
+            roi = np.array(
+                [
+                    int(round(roi[0] * scale_x)),
+                    int(round(roi[1] * scale_y)),
+                    int(round(roi[2] * scale_x)),
+                    int(round(roi[3] * scale_y)),
+                ],
+                dtype=np.int32,
+            )
+
+    vbg_intrinsics = get_cropped_intrinsics(optimal_mtx, roi)
+    vbg.intrinsic_matrix = vbg_intrinsics
+    vbg.depth_intrinsic = o3d.core.Tensor(vbg_intrinsics, o3d.core.Dtype.Float64)
+
     # Scale mtx, dist to match current camera resolution
     # Read one frame to get actual resolution
     try:
         for i in range(0, config['num_pre_depth_frames']):
-            bgr = cap.read()
+            bgr = first_bgr if i == 0 else cap.read()
             # COMPUTE DEPTH
             start_time_test = time.time()
             depth_numpy, depth_colormap = compute_depth(bgr, depth_anything, INPUT_SIZE)
@@ -280,9 +314,9 @@ def main():
                 #transform_rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
 
                 # compute depth
-            #   depth_numpy, depth_colormap = compute_depth(transform_bgr, depth_anything, INPUT_SIZE)
                 depth_numpy, depth_colormap = compute_depth(transform_bgr, depth_anything, INPUT_SIZE)
-                cv2.imshow("frame", transform_bgr)
+                #depth_numpy, depth_colormap = compute_depth(bgr, depth_anything, INPUT_SIZE)
+                cv2.imshow("frame", depth_colormap)
 
             # SAVE DATA TO FILE
                 cv2.imwrite(img_dir + '/frame-%06d.rgb.jpg'%(frame_number), bgr)
