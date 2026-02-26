@@ -72,10 +72,10 @@ class VoxelBlockGrid:
         self.depth_max = depth_max
         self.trunc_voxel_multiplier = trunc_voxel_multiplier
         self.device = device
-        self.camera = o3d.camera.PinholeCameraIntrinsic(
-            o3d.camera.PinholeCameraIntrinsicParameters.PrimeSenseDefault
-        )  # Kinect Intrinsics (default)
         if intrinsic_matrix is None:
+            self.camera = o3d.camera.PinholeCameraIntrinsic(
+                o3d.camera.PinholeCameraIntrinsicParameters.PrimeSenseDefault
+            )  # Kinect Intrinsics (default)
             intrinsic_matrix = self.camera.intrinsic_matrix
         self.intrinsic_matrix = np.asarray(intrinsic_matrix, dtype=np.float64)
         self.depth_intrinsic = o3d.core.Tensor(self.intrinsic_matrix, o3d.core.Dtype.Float64)

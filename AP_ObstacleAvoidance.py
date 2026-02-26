@@ -103,7 +103,9 @@ depth_max = config['VoxelBlockGrid']['depth_max']
 trunc_voxel_multiplier = config['VoxelBlockGrid']['trunc_voxel_multiplier']
 weight_threshold = config['weight_threshold'] # for planning and visualization (!! important !!)
 device = config['VoxelBlockGrid']['device']
-vbg = VoxelBlockGrid(vbg_depth_scale, depth_max, trunc_voxel_multiplier, o3d.core.Device(device))
+# Use cropped intrinsics for VoxelBlockGrid from the start
+cropped_mtx = get_cropped_intrinsics(opt_mtx, roi)
+vbg = VoxelBlockGrid(vbg_depth_scale, depth_max, trunc_voxel_multiplier, o3d.core.Device(device), intrinsic_matrix=cropped_mtx)
 
 # # Initialize Trajectory Library (Motion Primitives)
 # trajlib_dir = config['trajlib_dir']
@@ -379,13 +381,17 @@ def main():
             mavc.printd(f"Error getting drone pose: {e}")
             continue
 
+        current_time_us = int(round(time.time() * 1000000))
+        update_vehicle_pitch()
+
+        transform_bgr = transform_image(bgr, mtx, dist, opt_mtx, roi)
+        transform_rgb = cv2.cvtColor(transform_bgr, cv2.COLOR_BGR2RGB)
+
         if DEPTH_HEIGHT is None or DEPTH_WIDTH is None:
-            DEPTH_HEIGHT, DEPTH_WIDTH = bgr.shape[0], bgr.shape[1]
+            DEPTH_HEIGHT, DEPTH_WIDTH = transform_bgr.shape[0], transform_bgr.shape[1]
             set_obstacle_distance_params_from_intrinsics(mtx, DEPTH_WIDTH, DEPTH_HEIGHT)
             mavc.printd("DEPTH_HEIGHT: {}, DEPTH_WIDTH: {}".format(DEPTH_HEIGHT, DEPTH_WIDTH))
 
-        current_time_us = int(round(time.time() * 1000000))
-        update_vehicle_pitch()
         depth_mat, depth_colormap = compute_depth(transform_bgr, depth_anything, INPUT_SIZE)
 
         obstacle_line_height = find_obstacle_line_height()
@@ -402,11 +408,7 @@ def main():
             send_obstacle_distance_message(vehicle)
             last_send_time = time.time()
 
-        transform_bgr = transform_image(bgr, mtx, dist, opt_mtx, roi)
-        transform_rgb = cv2.cvtColor(transform_bgr, cv2.COLOR_BGR2RGB)
-
         vbg.integration_step(transform_rgb, depth_mat, camera_position)
-        # vbg.integration_step(transform_bgr, depth_mat, camera_position)
         cv2.imwrite(img_dir + '/frame-%06d.rgb.jpg' % (frame_number,), bgr)
         cv2.imwrite(transform_img_dir + '/transform_frame-%06d.rgb.jpg' % (frame_number,), transform_bgr)
         cv2.imwrite(transform_depth_dir + '/' + 'transform_frame-%06d.depth.jpg' % (frame_number,), depth_colormap)

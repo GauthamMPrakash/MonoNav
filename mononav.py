@@ -101,13 +101,7 @@ if config['VoxelBlockGrid']['device'] != "None":
 else:
     device = 'CUDA:0' if torch.cuda.is_available() else 'CPU:0'
 
-vbg = VoxelBlockGrid(
-    depth_scale,
-    depth_max,
-    trunc_voxel_multiplier,
-    o3d.core.Device(device),
-    intrinsic_matrix=fusion_intrinsics,
-)
+vbg = VoxelBlockGrid(depth_scale, depth_max, trunc_voxel_multiplier, o3d.core.Device(device), intrinsic_matrix=fusion_intrinsics)
 
 # Initialize Trajectory Library (Motion Primitives)
 trajlib_dir = config['trajlib_dir']
