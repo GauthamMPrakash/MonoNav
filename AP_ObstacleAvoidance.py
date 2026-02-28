@@ -17,7 +17,7 @@ import time
 import os
 import open3d as o3d
 import sys
-import signal
+import threading
 
 # Add DepthAnythingV2-metric to path
 repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
@@ -34,6 +34,7 @@ import mavlink_control as mavc         # import the mavlink helper script
 # LOAD VALUES FROM CONFIG FILE
 config = load_config('config.yml')
 forward_speed = config['forward_speed']
+OF_NEGATES = bool(config.get('OF_Negates', True))
 
 INPUT_SIZE = config['INPUT_SIZE']      # Image size
 CHECKPOINT = config['DA2_CHECKPOINT']  # path to checkpoint for DepthAnythingV2
@@ -48,7 +49,7 @@ EKF_LAT = config['EKF_LAT']
 EKF_LON = config['EKF_LON']
 STREAM_URL = config['camera_ip']       # YOUR ESP32 HTTP MJPEG stream
 
-DEPTH_RANGE_M = [0.3, 10.0]            # min and max ranges to be computed
+DEPTH_RANGE_M = [0.2, 15.0]            # min and max ranges to be computed
 min_depth_cm = int(DEPTH_RANGE_M[0] * 100)  # In cm
 max_depth_cm = int(DEPTH_RANGE_M[1] * 100)  # In cm, should be a little conservative
 distances_array_length = 72
@@ -81,33 +82,34 @@ if model_device.type != 'cuda' and torch.cuda.is_available():
 
 # GLOBAL VARIABLES
 last_key_pressed = None  # store the last key pressed
-main_loop_should_quit = False
 current_time_us = 0
-last_obstacle_distance_sent_ms = 0
 vehicle_pitch_rad = None
 depth_hfov_deg = None
 depth_vfov_deg = None
 DEPTH_WIDTH = None
 DEPTH_HEIGHT = None
+distances_lock = threading.Lock()
+obstacle_sender_stop_event = threading.Event()
 
 # Intrinsics for undistortion
 camera_calibration_path = config['camera_calibration_path']
-mtx, dist, opt_mtx, roi = get_calibration_values(camera_calibration_path) # for the robot's camera
+mtx, dist, optimal_mtx, roi = get_calibration_values(camera_calibration_path) # for the robot's camera
+calib_width, calib_height = get_calibration_resolution(camera_calibration_path)
+fusion_intrinsics = get_cropped_intrinsics(optimal_mtx, roi)
 
 # Initialize VoxelBlockGrid
-vbg_depth_scale = float(config['VoxelBlockGrid']['depth_scale'])
-depth_scale = 1.0 / vbg_depth_scale
+depth_scale = config['VoxelBlockGrid']['depth_scale']
+obstacle_depth_scale_m_per_unit = 1.0 / float(depth_scale)
 depth_max = config['VoxelBlockGrid']['depth_max']
 trunc_voxel_multiplier = config['VoxelBlockGrid']['trunc_voxel_multiplier']
 weight_threshold = config['weight_threshold'] # for planning and visualization (!! important !!)
-device = config['VoxelBlockGrid']['device']
 # Use cropped intrinsics for VoxelBlockGrid from the start
-cropped_mtx = get_cropped_intrinsics(opt_mtx, roi)
+cropped_mtx = get_cropped_intrinsics(optimal_mtx, roi)
 if config['VoxelBlockGrid']['device'] != "None": 
     device = config['VoxelBlockGrid']['device']
 else:
     device = 'CUDA:0' if torch.cuda.is_available() else 'CPU:0'
-vbg = VoxelBlockGrid(vbg_depth_scale, depth_max, trunc_voxel_multiplier, o3d.core.Device(device), intrinsic_matrix=cropped_mtx)
+vbg = VoxelBlockGrid(depth_scale, depth_max, trunc_voxel_multiplier, o3d.core.Device(device), intrinsic_matrix=fusion_intrinsics)
 
 # # Initialize Trajectory Library (Motion Primitives)
 # trajlib_dir = config['trajlib_dir']
@@ -178,25 +180,24 @@ camera_facing_angle_degree = 0
 # Enable/disable each message/function individually
 enable_msg_obstacle_distance = True
 enable_msg_distance_sensor = False
-obstacle_distance_msg_hz_default = 10.0
+obstacle_distance_msg_hz_default = 15.0
 
 obstacle_line_height_ratio = 0.4  # [0-1]: 0-Top, 1-Bottom. The height of the horizontal line to find distance to obstacle.
 obstacle_line_thickness_pixel = 10 # [1-DEPTH_HEIGHT]: Number of pixel rows to use to generate the obstacle distance message. For each column, the scan will return the minimum value for those pixels centered vertically in the image.
 
 def send_obstacle_distance_message(vehicle):
-    global current_time_us, distances, camera_facing_angle_degree
-    global last_obstacle_distance_sent_ms
-    if current_time_us == last_obstacle_distance_sent_ms:
-        # no new frame
-        return
-    last_obstacle_distance_sent_ms = current_time_us
+    global distances, camera_facing_angle_degree
     if angle_offset is None or increment_f is None:
         mavc.printd("Please call set_obstacle_distance_params before continuing")
     else:
+        current_time_us = int(round(time.time() * 1000000))
+        with distances_lock:
+            distances_to_send = distances.copy()
+
         vehicle.mav.obstacle_distance_send(
             current_time_us,    # us Timestamp (UNIX time or time since system boot)
             0,                  # sensor_type, defined here: https://mavlink.io/en/messages/common.html#MAV_DISTANCE_SENSOR
-            distances,          # distances,    uint16_t[72],   cm
+            distances_to_send,  # distances,    uint16_t[72],   cm
             0,                  # increment,    uint8_t,        deg
             min_depth_cm,	    # min_distance, uint16_t,       cm
             max_depth_cm,       # max_distance, uint16_t,       cm
@@ -206,9 +207,22 @@ def send_obstacle_distance_message(vehicle):
         )
         
         # Log minimum obstacle distance for monitoring
-        min_obstacle_dist = np.min(distances)
-        max_obstacle_dist = np.max(distances)
-        mavc.printd(f"[OBSTACLE] Min, Max distance: {min_obstacle_dist, max_obstacle_dist} cm")
+        # min_obstacle_dist = np.min(distances_to_send)
+        # max_obstacle_dist = np.max(distances_to_send)
+        # mavc.printd(f"[OBSTACLE] Min, Max distance: {min_obstacle_dist, max_obstacle_dist} cm")
+
+def obstacle_distance_sender_loop(vehicle, send_hz):
+    period_s = 1.0 / max(send_hz, 0.1)
+    next_send = time.monotonic()
+
+    while not obstacle_sender_stop_event.is_set():
+        send_obstacle_distance_message(vehicle)
+        next_send += period_s
+        sleep_time = next_send - time.monotonic()
+        if sleep_time > 0:
+            obstacle_sender_stop_event.wait(sleep_time)
+        else:
+            next_send = time.monotonic()
 
 # Find the height of the horizontal line to calculate the obstacle distances
 #   - Basis: depth camera's vertical FOV, user's input
@@ -297,10 +311,11 @@ def distances_from_depth_image(obstacle_line_height, depth_mat, distances, min_d
         elif lower_pixel < 0:
             lower_pixel = 0
 
-        # Converting depth from uint16_t unit to metric unit. depth_scale is usually 1mm following ROS convention.
-        # dist_m = depth_mat[int(obstacle_line_height), int(i * step)] * depth_scale
+        # Convert depth units (typically mm) to meters for obstacle checks.
+        # VBG depth_scale is typically 1000.0, so meters = value * (1.0 / depth_scale)
+        # dist_m = depth_mat[int(obstacle_line_height), int(i * step)] * obstacle_depth_scale_m_per_unit
         min_point_in_scan = np.min(depth_mat[int(lower_pixel):int(upper_pixel), int(i * step)])
-        dist_m = min_point_in_scan * depth_scale
+        dist_m = min_point_in_scan * obstacle_depth_scale_m_per_unit
 
         # Default value, unless overwritten: 
         #   A value of max_distance + 1 (cm) means no obstacle is present. 
@@ -311,19 +326,28 @@ def distances_from_depth_image(obstacle_line_height, depth_mat, distances, min_d
         if dist_m > min_depth_m and dist_m < max_depth_m:
             distances[i] = dist_m * 100
 
+def visualize_pointcloud(pcd_legacy, window_name="Reconstruction"):
+    """Visualize a legacy Open3D point cloud, matching mononav.py's Visualizer approach."""
+    try:
+        vis = o3d.visualization.Visualizer()
+        vis.create_window(window_name=window_name)
+        vis.add_geometry(pcd_legacy)
+        ctr = vis.get_view_control()
+        bounds = pcd_legacy.get_axis_aligned_bounding_box()
+        center = bounds.get_center()
+        ctr.set_lookat(center)
+        ctr.set_up([0, 0, 1])       # Z up
+        ctr.set_front([0, -1, 0])   # Look along -Y (forward)
+        ctr.set_zoom(0.7)
+        vis.run()
+        vis.destroy_window()
+    except Exception as e:
+        mavc.printd(f"Open3D visualization failed: {e}")
+
 # MAIN MONONAV CONTROL LOOP
 def main():
-    global main_loop_should_quit
-    global current_time_us
     global DEPTH_HEIGHT, DEPTH_WIDTH
     global last_key_pressed
-
-    def sigint_handler(sig, frame):
-        global main_loop_should_quit
-        del sig, frame
-        main_loop_should_quit = True
-
-    signal.signal(signal.SIGINT, sigint_handler)
 
     cap = VideoCapture(STREAM_URL)
     for _ in range(0, config['num_pre_depth_frames']):
@@ -347,12 +371,13 @@ def main():
         mavc.takeoff(height)
         mavc.set_speed(forward_speed)
 
-    last_send_time = 0.0
+    sender_thread = None
     last_time = time.time()
     frame_number = 0
+    running = True
     
     # Scale intrinsics if camera resolution differs from calibration resolution
-    global mtx, dist, opt_mtx, roi
+    global mtx, dist, optimal_mtx, roi
     first_frame = cap.read()
     if first_frame is not None:
         DEPTH_HEIGHT, DEPTH_WIDTH = first_frame.shape[:2]
@@ -363,7 +388,7 @@ def main():
             if abs(scale_x - 1.0) > 1e-6 or abs(scale_y - 1.0) > 1e-6:
                 mavc.printd(f"Scaling intrinsics: {calib_width}x{calib_height} → {DEPTH_WIDTH}x{DEPTH_HEIGHT}")
                 mtx = scale_intrinsics(mtx, scale_x, scale_y)
-                opt_mtx = scale_intrinsics(opt_mtx, scale_x, scale_y)
+                optimal_mtx = scale_intrinsics(optimal_mtx, scale_x, scale_y)
                 roi = np.array([
                     int(round(roi[0] * scale_x)),
                     int(round(roi[1] * scale_y)),
@@ -371,44 +396,59 @@ def main():
                     int(round(roi[3] * scale_y)),
                 ], dtype=np.int32)
                 # Update cropped intrinsics for VoxelBlockGrid
-                cropped_mtx = get_cropped_intrinsics(opt_mtx, roi)
-                vbg.intrinsic_matrix = cropped_mtx
-                vbg.depth_intrinsic = o3d.core.Tensor(cropped_mtx, o3d.core.Dtype.Float64)
+        vbg_intrinsics = get_cropped_intrinsics(optimal_mtx, roi)
+        vbg.intrinsic_matrix = vbg_intrinsics
+        vbg.depth_intrinsic = o3d.core.Tensor(vbg_intrinsics, o3d.core.Dtype.Float64)
+
 
     if DEPTH_HEIGHT is None or DEPTH_WIDTH is None:
         DEPTH_HEIGHT, DEPTH_WIDTH = transform_bgr.shape[0], transform_bgr.shape[1]
         mavc.printd("DEPTH_HEIGHT: {}, DEPTH_WIDTH: {}".format(DEPTH_HEIGHT, DEPTH_WIDTH))
     set_obstacle_distance_params_from_intrinsics(mtx, DEPTH_WIDTH, DEPTH_HEIGHT)
+
+    if enable_msg_obstacle_distance:
+        obstacle_sender_stop_event.clear()
+        sender_thread = threading.Thread(
+            target=obstacle_distance_sender_loop,
+            args=(vehicle, obstacle_distance_msg_hz_default),
+            daemon=True,
+        )
+        sender_thread.start()
     
-    while not main_loop_should_quit:
+    print("\n=== Keyboard Controls ===")
+    if FLY_VEHICLE:
+        print("  'g' - Move forward at forward_speed m/s")
+        print("  'h' - Hover (stop all movement)")
+        print("  'c' - Land")
+    print("  'q' - Quit program")
+    print("========================\n")
+
+    try:
+      while running:
         bgr = cap.read()
         try:
-            camera_position = get_drone_pose()
+            camera_position = get_drone_pose(OF_NEGATES)
         except Exception as e:
             mavc.printd(f"Error getting drone pose: {e}")
             continue
 
-        current_time_us = int(round(time.time() * 1000000))
         update_vehicle_pitch()
 
-        transform_bgr = transform_image(bgr, mtx, dist, opt_mtx, roi)
+        transform_bgr = transform_image(bgr, mtx, dist, optimal_mtx, roi)
         transform_rgb = cv2.cvtColor(transform_bgr, cv2.COLOR_BGR2RGB)
 
         depth_mat, depth_colormap = compute_depth(transform_bgr, depth_anything, INPUT_SIZE)
 
         obstacle_line_height = find_obstacle_line_height()
-        distances_from_depth_image(
-            obstacle_line_height,
-            depth_mat,
-            distances,
-            DEPTH_RANGE_M[0],
-            DEPTH_RANGE_M[1],
-            obstacle_line_thickness_pixel,
-        )
-
-        if time.time() - last_send_time >= (1.0 / obstacle_distance_msg_hz_default):
-            send_obstacle_distance_message(vehicle)
-            last_send_time = time.time()
+        with distances_lock:
+            distances_from_depth_image(
+                obstacle_line_height,
+                depth_mat,
+                distances,
+                DEPTH_RANGE_M[0],
+                DEPTH_RANGE_M[1],
+                obstacle_line_thickness_pixel,
+            )
 
         vbg.integration_step(transform_rgb, depth_mat, camera_position)
         cv2.imwrite(img_dir + '/frame-%06d.rgb.jpg' % (frame_number,), bgr)
@@ -438,28 +478,63 @@ def main():
                 thickness=1,
                 color=(255, 255, 255),
             )
-            cv2.imshow(display_name, display_image)
-            update_key_from_cv(1)
             last_time = time.time()
-        else:
-            update_key_from_cv(1)
+            cv2.imshow(display_name, display_image)
+            
+        update_key_from_cv(1)
 
+        # Handle keyboard commands
         if last_key_pressed == 'q':
-            main_loop_should_quit = True
+            running = False
+        elif FLY_VEHICLE and last_key_pressed == 'g':
+            mavc.printd("[KEY] 'g' pressed - Moving forward at 0.5 m/s")
+            mavc.send_body_offset_ned_vel(0.5, 0, 0, 0)  # vx=0.5 forward, vy=0, vz=0, yaw_rate=0
+            last_key_pressed = None
+        elif FLY_VEHICLE and last_key_pressed == 'c':
+            mavc.printd("[KEY] 'c' pressed - Landing")
+            mavc.set_mode('LAND')
+            last_key_pressed = None
+        elif FLY_VEHICLE and last_key_pressed == 'h':
+            mavc.printd("[KEY] 'h' pressed - Hover (stop)")
+            mavc.send_body_offset_ned_vel(0, 0, 0, 0)  # Stop all movement
+            last_key_pressed = None
 
-    cap.cap.release()
-    cv2.destroyAllWindows()
+    except KeyboardInterrupt:
+        mavc.printd("Ctrl+C received, shutting down...")
+    finally:
+        obstacle_sender_stop_event.set()
+        if sender_thread is not None:
+            sender_thread.join(timeout=1.0)
 
-    mavc.printd("Saving to {}...".format(npz_save_filename))
-    vbg.vbg.save(npz_save_filename)
-    mavc.printd("Saving finished")
-    mavc.printd("Visualize raw pointcloud.")
-    pcd = vbg.vbg.extract_point_cloud(weight_threshold)
-    pcd_cpu = pcd.cpu()
-    pcd_legacy = pcd_cpu.to_legacy()
-    mavc.printd("Point cloud has {} points".format(len(pcd_legacy.points)))
-    if len(pcd_legacy.points) > 0:
-        o3d.visualization.draw_geometries([pcd_legacy], window_name="Reconstruction")
+        mavc.printd("Saving to {}...".format(npz_save_filename))
+        vbg.vbg.save(npz_save_filename)
+        mavc.printd("Saving finished")
+        mavc.printd("Visualize raw pointcloud.")
+        pcd = vbg.vbg.extract_point_cloud(weight_threshold)
+        pcd_cpu = pcd.cpu()
+        pcd_legacy = pcd_cpu.to_legacy()
+        num_points = len(pcd_legacy.points)
+        mavc.printd("Point cloud has {} points (weight_threshold={})".format(num_points, weight_threshold))
+
+        if num_points == 0 and weight_threshold > 1:
+            mavc.printd("No points at current threshold. Retrying with weight_threshold=1 for visualization.")
+            pcd = vbg.vbg.extract_point_cloud(1)
+            pcd_cpu = pcd.cpu()
+            pcd_legacy = pcd_cpu.to_legacy()
+            num_points = len(pcd_legacy.points)
+            mavc.printd("Point cloud has {} points (weight_threshold=1)".format(num_points))
+
+        if num_points > 0:
+            visualize_pointcloud(pcd_legacy, window_name="MonoNav Reconstruction")
+        else:
+            mavc.printd("No points extracted — nothing to visualize.")
+
+        # Clean up OpenCV AFTER Open3D visualization (avoids OpenGL context conflict / segfault)
+        try:
+            cap.cap.release()
+        except Exception:
+            pass
+        cv2.destroyAllWindows()
 
 if __name__ == "__main__":
     main()

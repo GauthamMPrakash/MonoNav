@@ -40,7 +40,7 @@ from depth_anything_v2.dpt import DepthAnythingV2
 import mavlink_control as mavc         # import the mavlink helper script          
 from pynput import keyboard            # Keyboard control
 
-# helper functions
+# helper functions. Core MonoNav algorithms are implemented in utils.py
 from utils.utils import *
 
 # LOAD VALUES FROM CONFIG FILE
@@ -101,13 +101,7 @@ if config['VoxelBlockGrid']['device'] != "None":
 else:
     device = 'CUDA:0' if torch.cuda.is_available() else 'CPU:0'
 
-vbg = VoxelBlockGrid(
-    depth_scale,
-    depth_max,
-    trunc_voxel_multiplier,
-    o3d.core.Device(device),
-    intrinsic_matrix=fusion_intrinsics,
-)
+vbg = VoxelBlockGrid(depth_scale, depth_max, trunc_voxel_multiplier, o3d.core.Device(device), intrinsic_matrix=fusion_intrinsics)
 
 # Initialize Trajectory Library (Motion Primitives)
 trajlib_dir = config['trajlib_dir']
@@ -120,16 +114,17 @@ print("Initial trajectory chosen: %d out of %d"%(max_traj_idx, len(traj_list)))
 filterYvals = config['filterYvals']
 filterWeights = config['filterWeights']
 filterTSDF = config['filterTSDF']
+OF_NEGATES = bool(config.get('OF_Negates', True))
+mavc.printd(f"OF_Negates: {OF_NEGATES} (True means right/front increase as negative in LOCAL_POSITION_NED)")
 if 'goal_position' in config:
-    # Negate right (+X, index 0) and forward (+Y, index 2) directions
-    goal_position = np.array(config['goal_position'])
-    goal_position[[0, 2]] *= -1
-    goal_position = goal_position.reshape(1, 3)
+    # Goal is interpreted directly in RDF meters: [right, down, front]
+    goal_position = np.array(config['goal_position']).reshape(1, 3)
 else:
     goal_position = None # non-directed exploration
 print("Goal position: ", goal_position)
 min_dist2obs = config['min_dist2obs']
 min_dist2goal = config['min_dist2goal']
+print(f"Trajectory index convention: 0=sharp left, {len(traj_list)//2}=straight, {len(traj_list)-1}=sharp right")
 
 # Make directories for data
 time_string = time.strftime('%Y-%m-%d-%H-%M-%S')
@@ -243,7 +238,7 @@ def main():
         print("Starting control.")
         traj_counter = 0         # how many trajectory iterations have we done?
         no_safe_traj = False
-#   start_time = time.time() # seconds
+    #   start_time = time.time() # seconds
 
         while not shouldStop:
             update_key_from_cv(1)
@@ -260,11 +255,14 @@ def main():
                 print("Pressed g. Using MonoNav.")
                 if no_safe_traj:
                     if FLY_VEHICLE:
-                        mavc.send_body_offset_ned_vel(0, 0, 0, yaw_rate=0)
-                        mavc.printd("No safe trajectory")
+                        mavc.send_body_offset_ned_vel(0, 0, yaw_rate=0)
+                        print("No safe trajectory")
                     time.sleep(0.1)
                     continue
                 traj_index = max_traj_idx
+            elif last_key_pressed == 'h':
+                print("Pressed h. Hovering in place.")
+                mavc.send_body_offset_ned_vel(0, 0, yaw_rate=0) # hover in place
             elif last_key_pressed == 'c': #end control and land
                 mavc.set_mode('LAND')
                 print("Pressed c. Ending control.")
@@ -290,7 +288,7 @@ def main():
             while time.time() - start_time < period:
                 # WARNING: This controller is tuned for ArduCopter.
                 # You must check whether your robot follows the open-loop trajectory.
-                yawrate = amplitudes[traj_index]*np.sin(np.pi/period*(time.time() - start_time)) # rad/s
+                yawrate = -amplitudes[traj_index]*np.sin(np.pi/period*(time.time() - start_time)) # rad/s
                 yvel = yawrate*config['yvel_gain']
                 yawrate = yawrate*config['yawrate_gain']
                 if FLY_VEHICLE:
@@ -300,7 +298,7 @@ def main():
                 bgr = cap.read()
                 #cv2.imshow("frame", bgr)
                 update_key_from_cv(1)
-                camera_position = get_drone_pose() # get camera position immediately
+                camera_position = get_drone_pose(OF_NEGATES) # get camera position immediately
                 if goal_position is not None:
                     dist_to_goal = np.linalg.norm(camera_position[0:-1, -1]-goal_position[0])
                     if dist_to_goal <= min_dist2goal:
@@ -339,15 +337,15 @@ def main():
             if max_traj_idx is None:
                 no_safe_traj = True
                 shouldStop = True
-                print("No safe trajectory. Hovering in place.")
+                print("[INFO]No safe trajectory. Hovering in place.")
             else:
                 no_safe_traj = False
             print("SELECTED max_traj_idx: ", max_traj_idx)
 
     # Exited while(!shouldStop); end control!
         print("shouldStop: ", shouldStop)
-        print("Reached goal OR too close to obstacles.")
-        print("End control.")
+        print("[INFO] Reached goal OR too close to obstacles.")
+        print("[INFO] End control.")
 
         if FLY_VEHICLE:
             # Stopping sequence

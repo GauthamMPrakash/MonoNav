@@ -145,10 +145,16 @@ Get the global pose from the vehicle, convert to the Open3D frame
 ArduPilot frame: (X, Y, Z) is NORTH EAST DOWN (NED)
 Open3D frame: (X, Y, Z) is RIGHT DOWN FRONT (RDF)
 """
-def get_drone_pose():
+def get_drone_pose(OF_negates=True):
     _x, _y, _z, _yaw, _pitch, _roll = mavc.get_pose()
-    # Convert position from AP to TSDF frame
-    xyz = np.array([-_y, _z, -_x]) # Convert to TSDF frame
+    # Convert position from AP to TSDF frame.
+    # ArduPilot LOCAL_POSITION_NED is (x=NORTH, y=EAST, z=DOWN).
+    # Some OF setups report right/front motion as negative values (OF_Negates=True),
+    # so we correct signs before mapping to RDF (+X right, +Y down, +Z front).
+    if OF_negates:
+        xyz = np.array([-_y, _z, -_x])
+    else:
+        xyz = np.array([_y, _z, _x])
     # Convert rotation from AP to TSDF frame
     r = Rotation.from_euler('xyz', [_roll, _pitch, _yaw], degrees=False)
     R = r.as_matrix()
@@ -298,10 +304,37 @@ def choose_primitive(vbg, camera_position, traj_linesets, goal_position, dist_th
     # NEXT, WE DETERMINE THE BEST TRAJECTORY ACCORDING TO A COST FUNCTION
 
     # Initialize scoring variables to evaluate the trajectories
-    max_traj_score = -np.inf # track best trajectory
-    min_goal_score = np.inf # track proximity to goal
     max_traj_idx = None # track the index of the best trajectory
     straight_idx = len(traj_linesets) // 2  # index of the straight trajectory
+
+    # If no obstacle voxels remain after filtering, avoid argmin on empty arrays.
+    # In this case, prefer goal-directed trajectory (or straight trajectory if no goal).
+    if voxel_coords_numpy.size == 0:
+        if len(traj_linesets) == 0:
+            return True, None
+
+        if goal_position is not None:
+            goal_scores = []
+            for traj_idx, traj_linset in enumerate(traj_linesets):
+                traj_lineset_copy = copy.deepcopy(traj_linset)
+                traj_lineset_copy.transform(camera_position)
+                pts = np.asarray(traj_lineset_copy.points)
+                if pts.size == 0:
+                    continue
+                tmp_to_goal = distance.cdist(goal_position, pts, "sqeuclidean")
+                dst_to_goal = np.sqrt(np.min(tmp_to_goal))
+                goal_scores.append((traj_idx, dst_to_goal))
+
+            if len(goal_scores) == 0:
+                return False, straight_idx
+
+            min_goal_dist = min(score[1] for score in goal_scores)
+            goal_tolerance = 0.5
+            candidates = [score for score in goal_scores if score[1] <= min_goal_dist + goal_tolerance]
+            max_traj_idx = min(candidates, key=lambda score: abs(score[0] - straight_idx))[0]
+            return False, max_traj_idx
+
+        return False, straight_idx
 
     # First pass: collect all safe trajectories (those that clear obstacles)
     safe_trajectories = []  # list of (traj_idx, nearest_voxel_dist, goal_dist)
@@ -310,7 +343,11 @@ def choose_primitive(vbg, camera_position, traj_linesets, goal_position, dist_th
         traj_lineset_copy = copy.deepcopy(traj_linset)
         traj_lineset_copy.transform(camera_position) # transform the lineset (copy) to the camera position
         pts = np.asarray(traj_lineset_copy.points) # meters # extract the points from the lineset
+        if pts.size == 0:
+            continue
         tmp = distance.cdist(voxel_coords_numpy, pts, "sqeuclidean") # compute the distance between all voxels and all points in the trajectory
+        if tmp.size == 0:
+            continue
         voxel_idx, pt_idx = np.unravel_index(np.argmin(tmp), tmp.shape) # extract indices of the nearest voxel to and nearest point in the trajectory
         nearest_voxel_dist = np.sqrt(tmp[voxel_idx, pt_idx])
         
@@ -390,7 +427,7 @@ def get_cropped_intrinsics(intrinsic_matrix, roi):
     return cropped_intrinsic
 
 """
-Transform the raw image to match the kinect image: dimensions and intrinsics.
+Transform the raw image 
 This involves resizing the image, scaling the camera matrix, and undistorting the image.
 """
 def transform_image(image, mtx, dist, optimal_matrix, roi):

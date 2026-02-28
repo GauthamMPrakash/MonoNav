@@ -4,21 +4,21 @@ save_dir_prefix: 'data/mononav-'
 # Camera Settings
 camera_source: 'esp32-cam'                                   # used for naming files
 camera_calibration_path: 'utils/calibration/intrinsics.json' # camera calibration file (for undistortion)
-camera_ip: 'http://10.42.0.29:81/stream'                    # camera stream URL (otherwise enter integer for camera index)   
+camera_ip: 'http://192.168.53.56:81/stream'                    # camera stream URL (otherwise enter integer for camera index)   
 
 # Depth Model Settings
 num_pre_depth_frames: 3       # how many times to run the depth model before starting (the first few inferences are much slower)
-INPUT_SIZE: 394               # Multiple of 14. Scales the image by INPUT_SIZE/smaller image dimension
-DA2_CHECKPOINT: "../checkpoints/depth_anything_v2_metric_hypersim_vitb.pth" # path to checkpoint for DepthAnythingV2, make sure it matches the encoder you choose
+INPUT_SIZE: 310               # Multiple of 14. Scales the image by INPUT_SIZE/smaller image dimension
+DA2_CHECKPOINT: "../checkpoints/depth_anything_v2_metric_hypersim_vits.pth" # path to checkpoint for DepthAnythingV2, make sure it matches the encoder you choose
 
 # Reconstruction settings
 filterYvals: True             # this helps filter out the ground / ceiling (for planar navigation)
 filterWeights: True           # this helps filter out low-weight voxels
 filterTSDF: True
-weight_threshold: 4.         # determine the weight threshold for filtering (higher threshold -> fewer points)
+weight_threshold: 3.0         # determine the weight threshold for filtering (higher threshold -> fewer points)
 VoxelBlockGrid:
   depth_scale: 1000.0         # 1000.0 is default (mm to m), scale factor for depth values during integration
-  depth_max: 15.0             # max depth to include in the reconstruction
+  depth_max: 10.0             # max depth to include in the reconstruction
   trunc_voxel_multiplier: 8.0
   device: None                # "CUDA:0" (faster) or "CPU:0". None for auto-selection (Only selects the first CPU or GPU instance)
 
@@ -26,12 +26,12 @@ VoxelBlockGrid:
 trajlib_dir: "utils/trajlib/" # where to save & retrieve the trajectory library (motion primitives)
 
 #comment out goal position for undirected exploration
-goal_position: # goal position in meters
- - 0.0   # +X RIGHT
- - -1.0  # +Z DOWN (HEIGHT)
- - -10.0   # +Y FORWARD
+# goal_position: # goal position in meters (NED frame)
+#  - 0.0   # +X RIGHT
+#  - -1.0  # +Z DOWN (HEIGHT)
+#  - 10.0   # +Y FORWARD
 
-min_dist2obs: 1.0             # minimum acceptable distance from obstacles, meters (for primitive selection)
+min_dist2obs: 0.5             # minimum acceptable distance from obstacles, meters (for primitive selection)
 min_dist2goal: 1.0            # termination condition for reaching the goal, meters
 
 # Drone Settings
@@ -40,16 +40,16 @@ min_dist2goal: 1.0            # termination condition for reaching the goal, met
 
 # IP and port of the telemetry module on the drone. Set appropriate connection strings.
 # Replace with serial port name (ex: 'COM9') if using serial telemetry on the PC
-IP: "udpout:10.42.0.110:14550" 
+IP: "udpout:192.168.53.51:14550" 
 baud: 115200               # Set baud, only required for serial telemetry
 height: 1.2                # flight altitude, meters
 OF_Negates: True           # whether the optical flow outputs are negated, this cannot be fixed by ArduPilot params and must be corrected in code
 # Arbitrary EKF origin
 EKF_LAT: 8.4723591
 EKF_LON: 76.9295203
-forward_speed: 1.0         # forward speed in m/s, set to None to use speed defined in generate_primitives.py
+forward_speed: 0.5         # forward speed in m/s, set to None to use speed defined in generate_primitives.py
 # Control gain settings (YOU MAY NEED TO TUNE THIS YOURSELF)
 yvel_gain: 0.015           # yvel =  -yawrate*yvel_gain  <- for providing sideways velocity so fast drones take a pefect turn. Increase for faster turns.
 yawrate_gain: 1.25         # yawrate = yawrate*yawrate_gain
 
-FLY_VEHICLE: True         # whether to actually fly the drone
+FLY_VEHICLE: False         # whether to actually fly the drone
