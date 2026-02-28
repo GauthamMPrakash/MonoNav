@@ -24,7 +24,7 @@ repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 metric_depth_path = os.path.join(repo_root, 'metric_depth')
 sys.path.insert(0, metric_depth_path)
 
-from metric_depth.depth_anything_v2.dpt import DepthAnythingV2         
+from depth_anything_v2.dpt import DepthAnythingV2         
 from pynput import keyboard            # Keyboard control
 
 # helper functions
@@ -90,8 +90,6 @@ depth_vfov_deg = None
 DEPTH_WIDTH = None
 DEPTH_HEIGHT = None
 
-# Camera Settings for Undistortion
-camera_num = config['camera_num']
 # Intrinsics for undistortion
 camera_calibration_path = config['camera_calibration_path']
 mtx, dist, opt_mtx, roi = get_calibration_values(camera_calibration_path) # for the robot's camera
@@ -105,6 +103,10 @@ weight_threshold = config['weight_threshold'] # for planning and visualization (
 device = config['VoxelBlockGrid']['device']
 # Use cropped intrinsics for VoxelBlockGrid from the start
 cropped_mtx = get_cropped_intrinsics(opt_mtx, roi)
+if config['VoxelBlockGrid']['device'] != "None": 
+    device = config['VoxelBlockGrid']['device']
+else:
+    device = 'CUDA:0' if torch.cuda.is_available() else 'CPU:0'
 vbg = VoxelBlockGrid(vbg_depth_scale, depth_max, trunc_voxel_multiplier, o3d.core.Device(device), intrinsic_matrix=cropped_mtx)
 
 # # Initialize Trajectory Library (Motion Primitives)
@@ -176,9 +178,9 @@ camera_facing_angle_degree = 0
 # Enable/disable each message/function individually
 enable_msg_obstacle_distance = True
 enable_msg_distance_sensor = False
-obstacle_distance_msg_hz_default = 15.0
+obstacle_distance_msg_hz_default = 10.0
 
-obstacle_line_height_ratio = 0.18  # [0-1]: 0-Top, 1-Bottom. The height of the horizontal line to find distance to obstacle.
+obstacle_line_height_ratio = 0.4  # [0-1]: 0-Top, 1-Bottom. The height of the horizontal line to find distance to obstacle.
 obstacle_line_thickness_pixel = 10 # [1-DEPTH_HEIGHT]: Number of pixel rows to use to generate the obstacle distance message. For each column, the scan will return the minimum value for those pixels centered vertically in the image.
 
 def send_obstacle_distance_message(vehicle):
@@ -189,7 +191,7 @@ def send_obstacle_distance_message(vehicle):
         return
     last_obstacle_distance_sent_ms = current_time_us
     if angle_offset is None or increment_f is None:
-        mavc.printd("Please call set_obstacle_distance_params before continue")
+        mavc.printd("Please call set_obstacle_distance_params before continuing")
     else:
         vehicle.mav.obstacle_distance_send(
             current_time_us,    # us Timestamp (UNIX time or time since system boot)
@@ -205,8 +207,8 @@ def send_obstacle_distance_message(vehicle):
         
         # Log minimum obstacle distance for monitoring
         min_obstacle_dist = np.min(distances)
-        if min_obstacle_dist < 200:                   # Less than 2 meters
-            mavc.printd(f"[OBSTACLE] Min distance: {min_obstacle_dist} cm")
+        max_obstacle_dist = np.max(distances)
+        mavc.printd(f"[OBSTACLE] Min, Max distance: {min_obstacle_dist, max_obstacle_dist} cm")
 
 # Find the height of the horizontal line to calculate the obstacle distances
 #   - Basis: depth camera's vertical FOV, user's input
@@ -353,13 +355,13 @@ def main():
     global mtx, dist, opt_mtx, roi
     first_frame = cap.read()
     if first_frame is not None:
-        frame_height, frame_width = first_frame.shape[:2]
+        DEPTH_HEIGHT, DEPTH_WIDTH = first_frame.shape[:2]
         calib_width, calib_height = get_calibration_resolution(camera_calibration_path)
         if calib_width is not None and calib_height is not None:
-            scale_x = frame_width / calib_width
-            scale_y = frame_height / calib_height
+            scale_x = DEPTH_WIDTH / calib_width
+            scale_y = DEPTH_HEIGHT / calib_height
             if abs(scale_x - 1.0) > 1e-6 or abs(scale_y - 1.0) > 1e-6:
-                mavc.printd(f"Scaling intrinsics: {calib_width}x{calib_height} → {frame_width}x{frame_height}")
+                mavc.printd(f"Scaling intrinsics: {calib_width}x{calib_height} → {DEPTH_WIDTH}x{DEPTH_HEIGHT}")
                 mtx = scale_intrinsics(mtx, scale_x, scale_y)
                 opt_mtx = scale_intrinsics(opt_mtx, scale_x, scale_y)
                 roi = np.array([
@@ -373,6 +375,11 @@ def main():
                 vbg.intrinsic_matrix = cropped_mtx
                 vbg.depth_intrinsic = o3d.core.Tensor(cropped_mtx, o3d.core.Dtype.Float64)
 
+    if DEPTH_HEIGHT is None or DEPTH_WIDTH is None:
+        DEPTH_HEIGHT, DEPTH_WIDTH = transform_bgr.shape[0], transform_bgr.shape[1]
+        mavc.printd("DEPTH_HEIGHT: {}, DEPTH_WIDTH: {}".format(DEPTH_HEIGHT, DEPTH_WIDTH))
+    set_obstacle_distance_params_from_intrinsics(mtx, DEPTH_WIDTH, DEPTH_HEIGHT)
+    
     while not main_loop_should_quit:
         bgr = cap.read()
         try:
@@ -386,11 +393,6 @@ def main():
 
         transform_bgr = transform_image(bgr, mtx, dist, opt_mtx, roi)
         transform_rgb = cv2.cvtColor(transform_bgr, cv2.COLOR_BGR2RGB)
-
-        if DEPTH_HEIGHT is None or DEPTH_WIDTH is None:
-            DEPTH_HEIGHT, DEPTH_WIDTH = transform_bgr.shape[0], transform_bgr.shape[1]
-            set_obstacle_distance_params_from_intrinsics(mtx, DEPTH_WIDTH, DEPTH_HEIGHT)
-            mavc.printd("DEPTH_HEIGHT: {}, DEPTH_WIDTH: {}".format(DEPTH_HEIGHT, DEPTH_WIDTH))
 
         depth_mat, depth_colormap = compute_depth(transform_bgr, depth_anything, INPUT_SIZE)
 
@@ -417,12 +419,12 @@ def main():
         frame_number += 1
 
         if debug_enable:
-            cv2.imshow("frame", depth_colormap)
+            #cv2.imshow("frame", depth_colormap)
             x1, y1 = int(0), int(obstacle_line_height)
             x2, y2 = int(DEPTH_WIDTH), int(obstacle_line_height)
             line_thickness = obstacle_line_thickness_pixel
             cv2.line(depth_colormap, (x1, y1), (x2, y2), (0, 255, 0), thickness=line_thickness)
-            display_image = np.hstack((bgr, cv2.resize(depth_colormap, (DEPTH_WIDTH, DEPTH_HEIGHT))))
+            display_image = np.hstack((transform_bgr, depth_colormap))
 
             processing_speed = 1 / (time.time() - last_time)
             text = ("%0.2f" % (processing_speed,)) + ' fps'

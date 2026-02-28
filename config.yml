@@ -8,14 +8,14 @@ camera_ip: 'http://10.42.0.29:81/stream'                    # camera stream URL 
 
 # Depth Model Settings
 num_pre_depth_frames: 3       # how many times to run the depth model before starting (the first few inferences are much slower)
-INPUT_SIZE: 294               # Multiple of 14. Scales the image by INPUT_SIZE/smaller image dimension
-DA2_CHECKPOINT: "../checkpoints/depth_anything_v2_metric_hypersim_vits.pth" # path to checkpoint for DepthAnythingV2, make sure it matches the encoder you choose
+INPUT_SIZE: 394               # Multiple of 14. Scales the image by INPUT_SIZE/smaller image dimension
+DA2_CHECKPOINT: "../checkpoints/depth_anything_v2_metric_hypersim_vitb.pth" # path to checkpoint for DepthAnythingV2, make sure it matches the encoder you choose
 
 # Reconstruction settings
 filterYvals: True             # this helps filter out the ground / ceiling (for planar navigation)
 filterWeights: True           # this helps filter out low-weight voxels
 filterTSDF: True
-weight_threshold: 3.0         # determine the weight threshold for filtering (higher threshold -> fewer points)
+weight_threshold: 4.         # determine the weight threshold for filtering (higher threshold -> fewer points)
 VoxelBlockGrid:
   depth_scale: 1000.0         # 1000.0 is default (mm to m), scale factor for depth values during integration
   depth_max: 15.0             # max depth to include in the reconstruction
@@ -25,11 +25,11 @@ VoxelBlockGrid:
 # Planning Settings
 trajlib_dir: "utils/trajlib/" # where to save & retrieve the trajectory library (motion primitives)
 
-# comment out goal position for undirected exploration
-# goal_position: # goal position in meters
-#  - 0.0   # +X RIGHT
-#  - -1.0  # +Z DOWN (HEIGHT)
-#  - -10.0   # +Y FORWARD
+#comment out goal position for undirected exploration
+goal_position: # goal position in meters
+ - 0.0   # +X RIGHT
+ - -1.0  # +Z DOWN (HEIGHT)
+ - -10.0   # +Y FORWARD
 
 min_dist2obs: 1.0             # minimum acceptable distance from obstacles, meters (for primitive selection)
 min_dist2goal: 1.0            # termination condition for reaching the goal, meters
@@ -52,4 +52,4 @@ forward_speed: 1.0         # forward speed in m/s, set to None to use speed defi
 yvel_gain: 0.015           # yvel =  -yawrate*yvel_gain  <- for providing sideways velocity so fast drones take a pefect turn. Increase for faster turns.
 yawrate_gain: 1.25         # yawrate = yawrate*yawrate_gain
 
-FLY_VEHICLE: False         # whether to actually fly the drone
+FLY_VEHICLE: True         # whether to actually fly the drone

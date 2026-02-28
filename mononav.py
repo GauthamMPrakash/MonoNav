@@ -40,7 +40,7 @@ from depth_anything_v2.dpt import DepthAnythingV2
 import mavlink_control as mavc         # import the mavlink helper script          
 from pynput import keyboard            # Keyboard control
 
-# helper functions. Core MonoNav algorithms are implemented in utils.py
+# helper functions
 from utils.utils import *
 
 # LOAD VALUES FROM CONFIG FILE
@@ -101,7 +101,13 @@ if config['VoxelBlockGrid']['device'] != "None":
 else:
     device = 'CUDA:0' if torch.cuda.is_available() else 'CPU:0'
 
-vbg = VoxelBlockGrid(depth_scale, depth_max, trunc_voxel_multiplier, o3d.core.Device(device), intrinsic_matrix=fusion_intrinsics)
+vbg = VoxelBlockGrid(
+    depth_scale,
+    depth_max,
+    trunc_voxel_multiplier,
+    o3d.core.Device(device),
+    intrinsic_matrix=fusion_intrinsics,
+)
 
 # Initialize Trajectory Library (Motion Primitives)
 trajlib_dir = config['trajlib_dir']
