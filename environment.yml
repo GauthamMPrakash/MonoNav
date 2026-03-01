@@ -1,0 +1,26 @@
+name: mononav
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+dependencies:
+  - cuda=12.8
+  - h5py=3.15
+  - matplotlib=3.10
+  - matplotlib-base=3.10
+  - numpy=1.26
+  - opencv=4.11
+  - pip
+  - python=3.12.12
+  - pytorch=2.10
+  - pytorch-cuda=12.8
+  - scipy=1.17
+  - torchaudio=2.10
+  - torchvision=0.25
+  - ffmpeg
+  - pip:
+    - open3d==0.19
+    - Pillow==12.1
+    - pynput==1.8
+    - PyYAML==6.0
+    - pymavlink

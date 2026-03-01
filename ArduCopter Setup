@@ -1,0 +1,18 @@
+"""
+Tested on Copter v4.6.3
+
+Hardware Requirements
+---------------------
+    - ArduPilot compatible drone
+    - RGB Camera (This project uses an ESP32-CAM)
+    - Link to wirelessly send camera frames to GCS
+    - Wireless telemetry link
+    - Optical Flow sensor for indoor pose estimation
+
+Sofware Configuration
+---------------------
+    - Refer the parameter file given in ArduCopter/
+    - DO NOT USE THE SAME PARAMS AS GIVEN. YOU NEED TO SETUP AND TUNE THE DRONE AS DOCUMENTED AT https://ardupilot.org/copter/docs/initial-setup.html
+      ONLY USE THE SAME PARAMS FOR ANYTHING OTHER THAN PIDs and hardware setup
+
+"""
