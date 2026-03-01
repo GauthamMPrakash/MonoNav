@@ -27,10 +27,11 @@ import copy
 
 from utils.utils import load_config, poses_from_posedir, get_poses_lineset, get_trajlist, get_traj_linesets, choose_primitive
 
+data_dir =  'data/mononav-2026-02-25-16-23-24'      # parent directory to look for RGB images, and save depth images
+
 CONFIG_PATH = "config.yml"
 config = load_config("config.yml")
 
-data_dir = config["data_dir"] # parent directory to look for RGB images, and save depth images
 pose_dir = os.path.join(data_dir, "poses")
 trajlib_dir = config["trajlib_dir"]
 

@@ -3,6 +3,13 @@ import matplotlib
 import numpy as np
 import torch
 import os
+import sys
+
+# Add DepthAnythingV2-metric to path
+repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+depth_model_path = os.path.join(repo_root, 'DepthanythingV2-metric')
+sys.path.insert(0, depth_model_path)
+
 from depth_anything_v2.dpt import DepthAnythingV2
 
 # -----------------------------
@@ -12,7 +19,7 @@ STREAM_URL = "http://10.42.0.29:81/stream"  # YOUR ESP32 HTTP MJPEG stream
 INPUT_SIZE = 336
 OUTDIR = "./esp32_depth"
 ENCODER = 'vitb'  # must match your checkpoint
-CHECKPOINT = "../checkpoints/depth_anything_v2_metric_hypersim_vitb.pth"
+CHECKPOINT = "../DepthanythingV2-metric/checkpoints/depth_anything_v2_metric_hypersim_vitb.pth"
 MAX_DEPTH = 20
 SAVE_NUMPY = False
 PRED_ONLY = False
@@ -48,13 +55,13 @@ cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 if not cap.isOpened():
     raise RuntimeError("Cannot open ESP32 HTTP stream")
 
-print("✅ ESP32 HTTP stream opened")
+print(" ESP32 HTTP stream opened")
 
 frame_count = 0
 while True:
     ret, frame = cap.read()
     if not ret:
-        print("⚠️ Frame not received, retrying...")
+        print(" Frame not received, retrying...")
         continue
 
     # Show RGB stream immediately, before depth estimation.

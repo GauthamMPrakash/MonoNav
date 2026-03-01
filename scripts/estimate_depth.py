@@ -20,7 +20,6 @@ The following are saved to file:
 
 import time
 import os
-import sys
 import torch
 import cv2
 

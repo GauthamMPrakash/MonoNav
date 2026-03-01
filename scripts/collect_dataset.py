@@ -30,6 +30,7 @@ import time
 
 # sys.path.append('/home/nsimon/Documents/MonoNav/') 
 from utils.utils import reset_estimator, VideoCapture, get_crazyflie_pose, load_config
+import utils.mavlink_control as mavc
 '''
 This file collects the following synchronized data:
 - RGB image from front-facing camera
@@ -104,8 +105,8 @@ print("Saving files to: " + save_dir)
 #         time.sleep(0.1)
 
 
-mav.connect_drone(IP, baud=baud)
-mav.set_ekf_origin(EKF_LAT, EKF_LON, 0)
+mavc.connect_drone(IP, baud=baud)
+mavc.set_ekf_origin(EKF_LAT, EKF_LON, 0)
 
 # Camera Object
 cap = VideoCapture(camera_num)

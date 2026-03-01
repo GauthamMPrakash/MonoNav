@@ -1,5 +1,4 @@
 # Directory Settings
-data_dir: 'data/mononav-2026-02-25-16-23-24'
 save_dir_prefix: 'data/mononav-'
 # Camera Settings
 camera_source: 'esp32-cam'                                   # used for naming files

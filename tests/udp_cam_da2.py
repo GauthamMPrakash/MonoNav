@@ -2,6 +2,12 @@ import numpy as np
 import torch
 import cv2
 import socket
+
+# Add DepthAnythingV2-metric to path
+repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+depth_model_path = os.path.join(repo_root, 'DepthanythingV2-metric')
+sys.path.insert(0, depth_model_path)
+
 from depth_anything_v2.dpt import DepthAnythingV2
 
 # ======================= UDP CONFIG =======================
@@ -13,7 +19,7 @@ MAX_UDP_SIZE = 2048
 # ======================= MODEL CONFIG =====================
 INPUT_SIZE = 384            # lower = faster
 ENCODER = 'vits'
-CHECKPOINT = "checkpoints/depth_anything_v2_metric_hypersim_vits.pth"
+CHECKPOINT = "../DepthanythingV2-metric/checkpoints/depth_anything_v2_metric_hypersim_vits.pth"
 MAX_DEPTH = 20
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 # =========================================================
