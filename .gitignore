@@ -15,7 +15,7 @@
 /utils/calibration/output/*
 /utils/calibration/undistort_output/*
 
-/checkpoints/
+*/checkpoints/*
 
 # Byte-compiled / optimized / DLL files
 cache/*
