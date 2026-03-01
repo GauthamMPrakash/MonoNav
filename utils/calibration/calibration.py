@@ -132,10 +132,10 @@ def main():
                   "refined_matrix": new_mtx.tolist(),
                   "roi": list(roi)
                 }
-                with open("calibration.json", "w") as f:
+                with open("intrinsics.json", "w") as f:
                   json.dump(calib_data, f, indent=4)
 
-                print("Data saved to 'calibration.json' in your current folder (with refined_matrix and roi).")
+                print("Data saved to 'intrinsics.json' in your current folder (with refined_matrix and roi).")
                 # ---------------------------------
                 calibrated = True
                 print(f"Success! RMS Error: {ret:.4f}")

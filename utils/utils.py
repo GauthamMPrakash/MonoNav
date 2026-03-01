@@ -25,7 +25,7 @@ import math as m
 import copy
 import yaml, json
 
-import mavlink_control as mavc         # ArduCopter MAVLink wrappers
+from . import mavlink_control as mavc  # ArduCopter MAVLink wrappers (relative import)
 import queue, threading                # For bufferless video capture
 
 """

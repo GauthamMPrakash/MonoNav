@@ -524,7 +524,7 @@ def main():
                     else:
                         # Send forward velocity - BendyRuler handles obstacle avoidance
                         # mavc.send_body_offset_ned_vel(forward_speed, 0, 0, 0)
-                        mavc.send_body_offset_ned_pos(x, y, speed=forward_speed
+                        mavc.send_body_offset_ned_pos(x, y, speed=forward_speed)
                     # Companion-side safety: emergency hover if obstacle < threshold
                     with distances_lock:
                         valid = distances[distances < (max_depth_cm + 1)]
