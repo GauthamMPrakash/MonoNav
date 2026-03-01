@@ -41,11 +41,11 @@ metric_depth_path = os.path.join(repo_root, 'DepthAnythingV2-metric')
 sys.path.insert(0, metric_depth_path)
 
 from depth_anything_v2.dpt import DepthAnythingV2         
-from pynput import keyboard            # Keyboard control
+from pynput import keyboard                  # Keyboard control
 
 # helper functions
 from utils.utils import *
-import mavlink_control as mavc         # import the mavlink helper script 
+import utils.mavlink_control as mavc         # import the mavlink helper script 
 
 # LOAD VALUES FROM CONFIG FILE
 config = load_config('config.yml')

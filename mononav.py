@@ -37,11 +37,11 @@ metric_depth_path = os.path.join(repo_root, 'DepthAnythingV2-metric')
 sys.path.insert(0, metric_depth_path)
 from depth_anything_v2.dpt import DepthAnythingV2
 
-import mavlink_control as mavc         # import the mavlink helper script          
-from pynput import keyboard            # Keyboard control
+import utils.mavlink_control as mavc   # import the mavlink helper script          
 
-# helper functions. Core MonoNav algorithms are implemented in utils.py
+# Helper functions. Core MonoNav algorithms are implemented in utils.py
 from utils.utils import *
+from pynput import keyboard            # Keyboard control
 
 # LOAD VALUES FROM CONFIG FILE
 config = load_config('config.yml')
