@@ -25,14 +25,19 @@ VoxelBlockGrid:
 # Planning Settings
 trajlib_dir: "utils/trajlib/" # where to save & retrieve the trajectory library (motion primitives)
 
-#comment out goal position for undirected exploration
-# goal_position: # goal position in meters (NED frame)
-#  - 0.0   # +X RIGHT
-#  - -1.0  # +Z DOWN (HEIGHT)
-#  - 10.0   # +Y FORWARD
+# Goal position in RDF frame (metres). 
+# Comment out for undirected exploration.
+goal_position_rdf: # from EKF origin
+  - 0.0    # Right
+  - -1.2   # Down
+  - 10.0   # Forward
 
 min_dist2obs: 0.5             # minimum acceptable distance from obstacles, meters (for primitive selection)
 min_dist2goal: 1.0            # termination condition for reaching the goal, meters
+
+# BendyRuler / Obstacle Avoidance Settings
+min_obstacle_dist_m: 0.3     # companion-side emergency-stop threshold (m) — hover if nearest obstacle closer
+goal_resend_hz: 2.0          # how often to re-send body-offset target to keep BendyRuler engaged (Hz)
 
 # Drone Settings
 # --------------
@@ -43,8 +48,6 @@ min_dist2goal: 1.0            # termination condition for reaching the goal, met
 IP: "udpout:192.168.53.51:14550" 
 baud: 115200               # Set baud, only required for serial telemetry
 height: 1.2                # flight altitude, meters
-OF_Negates: True           # whether the optical flow outputs are negated, this cannot be fixed by ArduPilot params and must be corrected in code
-# Arbitrary EKF origin
 EKF_LAT: 8.4723591
 EKF_LON: 76.9295203
 forward_speed: 0.5         # forward speed in m/s, set to None to use speed defined in generate_primitives.py

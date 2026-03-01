@@ -1,5 +1,5 @@
 SQUARES_X, SQUARES_Y = 10, 7
-SQUARE_LENGTH, MARKER_LENGTH = 0.027, 0.02
+SQUARE_LENGTH, MARKER_LENGTH = 0.0235, 0.0175
 
 import cv2 as cv
 import numpy as np
@@ -17,7 +17,7 @@ else:
   os.environ["QT_QPA_PLATFORM"] = "xcb"
 
 # --- CONFIG ---
-URL = "http://10.42.0.29:81/stream"
+URL = "http://192.168.53.56:81/stream"
 DICT = cv.aruco.getPredefinedDictionary(cv.aruco.DICT_4X4_50)
 
 board = cv.aruco.CharucoBoard((SQUARES_X, SQUARES_Y), SQUARE_LENGTH, MARKER_LENGTH, DICT)
@@ -130,8 +130,7 @@ def main():
                   "dist_coeffs": dist.tolist(),
                   "resolution": imsize,
                   "refined_matrix": new_mtx.tolist(),
-                  "roi": list(roi),
-                  "explanation": "refined_matrix and roi are for undistorted images."
+                  "roi": list(roi)
                 }
                 with open("calibration.json", "w") as f:
                   json.dump(calib_data, f, indent=4)

@@ -3,8 +3,24 @@ MonoNav - Monocular Vision Obstacle Avoidance for ArduCopter
 Uses DepthAnythingV2 for metric depth estimation and sends OBSTACLE_DISTANCE
 messages to ArduCopter's BendyRuler algorithm for reactive obstacle avoidance.
 
+The companion continuously streams OBSTACLE_DISTANCE to ArduPilot and
+periodically sends a GUIDED-mode body-offset position target toward the
+goal.  BendyRuler plans a collision-free path while the companion adds
+a safety layer (emergency hover when any obstacle < min_obstacle_dist_m).
+
+Required ArduCopter Parameters (set via Mission Planner / mavproxy):
+  OA_TYPE          = 1        # BendyRuler path planner
+  OA_BR_LOOKAHEAD  = 5        # look-ahead distance (m) — tune for corridor
+  OA_MARGIN_MAX    = 2        # max margin from obstacles (m)
+  AVOID_ENABLE     = 7        # all avoidance sources
+  PRX1_TYPE        = 2        # MAVLink proximity
+  PRX1_ORIENT      = 0        # forward
+  PRX1_MIN         = 0.2      # m — match DEPTH_RANGE_M[0]
+  PRX1_MAX         = 2        # m — match DEPTH_RANGE_M[1]
+  WPNAV_SPEED      = 50       # cm/s — conservative for indoor
+
 Requirements:
-- ArduCopter with BendyRuler enabled (OA_TYPE=1, AVOID_ENABLE=7, PRX_TYPE=2)
+- ArduCopter >= v4.5 with BendyRuler enabled
 - ESP32-CAM or similar IP camera
 - DepthAnythingV2 model checkpoint
 """
@@ -34,7 +50,6 @@ import mavlink_control as mavc         # import the mavlink helper script
 # LOAD VALUES FROM CONFIG FILE
 config = load_config('config.yml')
 forward_speed = config['forward_speed']
-OF_NEGATES = bool(config.get('OF_Negates', True))
 
 INPUT_SIZE = config['INPUT_SIZE']      # Image size
 CHECKPOINT = config['DA2_CHECKPOINT']  # path to checkpoint for DepthAnythingV2
@@ -82,6 +97,7 @@ if model_device.type != 'cuda' and torch.cuda.is_available():
 
 # GLOBAL VARIABLES
 last_key_pressed = None  # store the last key pressed
+shouldStop = False
 current_time_us = 0
 vehicle_pitch_rad = None
 depth_hfov_deg = None
@@ -123,13 +139,16 @@ filterYvals = config['filterYvals']
 filterWeights = config['filterWeights']
 filterTSDF = config['filterTSDF']
 
-if 'goal_position' in config:
-    goal_position = np.array(config['goal_position']).reshape(1, 3)#np.array([-5., -0.4, 10.0]).reshape(1, 3) # OpenCV frame: +X RIGHT, +Y DOWN, +Z FORWARD
+# Goal in RDF (right, down, forward) — converted to NED after drone connection
+if 'goal_position_rdf' in config:
+    goal_position = np.array(config['goal_position_rdf'])
 else:
-    goal_position = None # non-directed exploration
-print("Goal position: ", goal_position)
+    goal_position = None  # non-directed exploration (manual only)
+print("Goal position (RDF):", goal_position)
+
 min_dist2obs = config['min_dist2obs']
 min_dist2goal = config['min_dist2goal']
+min_obstacle_dist_m = config.get('min_obstacle_dist_m', 0.3)
 
 # Make directories for data
 time_string = time.strftime('%Y-%m-%d-%H-%M-%S')
@@ -348,6 +367,9 @@ def visualize_pointcloud(pcd_legacy, window_name="Reconstruction"):
 def main():
     global DEPTH_HEIGHT, DEPTH_WIDTH
     global last_key_pressed
+    global shouldStop
+    global goal_position
+    global mtx, dist, optimal_mtx, roi
 
     cap = VideoCapture(STREAM_URL)
     for _ in range(0, config['num_pre_depth_frames']):
@@ -371,39 +393,43 @@ def main():
         mavc.takeoff(height)
         mavc.set_speed(forward_speed)
 
+    mavc.heading_offset_init()
+    # Keep goal_position in RDF frame (same as camera_position from get_drone_pose)
+    if goal_position is not None:
+        # goal_position = np.array(rdf_goal_to_ned(goal_position[0], goal_position[1], goal_position[2], mavc.heading_offset)).reshape(1, 3)
+        x, y =goal_position[0], goal_position[1]
+    mavc.printd(f"Heading offset : {mavc.heading_offset*180/np.pi}")
+    mavc.printd(f"Goal position (NED): {goal_position}")
+
     sender_thread = None
     last_time = time.time()
     frame_number = 0
-    running = True
     
     # Scale intrinsics if camera resolution differs from calibration resolution
-    global mtx, dist, optimal_mtx, roi
     first_frame = cap.read()
     if first_frame is not None:
         DEPTH_HEIGHT, DEPTH_WIDTH = first_frame.shape[:2]
         calib_width, calib_height = get_calibration_resolution(camera_calibration_path)
+        mtx, dist, optimal_mtx, roi = adjust_intrinsics_to_frame_size(
+            mtx, dist, optimal_mtx, roi, DEPTH_WIDTH, DEPTH_HEIGHT, calib_width, calib_height
+        )
         if calib_width is not None and calib_height is not None:
             scale_x = DEPTH_WIDTH / calib_width
             scale_y = DEPTH_HEIGHT / calib_height
             if abs(scale_x - 1.0) > 1e-6 or abs(scale_y - 1.0) > 1e-6:
                 mavc.printd(f"Scaling intrinsics: {calib_width}x{calib_height} → {DEPTH_WIDTH}x{DEPTH_HEIGHT}")
-                mtx = scale_intrinsics(mtx, scale_x, scale_y)
-                optimal_mtx = scale_intrinsics(optimal_mtx, scale_x, scale_y)
-                roi = np.array([
-                    int(round(roi[0] * scale_x)),
-                    int(round(roi[1] * scale_y)),
-                    int(round(roi[2] * scale_x)),
-                    int(round(roi[3] * scale_y)),
-                ], dtype=np.int32)
-                # Update cropped intrinsics for VoxelBlockGrid
+        # Update VoxelBlockGrid with adjusted intrinsics
         vbg_intrinsics = get_cropped_intrinsics(optimal_mtx, roi)
         vbg.intrinsic_matrix = vbg_intrinsics
         vbg.depth_intrinsic = o3d.core.Tensor(vbg_intrinsics, o3d.core.Dtype.Float64)
 
 
     if DEPTH_HEIGHT is None or DEPTH_WIDTH is None:
-        DEPTH_HEIGHT, DEPTH_WIDTH = transform_bgr.shape[0], transform_bgr.shape[1]
-        mavc.printd("DEPTH_HEIGHT: {}, DEPTH_WIDTH: {}".format(DEPTH_HEIGHT, DEPTH_WIDTH))
+        if first_frame is not None:
+            DEPTH_HEIGHT, DEPTH_WIDTH = first_frame.shape[0], first_frame.shape[1]
+            mavc.printd("DEPTH_HEIGHT: {}, DEPTH_WIDTH: {}".format(DEPTH_HEIGHT, DEPTH_WIDTH))
+        else:
+            raise RuntimeError("Unable to read first frame from camera")
     set_obstacle_distance_params_from_intrinsics(mtx, DEPTH_WIDTH, DEPTH_HEIGHT)
 
     if enable_msg_obstacle_distance:
@@ -414,23 +440,22 @@ def main():
             daemon=True,
         )
         sender_thread.start()
-    
+
     print("\n=== Keyboard Controls ===")
     if FLY_VEHICLE:
-        print("  'g' - Move forward at forward_speed m/s")
+        if goal_position is not None:
+            print("  'g' - Start autonomous goal navigation (BendyRuler)")
+        else:
+            print("  'g' - Move forward at forward_speed m/s (no goal set)")
         print("  'h' - Hover (stop all movement)")
         print("  'c' - Land")
     print("  'q' - Quit program")
     print("========================\n")
 
     try:
-      while running:
+      while not shouldStop:
         bgr = cap.read()
-        try:
-            camera_position = get_drone_pose(OF_NEGATES)
-        except Exception as e:
-            mavc.printd(f"Error getting drone pose: {e}")
-            continue
+        camera_position = get_drone_pose()
 
         update_vehicle_pitch()
 
@@ -483,21 +508,53 @@ def main():
             
         update_key_from_cv(1)
 
-        # Handle keyboard commands
-        if last_key_pressed == 'q':
-            running = False
-        elif FLY_VEHICLE and last_key_pressed == 'g':
-            mavc.printd("[KEY] 'g' pressed - Moving forward at 0.5 m/s")
-            mavc.send_body_offset_ned_vel(0.5, 0, 0, 0)  # vx=0.5 forward, vy=0, vz=0, yaw_rate=0
-            last_key_pressed = None
-        elif FLY_VEHICLE and last_key_pressed == 'c':
-            mavc.printd("[KEY] 'c' pressed - Landing")
-            mavc.set_mode('LAND')
-            last_key_pressed = None
-        elif FLY_VEHICLE and last_key_pressed == 'h':
-            mavc.printd("[KEY] 'h' pressed - Hover (stop)")
-            mavc.send_body_offset_ned_vel(0, 0, 0, 0)  # Stop all movement
-            last_key_pressed = None
+        if last_key_pressed == 'g':
+            if FLY_VEHICLE:
+                if goal_position is not None:
+                    print("Pressed g. Using BendyRuler navigation to goal.")
+                    mavc.set_mode('GUIDED')
+                    
+                    # Check distance to goal (both in NED frame after heading correction)
+                    dist_to_goal = np.linalg.norm(camera_position[0:-1, -1] - goal_position[0])
+                    if dist_to_goal <= min_dist2goal:
+                        print("Reached goal!")
+                        shouldStop = True
+                        last_key_pressed = 'c'
+                    else:
+                        # Send forward velocity - BendyRuler handles obstacle avoidance
+                        # mavc.send_body_offset_ned_vel(forward_speed, 0, 0, 0)
+                        mavc.send_body_offset_ned_pos(x, y, speed=forward_speed
+                    # Companion-side safety: emergency hover if obstacle < threshold
+                    with distances_lock:
+                        valid = distances[distances < (max_depth_cm + 1)]
+                    if valid.size > 0:
+                        nearest_m = float(np.min(valid)) / 100.0
+                        if nearest_m < min_obstacle_dist_m:
+                            mavc.printd(
+                                "[SAFETY] Obstacle at %.2fm < %.2fm — emergency hover!"
+                                % (nearest_m, min_obstacle_dist_m)
+                            )
+                            mavc.send_body_offset_ned_vel(0, 0, 0, 0)
+                else:
+                    print("Pressed g. Moving forward.")
+                    mavc.send_body_offset_ned_vel(forward_speed, 0, 0, 0)
+
+        elif last_key_pressed == 'h':
+            print("Pressed h. Hovering in place.")
+            if FLY_VEHICLE:
+                mavc.send_body_offset_ned_vel(0, 0, 0, 0)
+
+        elif last_key_pressed == 'c':  # end control and land
+            print("Pressed c. Landing.")
+            if FLY_VEHICLE:
+                mavc.set_mode('LAND')
+            shouldStop = True
+
+        elif last_key_pressed == 'q':  # end flight immediately
+            print("Pressed q. EMERGENCY STOP.")
+            if FLY_VEHICLE:
+                mavc.eSTOP()
+            shouldStop = True
 
     except KeyboardInterrupt:
         mavc.printd("Ctrl+C received, shutting down...")
@@ -524,12 +581,8 @@ def main():
             num_points = len(pcd_legacy.points)
             mavc.printd("Point cloud has {} points (weight_threshold=1)".format(num_points))
 
-        if num_points > 0:
-            visualize_pointcloud(pcd_legacy, window_name="MonoNav Reconstruction")
-        else:
-            mavc.printd("No points extracted — nothing to visualize.")
+        visualize_pointcloud(pcd_legacy, window_name="MonoNav Reconstruction")
 
-        # Clean up OpenCV AFTER Open3D visualization (avoids OpenGL context conflict / segfault)
         try:
             cap.cap.release()
         except Exception:

@@ -8,18 +8,19 @@ Also provides functions to receive pose data from the copter.
 
 from pymavlink import mavutil
 import time
+from numpy import pi
 
 FLTMODES = {'GUIDED': 4, 'LOITER':5, 'LAND':9, 'BRAKE':17, 'SmartRTL':21}
 time_boot, x, y, z, roll, pitch, yaw = 0, 0, 0, 0, 0, 0, 0
-heading_offset = 0
+heading_offset = None
 DEBUG = True                                                # Whether to print debug messages
 
 def printd(string):
     """
-    Print debug messages
+    Print debug messages. Use f strings for multiple variables.
     """
     if DEBUG:
-        print(string)
+        print(string, flush=True)
 
 def send_heartbeat():
     """
@@ -215,23 +216,37 @@ def en_pose_stream(freq=15):
 
 def get_pose(blocking=False):
     """
-    Return the position and attitude (in radians) of the drone
+    Return the position (Local NED) and attitude (in radians) of the drone
+    Polls for both LOCAL_POSITION_NED and ATTITUDE messages until both are received
     """
     global time_boot, x, y, z, roll, pitch, yaw
+    
+    # Keep polling until we get fresh messages (or timeout)
+    got_position = False
+    got_attitude = False
+    deadline = time.monotonic() + 0.2 if not blocking else float('inf')
+    
     while True:
-        msg = drone.recv_match(type=["LOCAL_POSITION_NED", "ATTITUDE"], blocking=blocking, timeout=0.2)
+        remaining = deadline - time.monotonic() if not blocking else 0.2
+        if remaining <= 0:
+            break
+            
+        msg = drone.recv_match(type=["LOCAL_POSITION_NED", "ATTITUDE"], blocking=False, timeout=remaining)
         
         if not msg or msg.get_type() == "BAD_DATA":
-            break
+            if got_position and got_attitude:
+                break
+            if not blocking:
+                break
+            continue
 
-        else:    
-            if msg.get_type() == "LOCAL_POSITION_NED":
-              # time_boot = msg.time_boot_ms
-                x, y, z = msg.x, msg.y, msg.z
+        if msg.get_type() == "LOCAL_POSITION_NED":
+            x, y, z = msg.x, msg.y, msg.z
+            got_position = True
+        elif msg.get_type() == "ATTITUDE":
+            roll, pitch, yaw = msg.roll, msg.pitch, msg.yaw
+            got_attitude = True
                 
-            elif msg.get_type() == "ATTITUDE":
-                roll, pitch, yaw = msg.roll, msg.pitch, msg.yaw
-    #printd(f"x={x} y={y} z={z} yaw={yaw*180/pi} pitch={pitch*180/pi} roll={roll*180/pi}")
     return x, y, z, yaw, pitch, roll
 
 def heading_offset_init():
@@ -244,12 +259,13 @@ def heading_offset_init():
     # get_pose returns (x, y, z, yaw, pitch, roll)
     _, _, _, yaw, _, _ = get_pose()
     heading_offset = yaw
+    return heading_offset
 
 def eSTOP():
     """
     Emergency Motor stop. DISARMS immediately and causes a hard landing. DO NOT USE unless absolutely necessary.
     """
-    set_mode('BRAKE')
+    # set_mode('BRAKE')
     arm(0)
 
 def timesync(timeout_s=0.5):
@@ -281,24 +297,22 @@ def timesync(timeout_s=0.5):
         ap_ns = int(time.monotonic_ns() + offset_ns)
         return ap_ns
     
-def reboot_if_EKF_origin(tolerance=0.2):
+def reboot_if_EKF_origin(pos_tolerance=0.2):
     """
     Read the current local‑position and, if either x or y deviates from
     zero by more than `tolerance`, request a reboot so the EKF origin can
     be reset.
 
     The globals x/y start at 0 and stay there until a LOCAL_POSITION_NED
-    message is received.  Calling `get_pose(blocking=True)` ensures we
-    wait for the first packet; without that the coordinates will be zero
-    and `abs()` will trivially return 0.
+    message is received.
     """
 
-    for i in range(5):
-        x, y, _, _, _, _ = get_pose()
+    for i in range(3):                  # Call multiple times to ensure we get a valid message after enabling the stream
+        x, y, _, yaw, _, _ = get_pose()
         time.sleep(0.05)
     printd(f"reboot check – x={x:.3f}, y={y:.3f}")
-    if abs(x) > tolerance or abs(y) > tolerance:
-        printd(f"deviation exceeds {tolerance}, rebooting")
+    if abs(x) > pos_tolerance or abs(y) > pos_tolerance:
+        printd(f"pos deviation exceeds {pos_tolerance}, rebooting")
         drone.mav.command_long_send(
             drone.target_system,
             drone.target_component,

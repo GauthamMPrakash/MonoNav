@@ -21,12 +21,9 @@ from scipy.spatial import distance
 import os
 import open3d as o3d
 import open3d.core as o3c
+import math as m
 import copy
 import yaml, json
-
-# # For Craziflie logging
-# from cflib.crazyflie.log import LogConfig
-# from cflib.crazyflie.syncLogger import SyncLogger
 
 import mavlink_control as mavc         # ArduCopter MAVLink wrappers
 import queue, threading                # For bufferless video capture
@@ -140,21 +137,58 @@ class VideoCapture:
         return self.last_frame
       raise RuntimeError("VideoCapture timeout: no frame available")
 
+def rdf_goal_to_ned(goal_right, goal_down, goal_front, heading_offset):
+    """
+    Convert a goal position from RDF (Right-Down-Front) frame to NED (North-East-Down) frame.
+    
+    The RDF frame is anchored to the drone's heading at startup (after heading_offset_init() is called).
+    The NED frame is the absolute navigation frame from ArduPilot.
+    
+    Args:
+        goal_right: goal position in RDF right direction (meters)
+        goal_down: goal position in RDF down direction (meters)
+        goal_front: goal position in RDF front direction (meters)
+    
+    Returns:
+        A tuple (goal_north, goal_east, goal_down) in NED frame
+    """
+    
+    # Coordinate frame transformation (without rotation):
+    # RDF (right, down, front) -> NED (north, east, down)
+    # right (X_RDF) -> east (Y_NED)
+    # down (Y_RDF) -> down (Z_NED)  
+    # front (Z_RDF) -> north (X_NED)
+    
+    goal_ned_x_unrotated = goal_front
+    goal_ned_y_unrotated = goal_right
+    goal_ned_z = goal_down
+    
+    # Apply yaw rotation to account for heading offset.
+    # The heading_offset is the absolute yaw at takeoff.
+    # RDF coordinates are relative to the drone's initial heading,
+    # so we need to rotate them by heading_offset to align with NED.
+    cos_yaw = m.cos(heading_offset)
+    sin_yaw = m.sin(heading_offset)
+    
+    goal_ned_x = goal_ned_x_unrotated * cos_yaw - goal_ned_y_unrotated * sin_yaw
+    goal_ned_y = goal_ned_x_unrotated * sin_yaw + goal_ned_y_unrotated * cos_yaw
+    
+    return goal_ned_x, goal_ned_y, goal_ned_z
+
 """
 Get the global pose from the vehicle, convert to the Open3D frame
 ArduPilot frame: (X, Y, Z) is NORTH EAST DOWN (NED)
 Open3D frame: (X, Y, Z) is RIGHT DOWN FRONT (RDF)
+
+This function assumes the drone was pointing North at initialization. But since this obviously may not be true, we compute a heading offset initially to convert RDF goal position to actual NED frame. This allows us to work with RDF (assumed to be aligned with NED) coordinates internally (for trajectory primitives and visualization) while still commanding the drone in the correct NED frame according to its actual initial heading. 
+
+This doesn't matter in exploration mode. But in goal-directed navigation, this allows us to specify the goal in RDF coordinates relative to the drone's initial heading, and have it correctly transformed to NED for ArduPilot.
 """
-def get_drone_pose(OF_negates=True):
+def get_drone_pose():
     _x, _y, _z, _yaw, _pitch, _roll = mavc.get_pose()
     # Convert position from AP to TSDF frame.
     # ArduPilot LOCAL_POSITION_NED is (x=NORTH, y=EAST, z=DOWN).
-    # Some OF setups report right/front motion as negative values (OF_Negates=True),
-    # so we correct signs before mapping to RDF (+X right, +Y down, +Z front).
-    if OF_negates:
-        xyz = np.array([-_y, _z, -_x])
-    else:
-        xyz = np.array([_y, _z, _x])
+    xyz = np.array([_y, _z, _x])
     # Convert rotation from AP to TSDF frame
     r = Rotation.from_euler('xyz', [_roll, _pitch, _yaw], degrees=False)
     R = r.as_matrix()
@@ -419,6 +453,48 @@ def scale_intrinsics(intrinsic_matrix, scale_x, scale_y):
     return scaled_intrinsic
 
 
+def adjust_intrinsics_to_frame_size(mtx, dist, optimal_mtx, roi, frame_width, frame_height, calib_width, calib_height):
+    """
+    Adjust camera intrinsics and ROI to match the actual frame dimensions.
+    If frame dimensions differ from calibration dimensions, scales the intrinsics accordingly.
+    
+    Args:
+        mtx: Camera matrix
+        dist: Distortion coefficients
+        optimal_mtx: Optimal camera matrix (after undistortion)
+        roi: Region of interest [x, y, w, h]
+        frame_width: Actual frame width
+        frame_height: Actual frame height
+        calib_width: Calibration frame width
+        calib_height: Calibration frame height
+    
+    Returns:
+        Tuple of (mtx, dist, optimal_mtx, roi) - either scaled or original
+    """
+    if calib_width is None or calib_height is None:
+        return mtx, dist, optimal_mtx, roi
+    
+    scale_x = frame_width / calib_width
+    scale_y = frame_height / calib_height
+    
+    # Only scale if dimensions differ significantly
+    if abs(scale_x - 1.0) > 1e-6 or abs(scale_y - 1.0) > 1e-6:
+        mtx = scale_intrinsics(mtx, scale_x, scale_y)
+        optimal_mtx = scale_intrinsics(optimal_mtx, scale_x, scale_y)
+        dist = dist.copy()  # Distortion coefficients don't scale with resolution
+        roi = np.array(
+            [
+                int(round(roi[0] * scale_x)),
+                int(round(roi[1] * scale_y)),
+                int(round(roi[2] * scale_x)),
+                int(round(roi[3] * scale_y)),
+            ],
+            dtype=np.int32,
+        )
+    
+    return mtx, dist, optimal_mtx, roi
+
+
 def get_cropped_intrinsics(intrinsic_matrix, roi):
     cropped_intrinsic = np.array(intrinsic_matrix, dtype=np.float64, copy=True)
     x, y, _, _ = [int(v) for v in roi]
@@ -431,13 +507,6 @@ Transform the raw image
 This involves resizing the image, scaling the camera matrix, and undistorting the image.
 """
 def transform_image(image, mtx, dist, optimal_matrix, roi):
-    # if image.shape[0] != kinect.height or image.shape[1] != kinect.width:
-    #     # Resize the camera matrix to match new dimensions
-    #     scale_vec = np.array([kinect.width / image.shape[1], kinect.height / image.shape[0], 1]).reshape((3,1))
-    #     mtx = mtx * scale_vec
-    #     # Resize image to match the kinect dimensions & new intrinsics
-    #     image = cv2.resize(image, (kinect.width, kinect.height))
-    # Transform to the kinect camera matrix
     transformed_image = cv2.undistort(np.asarray(image), mtx, dist, None, optimal_matrix)
     # Crop the image to the ROI
     x, y, w, h = roi

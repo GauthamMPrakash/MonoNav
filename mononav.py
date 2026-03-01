@@ -114,14 +114,13 @@ print("Initial trajectory chosen: %d out of %d"%(max_traj_idx, len(traj_list)))
 filterYvals = config['filterYvals']
 filterWeights = config['filterWeights']
 filterTSDF = config['filterTSDF']
-OF_NEGATES = bool(config.get('OF_Negates', True))
-mavc.printd(f"OF_Negates: {OF_NEGATES} (True means right/front increase as negative in LOCAL_POSITION_NED)")
-if 'goal_position' in config:
-    # Goal is interpreted directly in RDF meters: [right, down, front]
-    goal_position = np.array(config['goal_position']).reshape(1, 3)
+if 'goal_position_rdf' in config:
+    # Goal is in RDF meters: [right, down, forward]
+    goal_position = np.array(config['goal_position_rdf'])
 else:
     goal_position = None # non-directed exploration
-print("Goal position: ", goal_position)
+
+print("Goal position (RDF): ", goal_position)
 min_dist2obs = config['min_dist2obs']
 min_dist2goal = config['min_dist2goal']
 print(f"Trajectory index convention: 0=sharp left, {len(traj_list)//2}=straight, {len(traj_list)-1}=sharp right")
@@ -177,6 +176,7 @@ def main():
     global mtx
     global optimal_mtx
     global roi
+    global goal_position
 
     # Run the depth model a few times (the first inference is slow), and skip the first few frames
     cap = VideoCapture(STREAM_URL)
@@ -184,20 +184,9 @@ def main():
     frame_height, frame_width = first_bgr.shape[:2]
 
     if calib_width is not None and calib_height is not None:
-        scale_x = frame_width / calib_width
-        scale_y = frame_height / calib_height
-        if abs(scale_x - 1.0) > 1e-6 or abs(scale_y - 1.0) > 1e-6:
-            mtx = scale_intrinsics(mtx, scale_x, scale_y)
-            optimal_mtx = scale_intrinsics(optimal_mtx, scale_x, scale_y)
-            roi = np.array(
-                [
-                    int(round(roi[0] * scale_x)),
-                    int(round(roi[1] * scale_y)),
-                    int(round(roi[2] * scale_x)),
-                    int(round(roi[3] * scale_y)),
-                ],
-                dtype=np.int32,
-            )
+        mtx, dist, optimal_mtx, roi = adjust_intrinsics_to_frame_size(
+            mtx, dist, optimal_mtx, roi, frame_width, frame_height, calib_width, calib_height
+        )
 
     vbg_intrinsics = get_cropped_intrinsics(optimal_mtx, roi)
     vbg.intrinsic_matrix = vbg_intrinsics
@@ -210,6 +199,7 @@ def main():
             bgr = first_bgr if i == 0 else cap.read()
             # COMPUTE DEPTH
             start_time_test = time.time()
+            # depth_numpy, depth_colormap = compute_depth_fast(bgr, INPUT_SIZE)
             depth_numpy, depth_colormap = compute_depth(bgr, depth_anything, INPUT_SIZE)
             print("TIME TO COMPUTE DEPTH:", time.time() - start_time_test)
             cv2.imshow("test", bgr)
@@ -220,9 +210,9 @@ def main():
     # Connect to the drone
         mavc.connect_drone(IP, baud=baud)
         mavc.en_pose_stream()                    # Commands AP to stream poses at a deafult value of 15 Hz
-        mavc.reboot_if_EKF_origin(0.3)           # Call this function after enabling pose_stream
+        mavc.reboot_if_EKF_origin(0.5)           # Call this function after enabling pose_stream
         mavc.set_ekf_origin(EKF_LAT, EKF_LON, 0) # Ignored if already close to the previous origin, if set
-    
+
     # Initialize lists and frame counter.
         frame_number = 0
         start_flight_time = time.time()
@@ -233,7 +223,12 @@ def main():
             print("Taking off.")
             mavc.takeoff(height)
             # mavc.set_speed(forward_speed)
-
+        mavc.heading_offset_init()
+        # Keep goal_position in RDF frame (same as camera_position from get_drone_pose)
+        if goal_position is not None:
+            goal_position = np.array(rdf_goal_to_ned(goal_position[0], goal_position[1], goal_position[2], mavc.heading_offset)).reshape(1, 3)
+        mavc.printd(f"Heading offset : {mavc.heading_offset*180/np.pi}")
+        mavc.printd(f"Goal position (NED): {goal_position}")
     ##########################################
         print("Starting control.")
         traj_counter = 0         # how many trajectory iterations have we done?
@@ -289,6 +284,7 @@ def main():
                 # WARNING: This controller is tuned for ArduCopter.
                 # You must check whether your robot follows the open-loop trajectory.
                 yawrate = -amplitudes[traj_index]*np.sin(np.pi/period*(time.time() - start_time)) # rad/s
+                mavc.printd(yawrate)
                 yvel = yawrate*config['yvel_gain']
                 yawrate = yawrate*config['yawrate_gain']
                 if FLY_VEHICLE:
@@ -296,9 +292,9 @@ def main():
 
             # get camera capture and transform intrinsics
                 bgr = cap.read()
-                #cv2.imshow("frame", bgr)
                 update_key_from_cv(1)
-                camera_position = get_drone_pose(OF_NEGATES) # get camera position immediately
+                camera_position = get_drone_pose() # get camera position immediately
+                # Extract yaw from rotation matrix
                 if goal_position is not None:
                     dist_to_goal = np.linalg.norm(camera_position[0:-1, -1]-goal_position[0])
                     if dist_to_goal <= min_dist2goal:
@@ -313,7 +309,6 @@ def main():
 
                 # compute depth
                 depth_numpy, depth_colormap = compute_depth(transform_bgr, depth_anything, INPUT_SIZE)
-                #depth_numpy, depth_colormap = compute_depth(bgr, depth_anything, INPUT_SIZE)
                 cv2.imshow("frame", depth_colormap)
 
             # SAVE DATA TO FILE
