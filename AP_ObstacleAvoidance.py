@@ -23,6 +23,7 @@ Requirements:
 - ArduCopter >= v4.5 with BendyRuler enabled
 - ESP32-CAM or similar IP camera
 - DepthAnythingV2 model checkpoint
+
 """
 
 import cv2
