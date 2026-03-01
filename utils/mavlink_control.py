@@ -8,7 +8,6 @@ Also provides functions to receive pose data from the copter.
 
 from pymavlink import mavutil
 import time
-from numpy import pi
 
 FLTMODES = {'GUIDED': 4, 'LOITER':5, 'LAND':9, 'BRAKE':17, 'SmartRTL':21}
 time_boot, x, y, z, roll, pitch, yaw = 0, 0, 0, 0, 0, 0, 0
@@ -323,7 +322,47 @@ def reboot_if_EKF_origin(pos_tolerance=0.2):
             0, 0, 0
         )
 
+"""
+Set a parameter on the autopilot. Use with caution and ensure you know what the parameter does before changing.
+Waits for PARAM_VALUE response to verify successful parameter set with configurable timeout.
+Returns True if parameter was successfully set, False otherwise.
+"""
+def set_param(param_id, param_value, param_type, timeout=5.0):
+    printd(f"Setting param {param_id} to {param_value}")
+    drone.mav.param_set_send(
+        drone.target_system,
+        drone.target_component,
+        param_id.encode('utf-8'),
+        float(param_value),
+        param_type
+    )
+    
+    # Wait for PARAM_VALUE response to confirm parameter was set successfully
+    start_time = time.time()
+    while time.time() - start_time < timeout:
+        msg = drone.recv_match(type='PARAM_VALUE', blocking=False, timeout=0.1)
+        if msg is not None:
+            # Decode param_id from message (may be null-terminated)
+            recv_param_id = msg.param_id.split('\x00')[0] if isinstance(msg.param_id, str) else msg.param_id.decode('utf-8').split('\x00')[0]
+            
+            # Check if this is the parameter we just set
+            if recv_param_id == param_id:
+                # Verify the value matches (with small tolerance for floating point)
+                value_match = abs(msg.param_value - float(param_value)) < 1e-6
+                if value_match:
+                    printd(f"Parameter {param_id} successfully set to {msg.param_value}")
+                    return True
+                else:
+                    printd(f"ERROR: Parameter {param_id} value mismatch. Expected {param_value}, got {msg.param_value}")
+                    return False
+    
+    printd(f"ERROR: No PARAM_VALUE response received for {param_id} within {timeout}s timeout")
+    return False
+
 def test(): 
+    """
+    Do not fly the vehicle unless you have configured and tested the drone in a safe environment. Always be ready to disarm if the drone behaves unexpectedly.
+    """
     try:
         # Arbitrary location for EKF Origin
         EKF_LAT = 8.4723591
@@ -354,8 +393,7 @@ def test():
         """
         yaw_rate = 1
         length = 0.7
-        vel = 0.3
-        duration = 1
+        vel = 0.5
         def square_pos():
             send_body_offset_ned_pos(length,0)
             time.sleep(5)
@@ -366,13 +404,13 @@ def test():
             send_body_offset_ned_pos(0,-length)
             time.sleep(5)
         def square_vel():
-            send_body_offset_ned_vel(0.5, 0, yaw_rate=yaw_rate)
+            send_body_offset_ned_vel(vel, 0, yaw_rate=yaw_rate)
             time.sleep(2)
-            send_body_offset_ned_vel(0, 0.5, yaw_rate=yaw_rate)
+            send_body_offset_ned_vel(0, vel, yaw_rate=yaw_rate)
             time.sleep(2)
-            send_body_offset_ned_vel(-0.5, 0, yaw_rate=yaw_rate)
+            send_body_offset_ned_vel(-vel, 0, yaw_rate=yaw_rate)
             time.sleep(2)
-            send_body_offset_ned_vel(0, -0.5, yaw_rate=yaw_rate)
+            send_body_offset_ned_vel(0, -vel, yaw_rate=yaw_rate)
             time.sleep(2)
         square_pos()
         print("Landing...")
