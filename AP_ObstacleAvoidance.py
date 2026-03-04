@@ -35,6 +35,7 @@ import os
 import open3d as o3d
 import sys
 import threading
+import signal
 
 # Add DepthAnythingV2-metric to path
 repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '.'))
@@ -65,7 +66,7 @@ EKF_LAT = config['EKF_LAT']
 EKF_LON = config['EKF_LON']
 STREAM_URL = config['camera_ip']       # YOUR ESP32 HTTP MJPEG stream
 
-DEPTH_RANGE_M = [0.2, 15.0]            # min and max ranges to be computed
+DEPTH_RANGE_M = [0.2, 15.0]                 # min and max ranges to be computed
 min_depth_cm = int(DEPTH_RANGE_M[0] * 100)  # In cm
 max_depth_cm = int(DEPTH_RANGE_M[1] * 100)  # In cm, should be a little conservative
 distances_array_length = 72
@@ -74,13 +75,12 @@ increment_f  = None
 distances = np.ones((distances_array_length,), dtype=np.uint16) * (max_depth_cm + 1)
 
 debug_enable = True
-display_name  = 'Input/output depth'
 
 # DepthAnythingV2 model configurations. You typically only need small or base models
 model_configs = {
     'vits': {'encoder': 'vits', 'features': 64, 'out_channels': [48, 96, 192, 384]},
     'vitb': {'encoder': 'vitb', 'features': 128, 'out_channels': [96, 192, 384, 768]},
-#   'vitl': {'encoder': 'vitl', 'features': 256, 'out_channels': [256, 512, 1024, 1024]},
+    'vitl': {'encoder': 'vitl', 'features': 256, 'out_channels': [256, 512, 1024, 1024]},
 }
 
 # Initialize the DepthAnythingV2 model and load the checkpoint
@@ -107,6 +107,7 @@ DEPTH_WIDTH = None
 DEPTH_HEIGHT = None
 distances_lock = threading.Lock()
 obstacle_sender_stop_event = threading.Event()
+pitch_updater_stop_event = threading.Event()
 
 # Intrinsics for undistortion
 camera_calibration_path = config['camera_calibration_path']
@@ -127,13 +128,6 @@ if config['VoxelBlockGrid']['device'] != "None":
 else:
     device = 'CUDA:0' if torch.cuda.is_available() else 'CPU:0'
 vbg = VoxelBlockGrid(depth_scale, depth_max, trunc_voxel_multiplier, o3d.core.Device(device), intrinsic_matrix=fusion_intrinsics)
-
-# # Initialize Trajectory Library (Motion Primitives)
-# trajlib_dir = config['trajlib_dir']
-# traj_list = get_trajlist(trajlib_dir)
-# traj_linesets, period, forward_speed, amplitudes = get_traj_linesets(traj_list)
-# max_traj_idx = int(len(traj_list)/2) # set initial value to that of FORWARD flight (should be median value)
-# print("Initial trajectory chosen: %d out of %d"%(max_traj_idx, len(traj_list)))
 
 # Planning presets
 filterYvals = config['filterYvals']
@@ -166,11 +160,6 @@ os.makedirs(img_dir, exist_ok=True)
 os.makedirs(pose_dir, exist_ok=True)
 os.makedirs(transform_img_dir, exist_ok=True)
 os.makedirs(transform_depth_dir, exist_ok=True)
-
-# # Save the run information to a csv
-# header = ['frame_number', 'chosen_traj_idx', 'time_elapsed']
-# with open(save_dir + '/trajectories.csv', 'w') as file:
-#     file.write(','.join(header) + '\n')
 
 # key press callback function (for manual control)
 def on_press(key):
@@ -281,7 +270,22 @@ def set_obstacle_distance_params_from_intrinsics(camera_matrix, width, height):
 
 def update_vehicle_pitch():
     global vehicle_pitch_rad
-    _, _, _, _, vehicle_pitch_rad, _ = mavc.get_pose(blocking=False)
+    _, _, _, _, vehicle_pitch_rad, _ = mavc.get_pose()
+
+def pitch_updater_loop(update_hz=10):
+    """Background thread: update vehicle_pitch_rad at fixed rate (10 Hz default)."""
+    period_s = 1.0 / max(update_hz, 0.1)
+    next_update = time.monotonic()
+    
+    while not pitch_updater_stop_event.is_set():
+        update_vehicle_pitch()
+        
+        next_update += period_s
+        sleep_time = next_update - time.monotonic()
+        if sleep_time > 0:
+            pitch_updater_stop_event.wait(sleep_time)
+        else:
+            next_update = time.monotonic()
 
 # Calculate the distances array by dividing the FOV (horizontal) into $distances_array_length rays,
 # then pick out the depth value at the pixel corresponding to each ray. Based on the definition of
@@ -364,6 +368,19 @@ def visualize_pointcloud(pcd_legacy, window_name="Reconstruction"):
     except Exception as e:
         mavc.printd(f"Open3D visualization failed: {e}")
 
+# Signal handlers for graceful shutdown (Ctrl-C or systemd stop)
+def sigint_handler(sig, frame):
+    """Handle SIGINT (Ctrl-C) - user interrupt"""
+    global shouldStop
+    mavc.printd("\n[SIGNAL] Received SIGINT (Ctrl-C), shutting down gracefully...")
+    shouldStop = True
+
+def sigterm_handler(sig, frame):
+    """Handle SIGTERM (systemd/kill) - graceful termination request"""
+    global shouldStop
+    mavc.printd("\n[SIGNAL] Received SIGTERM, shutting down gracefully...")
+    shouldStop = True
+
 # MAIN MONONAV CONTROL LOOP
 def main():
     global DEPTH_HEIGHT, DEPTH_WIDTH
@@ -371,6 +388,13 @@ def main():
     global shouldStop
     global goal_position
     global mtx, dist, optimal_mtx, roi
+
+    # Register signal handlers for graceful shutdown
+    signal.signal(signal.SIGINT, sigint_handler)
+    signal.signal(signal.SIGTERM, sigterm_handler)
+    mavc.printd("[SIGNAL] Registered SIGINT and SIGTERM handlers for graceful shutdown")
+
+    goal_nav_active = False  # Track if goal navigation command has been sent
 
     cap = VideoCapture(STREAM_URL)
     for _ in range(0, config['num_pre_depth_frames']):
@@ -395,14 +419,15 @@ def main():
         mavc.set_speed(forward_speed)
 
     mavc.heading_offset_init()
-    # Keep goal_position in RDF frame (same as camera_position from get_drone_pose)
+        # Keep goal_position in RDF frame (same as camera_position from get_drone_pose)
     if goal_position is not None:
-        # goal_position = np.array(rdf_goal_to_ned(goal_position[0], goal_position[1], goal_position[2], mavc.heading_offset)).reshape(1, 3)
-        x, y =goal_position[0], goal_position[1]
+        goal_position = np.array(rdf_goal_to_ned(goal_position[0], goal_position[1], goal_position[2], mavc.heading_offset)).reshape(1, 3)
+    
     mavc.printd(f"Heading offset : {mavc.heading_offset*180/np.pi}")
     mavc.printd(f"Goal position (NED): {goal_position}")
 
     sender_thread = None
+    pitch_thread = None
     last_time = time.time()
     frame_number = 0
     
@@ -442,6 +467,15 @@ def main():
         )
         sender_thread.start()
 
+    # Start pitch updater thread (10 Hz)
+    pitch_updater_stop_event.clear()
+    pitch_thread = threading.Thread(
+        target=pitch_updater_loop,
+        args=(10,),
+        daemon=True,
+    )
+    pitch_thread.start()
+
     print("\n=== Keyboard Controls ===")
     if FLY_VEHICLE:
         if goal_position is not None:
@@ -456,9 +490,9 @@ def main():
     try:
       while not shouldStop:
         bgr = cap.read()
+        if debug_enable:
+            cv2.imshow("Camera Stream", bgr)
         camera_position = get_drone_pose()
-
-        update_vehicle_pitch()
 
         transform_bgr = transform_image(bgr, mtx, dist, optimal_mtx, roi)
         transform_rgb = cv2.cvtColor(transform_bgr, cv2.COLOR_BGR2RGB)
@@ -490,7 +524,8 @@ def main():
             x2, y2 = int(DEPTH_WIDTH), int(obstacle_line_height)
             line_thickness = obstacle_line_thickness_pixel
             cv2.line(depth_colormap, (x1, y1), (x2, y2), (0, 255, 0), thickness=line_thickness)
-            display_image = np.hstack((transform_bgr, depth_colormap))
+            # display_image = np.hstack((transform_bgr, depth_colormap))
+            display_image = depth_colormap
 
             processing_speed = 1 / (time.time() - last_time)
             text = ("%0.2f" % (processing_speed,)) + ' fps'
@@ -505,15 +540,19 @@ def main():
                 color=(255, 255, 255),
             )
             last_time = time.time()
-            cv2.imshow(display_name, display_image)
+            cv2.imshow("depth_map", display_image)
             
         update_key_from_cv(1)
 
         if last_key_pressed == 'g':
             if FLY_VEHICLE:
                 if goal_position is not None:
-                    print("Pressed g. Using BendyRuler navigation to goal.")
-                    mavc.set_mode('GUIDED')
+                    # Send position target only once when entering goal navigation mode
+                    if not goal_nav_active:
+                        print("Pressed g. Using BendyRuler navigation to goal.")
+                        mavc.set_mode('GUIDED')
+                        mavc.send_local_ned_pos(goal_position[0, 0], goal_position[0, 1])
+                        goal_nav_active = True
                     
                     # Check distance to goal (both in NED frame after heading correction)
                     dist_to_goal = np.linalg.norm(camera_position[0:-1, -1] - goal_position[0])
@@ -521,10 +560,8 @@ def main():
                         print("Reached goal!")
                         shouldStop = True
                         last_key_pressed = 'c'
-                    else:
-                        # Send forward velocity - BendyRuler handles obstacle avoidance
-                        # mavc.send_body_offset_ned_vel(forward_speed, 0, 0, 0)
-                        mavc.send_body_offset_ned_pos(x, y, speed=forward_speed)
+                        goal_nav_active = False
+                    
                     # Companion-side safety: emergency hover if obstacle < threshold
                     with distances_lock:
                         valid = distances[distances < (max_depth_cm + 1)]
@@ -544,51 +581,89 @@ def main():
             print("Pressed h. Hovering in place.")
             if FLY_VEHICLE:
                 mavc.send_body_offset_ned_vel(0, 0, 0, 0)
+            goal_nav_active = False  # Reset flag when switching modes
 
         elif last_key_pressed == 'c':  # end control and land
             print("Pressed c. Landing.")
             if FLY_VEHICLE:
                 mavc.set_mode('LAND')
             shouldStop = True
+            goal_nav_active = False
 
         elif last_key_pressed == 'q':  # end flight immediately
             print("Pressed q. EMERGENCY STOP.")
             if FLY_VEHICLE:
                 mavc.eSTOP()
             shouldStop = True
+            goal_nav_active = False
 
     except KeyboardInterrupt:
-        mavc.printd("Ctrl+C received, shutting down...")
+        mavc.printd("\n[INTERRUPT] Ctrl+C detected in main loop, shutting down...")
+        shouldStop = True
+    except Exception as e:
+        mavc.printd(f"\n[ERROR] Exception in main loop: {e}")
+        import traceback
+        traceback.print_exc()
+        shouldStop = True
     finally:
+        # Stop background threads
+        mavc.printd("[CLEANUP] Stopping background threads...")
         obstacle_sender_stop_event.set()
         if sender_thread is not None:
-            sender_thread.join(timeout=1.0)
+            sender_thread.join(timeout=2.0)
+        
+        pitch_updater_stop_event.set()
+        if pitch_thread is not None:
+            pitch_thread.join(timeout=2.0)
 
-        mavc.printd("Saving to {}...".format(npz_save_filename))
-        vbg.vbg.save(npz_save_filename)
-        mavc.printd("Saving finished")
-        mavc.printd("Visualize raw pointcloud.")
-        pcd = vbg.vbg.extract_point_cloud(weight_threshold)
-        pcd_cpu = pcd.cpu()
-        pcd_legacy = pcd_cpu.to_legacy()
-        num_points = len(pcd_legacy.points)
-        mavc.printd("Point cloud has {} points (weight_threshold={})".format(num_points, weight_threshold))
+        # Land vehicle if still flying
+        if FLY_VEHICLE and shouldStop:
+            try:
+                mavc.printd("[CLEANUP] Landing vehicle...")
+                mavc.set_mode('LAND')
+                time.sleep(1)  # Give time for landing command
+            except Exception as e:
+                mavc.printd(f"[CLEANUP] Error during landing: {e}")
 
-        if num_points == 0 and weight_threshold > 1:
-            mavc.printd("No points at current threshold. Retrying with weight_threshold=1 for visualization.")
-            pcd = vbg.vbg.extract_point_cloud(1)
+        # Save VoxelBlockGrid
+        mavc.printd("[CLEANUP] Saving VoxelBlockGrid to {}...".format(npz_save_filename))
+        try:
+            vbg.vbg.save(npz_save_filename)
+            mavc.printd("[CLEANUP] VoxelBlockGrid saved successfully")
+        except Exception as e:
+            mavc.printd(f"[CLEANUP] Error saving VoxelBlockGrid: {e}")
+        
+        # Visualize point cloud
+        mavc.printd("[CLEANUP] Extracting and visualizing point cloud...")
+        try:
+            pcd = vbg.vbg.extract_point_cloud(weight_threshold)
             pcd_cpu = pcd.cpu()
             pcd_legacy = pcd_cpu.to_legacy()
             num_points = len(pcd_legacy.points)
-            mavc.printd("Point cloud has {} points (weight_threshold=1)".format(num_points))
+            mavc.printd("Point cloud has {} points (weight_threshold={})".format(num_points, weight_threshold))
 
-        visualize_pointcloud(pcd_legacy, window_name="MonoNav Reconstruction")
+            if num_points == 0 and weight_threshold > 1:
+                mavc.printd("No points at current threshold. Retrying with weight_threshold=1 for visualization.")
+                pcd = vbg.vbg.extract_point_cloud(1)
+                pcd_cpu = pcd.cpu()
+                pcd_legacy = pcd_cpu.to_legacy()
+                num_points = len(pcd_legacy.points)
+                mavc.printd("Point cloud has {} points (weight_threshold=1)".format(num_points))
 
+            visualize_pointcloud(pcd_legacy, window_name="MonoNav Reconstruction")
+        except Exception as e:
+            mavc.printd(f"[CLEANUP] Error during point cloud visualization: {e}")
+
+        # Release camera and close windows
+        mavc.printd("[CLEANUP] Releasing camera and closing windows...")
         try:
             cap.cap.release()
-        except Exception:
-            pass
+        except Exception as e:
+            mavc.printd(f"[CLEANUP] Error releasing camera: {e}")
         cv2.destroyAllWindows()
+        
+        mavc.printd("[CLEANUP] Shutdown complete.")
+        mavc.printd("="*50)
 
 if __name__ == "__main__":
     main()

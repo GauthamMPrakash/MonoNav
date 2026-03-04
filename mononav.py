@@ -174,6 +174,7 @@ def main():
     global last_key_pressed
     global max_traj_idx
     global mtx
+    global dist
     global optimal_mtx
     global roi
     global goal_position
@@ -283,8 +284,7 @@ def main():
             while time.time() - start_time < period:
                 # WARNING: This controller is tuned for ArduCopter.
                 # You must check whether your robot follows the open-loop trajectory.
-                yawrate = -amplitudes[traj_index]*np.sin(np.pi/period*(time.time() - start_time)) # rad/s
-                mavc.printd(yawrate)
+                yawrate = amplitudes[traj_index]*np.sin(np.pi/period*(time.time() - start_time)) # rad/s
                 yvel = yawrate*config['yvel_gain']
                 yawrate = yawrate*config['yawrate_gain']
                 if FLY_VEHICLE:
@@ -294,6 +294,7 @@ def main():
                 bgr = cap.read()
                 update_key_from_cv(1)
                 camera_position = get_drone_pose() # get camera position immediately
+                # compute yaw from rotation matrix (RDF frame) and print
                 # Extract yaw from rotation matrix
                 if goal_position is not None:
                     dist_to_goal = np.linalg.norm(camera_position[0:-1, -1]-goal_position[0])
@@ -369,10 +370,10 @@ def main():
             # These values can be tuned for your data
             bounds = pcd_legacy.get_axis_aligned_bounding_box()
             center = bounds.get_center()
-            ctr.set_lookat(center)
-            ctr.set_up([0, 0, 1])  # Z up
-            ctr.set_front([0, -1, 0])  # Look along -Y (forward), Z up
-            ctr.set_zoom(0.7)
+            # ctr.set_lookat(center)
+            # ctr.set_up([0, 0, 1])  # Z up
+            # ctr.set_front([0, -1, 0])  # Look along -Y (forward), Z up
+            # ctr.set_zoom(0.7)
             vis.run()
             vis.destroy_window()
 

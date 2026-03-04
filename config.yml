@@ -7,14 +7,14 @@ camera_ip: 'http://192.168.53.56:81/stream'                    # camera stream U
 
 # Depth Model Settings
 num_pre_depth_frames: 3       # how many times to run the depth model before starting (the first few inferences are much slower)
-INPUT_SIZE: 310               # Multiple of 14. Scales the image by INPUT_SIZE/smaller image dimension
+INPUT_SIZE: 224               # Multiple of 14. Scales the image by INPUT_SIZE/smaller image dimension
 DA2_CHECKPOINT: "DepthAnythingV2-metric/checkpoints/depth_anything_v2_metric_hypersim_vits.pth" # path to checkpoint for DepthAnythingV2, make sure it matches the encoder you choose
 
 # Reconstruction settings
 filterYvals: True             # this helps filter out the ground / ceiling (for planar navigation)
 filterWeights: True           # this helps filter out low-weight voxels
 filterTSDF: True
-weight_threshold: 3.0         # determine the weight threshold for filtering (higher threshold -> fewer points)
+weight_threshold: 4.0         # determine the weight threshold for filtering (higher threshold -> fewer points)
 VoxelBlockGrid:
   depth_scale: 1000.0         # 1000.0 is default (mm to m), scale factor for depth values during integration
   depth_max: 10.0             # max depth to include in the reconstruction
@@ -51,7 +51,7 @@ EKF_LAT: 8.4723591
 EKF_LON: 76.9295203
 forward_speed: 0.5         # forward speed in m/s, set to None to use speed defined in generate_primitives.py
 # Control gain settings (YOU MAY NEED TO TUNE THIS YOURSELF)
-yvel_gain: 0.015           # yvel =  -yawrate*yvel_gain  <- for providing sideways velocity so fast drones take a pefect turn. Increase for faster turns.
-yawrate_gain: 1.25         # yawrate = yawrate*yawrate_gain
+yvel_gain: 0.0             # yvel =  -yawrate*yvel_gain  <- for providing sideways velocity so fast drones take a pefect turn. Increase for faster turns.
+yawrate_gain: 1.0          # yawrate = yawrate*yawrate_gain
 
 FLY_VEHICLE: False         # whether to actually fly the drone

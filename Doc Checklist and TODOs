@@ -1,0 +1,6 @@
+Copter: important parameter configs for the scripts
+Heartbeat emission modification
+Verify parametr correctness in AP_ObstacleAvoidance banner documentation
+
+TODOs:
+Fix all other scripts to work under the new project structure

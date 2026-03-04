@@ -125,7 +125,7 @@ def send_body_offset_ned_vel(vx, vy, vz=0, yaw_rate=0):
     Useful for high-rate control loops that call this every iteration.
     """
 
-    #printd(f"Sending BODY_NED vel x={vx}, y={vy}, z={vz}")
+    printd(f"Sending BODY_NED vel x={vx}, y={vy}, z={vz}")
     type_mask = 0b010111000111  # use velocity and yaw-rate only
     drone.mav.set_position_target_local_ned_send(
         0,
@@ -140,27 +140,27 @@ def send_body_offset_ned_vel(vx, vy, vz=0, yaw_rate=0):
         yaw_rate
     )
 
-def send_body_offset_ned_pos(x, y, z=0, speed=0, yaw=0, yaw_rate=0):
+def send_local_ned_pos(x, y):
     """
-    Send position in BODY_NED frame (forward/back, left/right, up/down).
-    The local origin is not the EKF origin, but rather with respect to the current position and heading of the drone.
+    Send position in LOCAL_NED frame (Relative to EKF-origin).
+    Currently AP_ObstacleAvoidance only requires 2D position control.
     """
-    type_mask = 0b000111000000
-    vx = speed if x > 0 else -speed if x < 0 else 0
-    vy = speed if y > 0 else -speed if y < 0 else 0 
+    type_mask = 0b110111111000
+    # vx = speed if x > 0 else -speed if x < 0 else 0
+    # vy = speed if y > 0 else -speed if y < 0 else 0 
     
-    printd(f"Sending BODY_NED pos x={x}, y={y}, z={z}")
+    printd(f"Sending BODY_NED pos x={x}, y={y}")
     drone.mav.set_position_target_local_ned_send(
         0,
         drone.target_system,
         drone.target_component,
-        mavutil.mavlink.MAV_FRAME_BODY_OFFSET_NED,
+        mavutil.mavlink.MAV_FRAME_LOCAL_NED,
         type_mask,
-        x,y,z,     # pos
-        vx,vy,0,   # velocity
+        x,y,0,     # pos
+        0,0,0,   # velocity
         0,0,0,     # acceleration ignored
-        yaw,
-        yaw_rate   
+        0,
+        0  
     )
 
 def set_speed(speed):
@@ -323,6 +323,8 @@ def reboot_if_EKF_origin(pos_tolerance=0.2):
         )
 
 """
+UNTESTED
+
 Set a parameter on the autopilot. Use with caution and ensure you know what the parameter does before changing.
 Waits for PARAM_VALUE response to verify successful parameter set with configurable timeout.
 Returns True if parameter was successfully set, False otherwise.

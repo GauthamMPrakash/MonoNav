@@ -5,7 +5,7 @@ import socket
 
 # Add DepthAnythingV2-metric to path
 repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
-depth_model_path = os.path.join(repo_root, 'DepthanythingV2-metric')
+depth_model_path = os.path.join(repo_root, 'DepthAnythingV2-metric')
 sys.path.insert(0, depth_model_path)
 
 from depth_anything_v2.dpt import DepthAnythingV2
