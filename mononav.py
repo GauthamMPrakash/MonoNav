@@ -177,7 +177,7 @@ listener = keyboard.Listener(on_press=on_press)
 listener.start()
 
 # Trajectory execution thread: sends motion commands at fixed rate
-def trajectory_execution_loop(command_hz=50):
+def trajectory_execution_loop(command_hz=10):
     """Background thread: execute trajectory with smooth velocity commands at fixed rate."""
     global current_traj_index, trajectory_start_time
     period_s = 1.0 / max(command_hz, 1)
@@ -278,7 +278,7 @@ def main():
         trajectory_execution_stop_event.clear()
         traj_thread = threading.Thread(
             target=trajectory_execution_loop,
-            args=(50,),  # 50 Hz command rate
+            args=(10,),  # 10 Hz command rate
             daemon=True,
         )
         traj_thread.start()
