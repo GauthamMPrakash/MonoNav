@@ -16,7 +16,6 @@ Functionality should be concentrated here and shared between the scripts.
 import cv2
 import numpy as np
 from matplotlib import colormaps
-from scipy.spatial.transform import Rotation as Rotation
 from scipy.spatial import distance
 import os
 import open3d as o3d
@@ -24,31 +23,18 @@ import open3d.core as o3c
 import math as m
 import copy
 import yaml, json
+import time
 
 from . import mavlink_control as mavc  # ArduCopter MAVLink wrappers (relative import)
 import queue, threading                # For bufferless video capture
 
-"""
-Compute depth from an RGB image using DepthAnythingV2
-Returns depth_numpy (uint16 in mm), depth_colormap (for visualization)
-"""
-cmap = colormaps.get_cmap('Spectral')
+# Background pose thread variables for non-blocking pose polling
+_pose_lock = threading.Lock()
+_pose_thread = None
+_pose_thread_stop = False
+_pose_thread_hz = 10.0  # default frequency
+_pose_latest = {'x': 0, 'y': 0, 'z': 0, 'yaw': 0, 'pitch': 0, 'roll': 0}
 
-def compute_depth(frame, depth_anything, size, make_colormap=True):
-    # Compute depth
-    depth = depth_anything.infer_image(frame, size)  # as torch tensor
-    depth_numpy = np.asarray(depth) # Convert to numpy array
-    depth_numpy = 1000*depth_numpy # Convert to mm
-    depth_numpy = depth_numpy.astype(np.uint16) # Convert to uint16
-
-    if make_colormap:
-        depth_colormap = ((depth_numpy - depth_numpy.min()) / (depth_numpy.max() - depth_numpy.min()) * 255.0).astype(np.uint8)
-        depth_colormap = (cmap(depth_colormap)[:, :, :3] * 255)[:, :, ::-1].astype(np.uint8)
-        #depth_colormap = cv2.applyColorMap(cv2.convertScaleAbs(depth_colormap, alpha=0.03), cv2.COLORMAP_JET)
-    else:
-        depth_colormap = None
-
-    return depth_numpy, depth_colormap
 
 """
 VoxelBlockGrid class (adapted from Open3D) for ease of initialization and integration.
@@ -95,7 +81,7 @@ class VoxelBlockGrid:
         frustum_block_coords = self.vbg.compute_unique_block_coordinates(
             depth, self.depth_intrinsic, extrinsic, self.depth_scale, self.depth_max, self.trunc_voxel_multiplier)
         color = o3d.t.geometry.Image(np.asarray(color)).to(self.device)
-        color_intrinsic = o3d.core.Tensor(self.intrinsic_matrix, o3d.core.Dtype.Float64)
+        color_intrinsic = o3d.core.Tensor(self.intrinsic_matrix, o3d.core.Dtype.Float64).to(self.device)
         self.vbg.integrate(frustum_block_coords, depth, color, self.depth_intrinsic,
                        color_intrinsic, extrinsic, self.depth_scale, self.depth_max, self.trunc_voxel_multiplier)
 
@@ -137,21 +123,42 @@ class VideoCapture:
         return self.last_frame
       raise RuntimeError("VideoCapture timeout: no frame available")
 
+
+"""
+Compute depth from an RGB image using DepthAnythingV2
+Returns depth_numpy (uint16 in mm), depth_colormap (for visualization)
+"""
+# cmap = colormaps.get_cmap('Spectral')
+def compute_depth(frame, depth_anything, size, make_colormap=True):
+
+    depth = depth_anything.infer_image(frame, size)  # as np ndarray, in meters (float32)
+    depth = (1000*depth).astype(np.uint16)             # Convert to mm and uint16 for Open3D integration (depth in mm is more standard for TSDF fusion)
+
+    if make_colormap:
+        depth_colormap = cv2.normalize(depth, None, 0, 255, cv2.NORM_MINMAX, cv2.CV_8U)
+        #depth_colormap = (cmap(depth_colormap)[:, :, :3] * 255)[:, :, ::-1].astype(np.uint8)
+        depth_colormap = cv2.applyColorMap(depth_colormap, cv2.COLORMAP_JET)
+    else:
+        depth_colormap = None
+
+    return depth, depth_colormap
+
+
+"""
+Convert a goal position from RDF (Right-Down-Front) frame to NED (North-East-Down) frame.
+
+The RDF frame is anchored to the drone's heading at startup (after heading_offset_init() is called).
+The NED frame is the absolute navigation frame from ArduPilot.
+
+Args:
+    goal_right: goal position in RDF right direction (meters)
+    goal_down: goal position in RDF down direction (meters)
+    goal_front: goal position in RDF front direction (meters)
+
+Returns:
+    A tuple (goal_north, goal_east, goal_down) in NED frame
+"""
 def rdf_goal_to_ned(goal_right, goal_down, goal_front, heading_offset):
-    """
-    Convert a goal position from RDF (Right-Down-Front) frame to NED (North-East-Down) frame.
-    
-    The RDF frame is anchored to the drone's heading at startup (after heading_offset_init() is called).
-    The NED frame is the absolute navigation frame from ArduPilot.
-    
-    Args:
-        goal_right: goal position in RDF right direction (meters)
-        goal_down: goal position in RDF down direction (meters)
-        goal_front: goal position in RDF front direction (meters)
-    
-    Returns:
-        A tuple (goal_north, goal_east, goal_down) in NED frame
-    """
     
     # Coordinate frame transformation (without rotation):
     # RDF (right, down, front) -> NED (north, east, down)
@@ -184,25 +191,41 @@ This function assumes the drone was pointing North at initialization. But since 
 
 This doesn't matter in exploration mode. But in goal-directed navigation, this allows us to specify the goal in RDF coordinates relative to the drone's initial heading, and have it correctly transformed to NED for ArduPilot.
 """
-def get_drone_pose():
-    _x, _y, _z, _yaw, _pitch, _roll = mavc.get_pose()
-    # Convert position from AP to TSDF frame.
-    # ArduPilot LOCAL_POSITION_NED is (x=NORTH, y=EAST, z=DOWN).
-    xyz = np.array([_y, _z, _x])
-    # Convert rotation from AP to TSDF frame
-    r = Rotation.from_euler('xyz', [_roll, _pitch, _yaw], degrees=False)
-    R = r.as_matrix()
-    # NED (North, East, Down) -> RDF (Right, Down, Front)
-    # Right=East, Down=Down, Front=North
-    M_change = np.array([[0, 1, 0],
-                         [0, 0, 1],
-                         [1, 0, 0]])
-    R = M_change @ R @ M_change.T
+def get_pose_matrix(pos_x, pos_y, pos_z, vehicle_yaw_rad, vehicle_pitch_rad, vehicle_roll_rad):
+    # Trig terms for roll/pitch/yaw (radians)
+    sr, cr = m.sin(vehicle_roll_rad), m.cos(vehicle_roll_rad)
+    sp, cp = m.sin(vehicle_pitch_rad), m.cos(vehicle_pitch_rad)
+    sy, cy = m.sin(vehicle_yaw_rad), m.cos(vehicle_yaw_rad)
 
-    # Create a homogeneous matrix
-    Hmtrx = np.hstack((R, xyz.reshape(3,1)))
-    # return camera position
-    return np.vstack((Hmtrx, np.array([0, 0, 0, 1])))
+    # Rotation in NED for extrinsic xyz(roll, pitch, yaw)
+    r00 = cy * cp
+    r01 = cy * sp * sr - sy * cr
+    r02 = cy * sp * cr + sy * sr
+    r10 = sy * cp
+    r11 = sy * sp * sr + cy * cr
+    r12 = sy * sp * cr - cy * sr
+    r20 = -sp
+    r21 = cp * sr
+    r22 = cp * cr
+
+    # Build homogeneous transform directly in RDF frame.
+    # NED->RDF corresponds to index permutation [1, 2, 0] for rows and cols.
+    pose = np.eye(4, dtype=np.float64)
+    pose[0, 0] = r11
+    pose[0, 1] = r12
+    pose[0, 2] = r10
+    pose[1, 0] = r21
+    pose[1, 1] = r22
+    pose[1, 2] = r20
+    pose[2, 0] = r01
+    pose[2, 1] = r02
+    pose[2, 2] = r00
+
+    # Position: AP NED (north, east, down) -> RDF (right, down, front)
+    pose[0, 3] = pos_y
+    pose[1, 3] = pos_z
+    pose[2, 3] = pos_x
+    return pose
     
 """
 Load the poses (after navigation, for analysis) from the posedir.
@@ -519,3 +542,68 @@ Helper function to extract the image frame number from the filename string.
 """
 def split_filename(filename):
     return int(filename.split("-")[-1].split(".")[0])
+
+def visualize_pointcloud(pcd_legacy, window_name="Reconstruction"):
+    """Visualize a legacy Open3D point cloud, matching mononav.py's Visualizer approach."""
+    try:
+        vis = o3d.visualization.Visualizer()
+        vis.create_window(window_name=window_name)
+        vis.add_geometry(pcd_legacy)
+        ctr = vis.get_view_control()
+        bounds = pcd_legacy.get_axis_aligned_bounding_box()
+        center = bounds.get_center()
+        ctr.set_lookat(center)
+        ctr.set_up([0, 0, 1])       # Z up
+        ctr.set_front([0, -1, 0])   # Look along -Y (forward)
+        ctr.set_zoom(0.7)
+        vis.run()
+        vis.destroy_window()
+    except Exception as e:
+        mavc.printd(f"Open3D visualization failed: {e}")
+
+def _pose_thread_worker():
+    """Background thread that polls get_pose at configured frequency and stores latest values (no buffering)."""
+    global _pose_thread_stop, _pose_latest, _pose_thread_hz
+    
+    sleep_time = 1.0 / _pose_thread_hz
+    while not _pose_thread_stop:
+        try:
+            x, y, z, yaw, pitch, roll = mavc.get_pose()
+            with _pose_lock:
+                _pose_latest = {'x': x, 'y': y, 'z': z, 'yaw': yaw, 'pitch': pitch, 'roll': roll}
+            time.sleep(sleep_time)
+        except Exception as e:
+            mavc.printd(f"Error in pose thread: {e}")
+            time.sleep(sleep_time)
+
+def start_pose_thread(frequency_hz=10.0):
+    """Start the background pose thread at specified frequency.
+    
+    Args:
+        frequency_hz: Update frequency in Hz (default: 10.0)
+    """
+    global _pose_thread, _pose_thread_stop, _pose_thread_hz
+    
+    if _pose_thread and _pose_thread.is_alive():
+        mavc.printd("Pose thread already running")
+        return
+    
+    _pose_thread_hz = frequency_hz
+    _pose_thread_stop = False
+    _pose_thread = threading.Thread(target=_pose_thread_worker, daemon=True)
+    _pose_thread.start()
+    mavc.printd(f"Pose thread started ({frequency_hz}Hz, non-blocking)")
+
+def get_latest_pose():
+    """Get the latest pose without blocking. Returns (x, y, z, yaw, pitch, roll)."""
+    with _pose_lock:
+        return (_pose_latest['x'], _pose_latest['y'], _pose_latest['z'],
+                _pose_latest['yaw'], _pose_latest['pitch'], _pose_latest['roll'])
+
+def stop_pose_thread():
+    """Stop the background pose thread."""
+    global _pose_thread_stop, _pose_thread
+    _pose_thread_stop = True
+    if _pose_thread and _pose_thread.is_alive():
+        _pose_thread.join(timeout=1.0)
+    mavc.printd("Pose thread stopped")

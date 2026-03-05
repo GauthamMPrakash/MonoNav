@@ -57,7 +57,11 @@ height = config['height']
 FLY_VEHICLE = config['FLY_VEHICLE']
 EKF_LAT = config['EKF_LAT']
 EKF_LON = config['EKF_LON']
-STREAM_URL = config['camera_ip']       # YOUR ESP32 HTTP MJPEG stream
+STREAM_URL = config['camera_ip']       # ESP32 HTTP MJPEG stream
+save_during_flight = config['save_during_flight']
+
+yawrate_gain = config['yawrate_gain']       # gain for yaw rate control (tuning parameter for your robot)
+yvel_gain = config['yvel_gain']             # gain for lateral velocity to prevent sideslip during high velocity turns (probably not required for ArduPilot)
 
 # DepthAnythingV2 model configurations. You typically only need small or base models
 model_configs = {
@@ -191,7 +195,7 @@ def main():
 
     vbg_intrinsics = get_cropped_intrinsics(optimal_mtx, roi)
     vbg.intrinsic_matrix = vbg_intrinsics
-    vbg.depth_intrinsic = o3d.core.Tensor(vbg_intrinsics, o3d.core.Dtype.Float64)
+    vbg.depth_intrinsic = o3d.core.Tensor(vbg_intrinsics, o3d.core.Dtype.Float64).to(vbg.device)
 
     # Scale mtx, dist to match current camera resolution
     # Read one frame to get actual resolution
@@ -211,6 +215,7 @@ def main():
     # Connect to the drone
         mavc.connect_drone(IP, baud=baud)
         mavc.en_pose_stream()                    # Commands AP to stream poses at a deafult value of 15 Hz
+        start_pose_thread()                    # Start background pose polling at 10 Hz (non-blocking)
         mavc.reboot_if_EKF_origin(0.5)           # Call this function after enabling pose_stream
         mavc.set_ekf_origin(EKF_LAT, EKF_LON, 0) # Ignored if already close to the previous origin, if set
 
@@ -274,28 +279,29 @@ def main():
                 continue
         
         # Save trajectory information
-            traj_idx_to_log = max_traj_idx if max_traj_idx is not None else -1
-            row = np.array([frame_number, int(traj_idx_to_log), time.time()-start_flight_time]) # time since start of flight
-            with open(save_dir + '/trajectories.csv', 'a') as file:
-                np.savetxt(file, row.reshape(1, -1), delimiter=',', fmt='%s')
+            if save_during_flight:
+                traj_idx_to_log = max_traj_idx if max_traj_idx is not None else -1
+                row = np.array([frame_number, int(traj_idx_to_log), time.time()-start_flight_time]) # time since start of flight
+                with open(save_dir + '/trajectories.csv', 'a') as file:
+                    np.savetxt(file, row.reshape(1, -1), delimiter=',', fmt='%s')
 
         # Fly the selected trajectory, as applicable.
             start_time = time.time()            
             while time.time() - start_time < period:
-                # WARNING: This controller is tuned for ArduCopter.
-                # You must check whether your robot follows the open-loop trajectory.
+                update_key_from_cv(1)
+                # WARNING: This controller is tuned for the particular copter it was tested on.
                 yawrate = amplitudes[traj_index]*np.sin(np.pi/period*(time.time() - start_time)) # rad/s
-                yvel = yawrate*config['yvel_gain']
-                yawrate = yawrate*config['yawrate_gain']
+                yvel = yawrate*yvel_gain
+                yawrate = yawrate*yawrate_gain
                 if FLY_VEHICLE:
                     mavc.send_body_offset_ned_vel(forward_speed, yvel, yaw_rate=yawrate)
 
             # get camera capture and transform intrinsics
                 bgr = cap.read()
-                update_key_from_cv(1)
-                camera_position = get_drone_pose() # get camera position immediately
-                # compute yaw from rotation matrix (RDF frame) and print
-                # Extract yaw from rotation matrix
+            # get_latest_pose returns (x, y, z, yaw, pitch, roll) - non-blocking from thread
+                pose = get_latest_pose()
+                camera_position = get_pose_matrix(*pose)
+
                 if goal_position is not None:
                     dist_to_goal = np.linalg.norm(camera_position[0:-1, -1]-goal_position[0])
                     if dist_to_goal <= min_dist2goal:
@@ -303,24 +309,27 @@ def main():
                         shouldStop = True
                         last_key_pressed = 'c'
                         break
-                # Transform Camera Image to Kinect Image
+
+                # Transform Camera Image to undistort and crop according to calibration
                 transform_bgr = transform_image(np.asarray(bgr), mtx, dist, optimal_mtx, roi)
                 transform_rgb = cv2.cvtColor(transform_bgr, cv2.COLOR_BGR2RGB)
                 #transform_rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
 
                 # compute depth
                 depth_numpy, depth_colormap = compute_depth(transform_bgr, depth_anything, INPUT_SIZE)
-                cv2.imshow("frame", depth_colormap)
 
             # SAVE DATA TO FILE
-                cv2.imwrite(img_dir + '/frame-%06d.rgb.jpg'%(frame_number), bgr)
-                cv2.imwrite(transform_img_dir + '/transform_frame-%06d.rgb.jpg'%(frame_number), transform_bgr)
-                cv2.imwrite(transform_depth_dir + '/' + 'transform_frame-%06d.depth.jpg'%(frame_number), depth_colormap)
-                np.save(transform_depth_dir + '/' + 'transform_frame-%06d.depth.npy'%(frame_number), depth_numpy) # saved in meters
-                np.savetxt(pose_dir + '/frame-%06d.pose.txt'%(frame_number), camera_position)
+                if save_during_flight:
+                    cv2.imwrite(img_dir + '/frame-%06d.rgb.jpg'%(frame_number), bgr)
+                    cv2.imwrite(transform_img_dir + '/transform_frame-%06d.rgb.jpg'%(frame_number), transform_bgr)
+                    cv2.imwrite(transform_depth_dir + '/' + 'transform_frame-%06d.depth.jpg'%(frame_number), depth_colormap)
+                    np.save(transform_depth_dir + '/' + 'transform_frame-%06d.depth.npy'%(frame_number), depth_numpy) # saved in meters
+                    np.savetxt(pose_dir + '/frame-%06d.pose.txt'%(frame_number), camera_position)
 
             # integrate the vbg (prefers rgb)
                 vbg.integration_step(transform_rgb, depth_numpy, camera_position)
+
+                cv2.imshow("frame", depth_colormap)
 
                 frame_number += 1
             traj_counter += 1
@@ -359,24 +368,13 @@ def main():
         # Convert tensor point cloud to legacy for reliable visualization
         pcd_legacy = pcd_cpu.to_legacy()
         print(f"Point cloud has {len(pcd_legacy.points)} points")
-        if len(pcd_legacy.points) > 0:
-        #    o3d.visualization.draw_geometries([pcd_legacy], window_name="MonoNav Reconstruction")
-            vis = o3d.visualization.Visualizer()
-            vis.create_window(window_name="MonoNav Reconstruction")
-            vis.add_geometry(pcd_legacy)
-            # Set a custom camera view (side or isometric)
-            ctr = vis.get_view_control()
-            # Set camera parameters: lookat, up, front, zoom
-            # These values can be tuned for your data
-            bounds = pcd_legacy.get_axis_aligned_bounding_box()
-            center = bounds.get_center()
-            # ctr.set_lookat(center)
-            # ctr.set_up([0, 0, 1])  # Z up
-            # ctr.set_front([0, -1, 0])  # Look along -Y (forward), Z up
-            # ctr.set_zoom(0.7)
-            vis.run()
-            vis.destroy_window()
+        visualize_pointcloud(pcd_legacy, window_name="MonoNav Reconstruction")
 
+    except KeyboardInterrupt:
+        mavc.eSTOP()
+        print("\n[INTERRUPT] Ctrl+C detected. Sent eSTOP.")
+        shouldStop = True
+            
     finally:
         print("Releasing camera capture.")
         cap.cap.release()

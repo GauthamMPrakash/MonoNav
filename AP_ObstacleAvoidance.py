@@ -35,7 +35,6 @@ import os
 import open3d as o3d
 import sys
 import threading
-import signal
 
 # Add DepthAnythingV2-metric to path
 repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '.'))
@@ -95,6 +94,12 @@ if torch.cuda.is_available():
     print(f"[device] cuda_name={torch.cuda.get_device_name(torch.cuda.current_device())}")
 if model_device.type != 'cuda' and torch.cuda.is_available():
     print("[warning] CUDA is available but model is not on CUDA.")
+
+enable_vbg = config['enable_vbg']
+save_during_flight = config['save_during_flight']
+
+print(f" VBG (TSDF fusion): {'ENABLED' if enable_vbg else 'DISABLED'}")
+print(f"[PERFORMANCE] File saving during flight: {'ENABLED' if save_during_flight else 'DISABLED'}")
 
 # GLOBAL VARIABLES
 last_key_pressed = None  # store the last key pressed
@@ -268,17 +273,17 @@ def set_obstacle_distance_params_from_intrinsics(camera_matrix, width, height):
     angle_offset = camera_facing_angle_degree - (depth_hfov_deg / 2)
     increment_f = depth_hfov_deg / distances_array_length
 
-def update_vehicle_pitch():
-    global vehicle_pitch_rad
-    _, _, _, _, vehicle_pitch_rad, _ = mavc.get_pose()
+def update_vehicle_attitude():
+    global pos_x, pos_y, pos_z, vehicle_yaw_rad, vehicle_pitch_rad, vehicle_roll_rad
+    pos_x, pos_y, pos_z, vehicle_yaw_rad, vehicle_pitch_rad, vehicle_roll_rad = get_latest_pose()
 
 def pitch_updater_loop(update_hz=10):
     """Background thread: update vehicle_pitch_rad at fixed rate (10 Hz default)."""
-    period_s = 1.0 / max(update_hz, 0.1)
+    period_s = 1.0 / max(update_hz, 2)
     next_update = time.monotonic()
     
     while not pitch_updater_stop_event.is_set():
-        update_vehicle_pitch()
+        update_vehicle_attitude()
         
         next_update += period_s
         sleep_time = next_update - time.monotonic()
@@ -350,36 +355,28 @@ def distances_from_depth_image(obstacle_line_height, depth_mat, distances, min_d
         if dist_m > min_depth_m and dist_m < max_depth_m:
             distances[i] = dist_m * 100
 
-def visualize_pointcloud(pcd_legacy, window_name="Reconstruction"):
-    """Visualize a legacy Open3D point cloud, matching mononav.py's Visualizer approach."""
+
+def cleanup_call(action_name, func, *args, **kwargs):
+    """Run a cleanup action and log failures without aborting overall shutdown."""
     try:
-        vis = o3d.visualization.Visualizer()
-        vis.create_window(window_name=window_name)
-        vis.add_geometry(pcd_legacy)
-        ctr = vis.get_view_control()
-        bounds = pcd_legacy.get_axis_aligned_bounding_box()
-        center = bounds.get_center()
-        ctr.set_lookat(center)
-        ctr.set_up([0, 0, 1])       # Z up
-        ctr.set_front([0, -1, 0])   # Look along -Y (forward)
-        ctr.set_zoom(0.7)
-        vis.run()
-        vis.destroy_window()
+        return func(*args, **kwargs)
     except Exception as e:
-        mavc.printd(f"Open3D visualization failed: {e}")
+        mavc.printd(f"[CLEANUP] Failed to {action_name}: {e}")
+        return None
 
-# Signal handlers for graceful shutdown (Ctrl-C or systemd stop)
-def sigint_handler(sig, frame):
-    """Handle SIGINT (Ctrl-C) - user interrupt"""
-    global shouldStop
-    mavc.printd("\n[SIGNAL] Received SIGINT (Ctrl-C), shutting down gracefully...")
-    shouldStop = True
 
-def sigterm_handler(sig, frame):
-    """Handle SIGTERM (systemd/kill) - graceful termination request"""
-    global shouldStop
-    mavc.printd("\n[SIGNAL] Received SIGTERM, shutting down gracefully...")
-    shouldStop = True
+def save_and_visualize_vbg(vbg, npz_save_filename, weight_threshold):
+    mavc.printd("[CLEANUP] Saving VoxelBlockGrid to {}...".format(npz_save_filename))
+    vbg.vbg.save(npz_save_filename)
+    mavc.printd("[CLEANUP] VoxelBlockGrid saved successfully")
+
+    mavc.printd("[CLEANUP] Extracting and visualizing point cloud...")
+    pcd = vbg.vbg.extract_point_cloud(weight_threshold)
+    pcd_cpu = pcd.cpu()
+    pcd_legacy = pcd_cpu.to_legacy()
+    num_points = len(pcd_legacy.points)
+    mavc.printd("Point cloud has {} points (weight_threshold={})".format(num_points, weight_threshold))
+    visualize_pointcloud(pcd_legacy)
 
 # MAIN MONONAV CONTROL LOOP
 def main():
@@ -388,11 +385,6 @@ def main():
     global shouldStop
     global goal_position
     global mtx, dist, optimal_mtx, roi
-
-    # Register signal handlers for graceful shutdown
-    signal.signal(signal.SIGINT, sigint_handler)
-    signal.signal(signal.SIGTERM, sigterm_handler)
-    mavc.printd("[SIGNAL] Registered SIGINT and SIGTERM handlers for graceful shutdown")
 
     goal_nav_active = False  # Track if goal navigation command has been sent
 
@@ -406,6 +398,7 @@ def main():
     vehicle = mavc.connect_drone(IP, baud=baud)
     mavc.set_ekf_origin(EKF_LAT, EKF_LON, 0)
     mavc.en_pose_stream()
+    start_pose_thread()  # Start background pose polling at 10 Hz (non-blocking)
     mavc.reboot_if_EKF_origin(0.3) 
     mavc.timesync()
 
@@ -484,7 +477,8 @@ def main():
             print("  'g' - Move forward at forward_speed m/s (no goal set)")
         print("  'h' - Hover (stop all movement)")
         print("  'c' - Land")
-    print("  'q' - Quit program")
+        print("  'q' - EMERGENCY STOP (disarm immediately)")
+    print("  'Ctrl-C' - Quit program")
     print("========================\n")
 
     try:
@@ -492,7 +486,9 @@ def main():
         bgr = cap.read()
         if debug_enable:
             cv2.imshow("Camera Stream", bgr)
-        camera_position = get_drone_pose()
+        # Get latest pose directly (no buffering) - read fresh values each iteration
+        pos_x, pos_y, pos_z, vehicle_yaw_rad, vehicle_pitch_rad_now, vehicle_roll_rad = get_latest_pose()
+        camera_position = get_pose_matrix(pos_x, pos_y, pos_z, vehicle_yaw_rad, vehicle_pitch_rad_now, vehicle_roll_rad)
 
         transform_bgr = transform_image(bgr, mtx, dist, optimal_mtx, roi)
         transform_rgb = cv2.cvtColor(transform_bgr, cv2.COLOR_BGR2RGB)
@@ -510,12 +506,17 @@ def main():
                 obstacle_line_thickness_pixel,
             )
 
-        vbg.integration_step(transform_rgb, depth_mat, camera_position)
-        cv2.imwrite(img_dir + '/frame-%06d.rgb.jpg' % (frame_number,), bgr)
-        cv2.imwrite(transform_img_dir + '/transform_frame-%06d.rgb.jpg' % (frame_number,), transform_bgr)
-        cv2.imwrite(transform_depth_dir + '/' + 'transform_frame-%06d.depth.jpg' % (frame_number,), depth_colormap)
-        np.save(transform_depth_dir + '/' + 'transform_frame-%06d.depth.npy' % (frame_number,), depth_mat)
-        np.savetxt(pose_dir + '/frame-%06d.pose.txt' % (frame_number,), camera_position)
+        # TSDF fusion (optional)
+        if enable_vbg:
+            vbg.integration_step(transform_rgb, depth_mat, camera_position)
+        
+        # File writing (optional, for later reruns and data collection - disabled by default for better performance)
+        if save_during_flight:
+            cv2.imwrite(img_dir + '/frame-%06d.rgb.jpg' % (frame_number,), bgr)
+            cv2.imwrite(transform_img_dir + '/transform_frame-%06d.rgb.jpg' % (frame_number,), transform_bgr)
+            cv2.imwrite(transform_depth_dir + '/' + 'transform_frame-%06d.depth.jpg' % (frame_number,), depth_colormap)
+            np.save(transform_depth_dir + '/' + 'transform_frame-%06d.depth.npy' % (frame_number,), depth_mat)
+            np.savetxt(pose_dir + '/frame-%06d.pose.txt' % (frame_number,), camera_position)
         frame_number += 1
 
         if debug_enable:
@@ -544,8 +545,8 @@ def main():
             
         update_key_from_cv(1)
 
-        if last_key_pressed == 'g':
-            if FLY_VEHICLE:
+        if FLY_VEHICLE:
+            if last_key_pressed == 'g':
                 if goal_position is not None:
                     # Send position target only once when entering goal navigation mode
                     if not goal_nav_active:
@@ -577,25 +578,22 @@ def main():
                     print("Pressed g. Moving forward.")
                     mavc.send_body_offset_ned_vel(forward_speed, 0, 0, 0)
 
-        elif last_key_pressed == 'h':
-            print("Pressed h. Hovering in place.")
-            if FLY_VEHICLE:
+            elif last_key_pressed == 'h':
+                print("Pressed h. Hovering in place.")
                 mavc.send_body_offset_ned_vel(0, 0, 0, 0)
-            goal_nav_active = False  # Reset flag when switching modes
+                goal_nav_active = False  # Reset flag when switching modes
 
-        elif last_key_pressed == 'c':  # end control and land
-            print("Pressed c. Landing.")
-            if FLY_VEHICLE:
+            elif last_key_pressed == 'c':  # end control and land
+                print("Pressed c. Landing.")
                 mavc.set_mode('LAND')
-            shouldStop = True
-            goal_nav_active = False
+                shouldStop = True
+                goal_nav_active = False
 
-        elif last_key_pressed == 'q':  # end flight immediately
-            print("Pressed q. EMERGENCY STOP.")
-            if FLY_VEHICLE:
+            elif last_key_pressed == 'q':  # end flight immediately
+                print("Pressed q. EMERGENCY STOP.")
                 mavc.eSTOP()
-            shouldStop = True
-            goal_nav_active = False
+                shouldStop = True
+                goal_nav_active = False
 
     except KeyboardInterrupt:
         mavc.printd("\n[INTERRUPT] Ctrl+C detected in main loop, shutting down...")
@@ -618,48 +616,19 @@ def main():
 
         # Land vehicle if still flying
         if FLY_VEHICLE and shouldStop:
-            try:
-                mavc.printd("[CLEANUP] Landing vehicle...")
-                mavc.set_mode('LAND')
-                time.sleep(1)  # Give time for landing command
-            except Exception as e:
-                mavc.printd(f"[CLEANUP] Error during landing: {e}")
+            mavc.printd("[CLEANUP] Landing vehicle...")
+            cleanup_call("set LAND mode", mavc.set_mode, 'LAND')
+            time.sleep(1)  # Give time for landing command
 
-        # Save VoxelBlockGrid
-        mavc.printd("[CLEANUP] Saving VoxelBlockGrid to {}...".format(npz_save_filename))
-        try:
-            vbg.vbg.save(npz_save_filename)
-            mavc.printd("[CLEANUP] VoxelBlockGrid saved successfully")
-        except Exception as e:
-            mavc.printd(f"[CLEANUP] Error saving VoxelBlockGrid: {e}")
-        
-        # Visualize point cloud
-        mavc.printd("[CLEANUP] Extracting and visualizing point cloud...")
-        try:
-            pcd = vbg.vbg.extract_point_cloud(weight_threshold)
-            pcd_cpu = pcd.cpu()
-            pcd_legacy = pcd_cpu.to_legacy()
-            num_points = len(pcd_legacy.points)
-            mavc.printd("Point cloud has {} points (weight_threshold={})".format(num_points, weight_threshold))
-
-            if num_points == 0 and weight_threshold > 1:
-                mavc.printd("No points at current threshold. Retrying with weight_threshold=1 for visualization.")
-                pcd = vbg.vbg.extract_point_cloud(1)
-                pcd_cpu = pcd.cpu()
-                pcd_legacy = pcd_cpu.to_legacy()
-                num_points = len(pcd_legacy.points)
-                mavc.printd("Point cloud has {} points (weight_threshold=1)".format(num_points))
-
-            visualize_pointcloud(pcd_legacy, window_name="MonoNav Reconstruction")
-        except Exception as e:
-            mavc.printd(f"[CLEANUP] Error during point cloud visualization: {e}")
+        # Save VoxelBlockGrid (only if enabled)
+        if enable_vbg:
+            cleanup_call("save/visualize VoxelBlockGrid", save_and_visualize_vbg, vbg, npz_save_filename, weight_threshold)
+        else:
+            mavc.printd("[CLEANUP] VBG was disabled, skipping save and visualization")
 
         # Release camera and close windows
         mavc.printd("[CLEANUP] Releasing camera and closing windows...")
-        try:
-            cap.cap.release()
-        except Exception as e:
-            mavc.printd(f"[CLEANUP] Error releasing camera: {e}")
+        cleanup_call("release camera", cap.cap.release)
         cv2.destroyAllWindows()
         
         mavc.printd("[CLEANUP] Shutdown complete.")

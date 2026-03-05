@@ -33,7 +33,7 @@ def send_heartbeat():
 def connect_drone(IP, baud=115200):
     """ 
     To connect to the drone, use the telemetry module's IP with the mavlink conenction string and port.
-    ex: "udpout:192.168.199.51:14550" -> Similar functionality as UDPCl in Mission Planner, but only if a heartbeat is sent from the GCS first.
+    ex: "udpout:192.168.199.51:14550" -> Similar functionality as UDPCl in Mission Planner if you first send out a heartbeat.
     """
     global drone
     drone = mavutil.mavlink_connection(IP, baud, autoreconnect=True)
@@ -90,7 +90,7 @@ def arm(arm_state=1):
     )
 
     # Wait until armed
-    while True:
+    while arm_state:
         msg = drone.recv_match(type='HEARTBEAT', blocking=True)
         if msg.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED:
             print("Vehicle armed")
@@ -223,19 +223,12 @@ def get_pose(blocking=False):
     # Keep polling until we get fresh messages (or timeout)
     got_position = False
     got_attitude = False
-    deadline = time.monotonic() + 0.2 if not blocking else float('inf')
     
     while True:
-        remaining = deadline - time.monotonic() if not blocking else 0.2
-        if remaining <= 0:
-            break
-            
-        msg = drone.recv_match(type=["LOCAL_POSITION_NED", "ATTITUDE"], blocking=False, timeout=remaining)
+        msg = drone.recv_match(type=["LOCAL_POSITION_NED", "ATTITUDE"], blocking=False, timeout=0.1)
         
         if not msg or msg.get_type() == "BAD_DATA":
             if got_position and got_attitude:
-                break
-            if not blocking:
                 break
             continue
 
@@ -376,10 +369,10 @@ def test():
         set_ekf_origin(EKF_LAT, EKF_LON, 0)
         set_mode('GUIDED')
         print("Checking telemetry:")
-        for i in range(20):
+        for i in range(40):
             pose = get_pose()
-            print(pose)
-            time.sleep(0.2)
+            print(pose, flush=True)
+            time.sleep(0.1)
         print("AP time, offset:", timesync())
         #arm()
         takeoff(1)
@@ -396,15 +389,6 @@ def test():
         yaw_rate = 1
         length = 0.7
         vel = 0.5
-        def square_pos():
-            send_body_offset_ned_pos(length,0)
-            time.sleep(5)
-            send_body_offset_ned_pos(0,length)
-            time.sleep(5)
-            send_body_offset_ned_pos(-length,0)
-            time.sleep(5)
-            send_body_offset_ned_pos(0,-length)
-            time.sleep(5)
         def square_vel():
             send_body_offset_ned_vel(vel, 0, yaw_rate=yaw_rate)
             time.sleep(2)
@@ -414,7 +398,7 @@ def test():
             time.sleep(2)
             send_body_offset_ned_vel(0, -vel, yaw_rate=yaw_rate)
             time.sleep(2)
-        square_pos()
+        square_vel()
         print("Landing...")
         set_mode('LAND')
         
