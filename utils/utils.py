@@ -127,6 +127,11 @@ class VideoCapture:
 """
 Compute depth from an RGB image using DepthAnythingV2
 Returns depth_numpy (uint16 in mm), depth_colormap (for visualization)
+
+PERFORMANCE NOTE: This function runs inference on GPU. For best performance:
+- Ensure CUDA is enabled and tensors are on GPU device
+- Batch multiple depth estimations if processing multiple frames
+- Consider reducing INPUT_SIZE for real-time applications (trades accuracy for speed)
 """
 # cmap = colormaps.get_cmap('Spectral')
 def compute_depth(frame, depth_anything, size, make_colormap=True):
@@ -331,28 +336,25 @@ def choose_primitive(vbg, camera_position, traj_linesets, goal_position, dist_th
     weights = weights[voxel_indices]
     tsdf = tsdf[voxel_indices]
 
-    # Generate mask to filter out y values (vertical) (+y is DOWN)
-    # This is useful to filter out the floor, and avoid obstacles in-plane
+    # Combined filtering in a single pass (more efficient than sequential masking)
+    mask = np.ones(len(voxel_coords), dtype=bool)
+    
+    # Filter out y values (vertical) if enabled
     if filterYvals:
-        mask = voxel_coords[:, 1] < -0.3
-        # Apply mask to voxel_coords and weights
-        voxel_coords = voxel_coords[mask]
-        weights = weights[mask]
-        tsdf = tsdf[mask]
-
-    # Generate mask to filter by weights
-    # This rejects voxels below a certain weight threshold
+        mask &= (voxel_coords[:, 1] < -0.3).cpu().numpy() if hasattr(voxel_coords[:, 1], 'cpu') else (voxel_coords[:, 1] < -0.3)
+    
+    # Filter by weights if enabled
     if filterWeights:
-        mask = weights > weight_threshold
-        # Apply mask to voxel_coords and weights
-        voxel_coords = voxel_coords[mask,:]
-        tsdf = tsdf[mask]
-
-    # Generate mask to filter by tsdf value
+        weights_np = weights.cpu().numpy() if hasattr(weights, 'cpu') else weights
+        mask &= (weights_np > weight_threshold)
+    
+    # Filter by tsdf value if enabled
     if filterTSDF:
-        # Generate mask to filter by tsdf values
-        mask = tsdf < 0.0
-        voxel_coords = voxel_coords[mask,:]
+        tsdf_np = tsdf.cpu().numpy() if hasattr(tsdf, 'cpu') else tsdf
+        mask &= (tsdf_np < 0.0)
+    
+    # Apply combined mask once
+    voxel_coords = voxel_coords[mask]
 
     # transfer to cpu for cdist
     voxel_coords_numpy = voxel_coords.cpu().numpy()
@@ -397,12 +399,15 @@ def choose_primitive(vbg, camera_position, traj_linesets, goal_position, dist_th
     safe_trajectories = []  # list of (traj_idx, nearest_voxel_dist, goal_dist)
     
     for traj_idx, traj_linset in enumerate(traj_linesets):
-        traj_lineset_copy = copy.deepcopy(traj_linset)
-        traj_lineset_copy.transform(camera_position) # transform the lineset (copy) to the camera position
-        pts = np.asarray(traj_lineset_copy.points) # meters # extract the points from the lineset
-        if pts.size == 0:
+        # Avoid deepcopy: create a lightweight transformed view using Open3D's in-place transform on a copy
+        pts = np.asarray(traj_linset.points)  # Get points without deep copying the entire lineset
+        # Transform points directly (faster than deepcopy + transform)
+        pts_homogeneous = np.hstack([pts, np.ones((pts.shape[0], 1))])
+        pts_transformed = (camera_position @ pts_homogeneous.T).T[:, :3]
+        
+        if pts_transformed.size == 0:
             continue
-        tmp = distance.cdist(voxel_coords_numpy, pts, "sqeuclidean") # compute the distance between all voxels and all points in the trajectory
+        tmp = distance.cdist(voxel_coords_numpy, pts_transformed, "sqeuclidean") # compute the distance between all voxels and all points in the trajectory
         if tmp.size == 0:
             continue
         voxel_idx, pt_idx = np.unravel_index(np.argmin(tmp), tmp.shape) # extract indices of the nearest voxel to and nearest point in the trajectory
@@ -411,7 +416,7 @@ def choose_primitive(vbg, camera_position, traj_linesets, goal_position, dist_th
         if nearest_voxel_dist > dist_threshold:
             # This trajectory is safe (clears obstacles)
             if goal_position is not None:
-                tmp_to_goal = distance.cdist(goal_position, pts, "sqeuclidean")
+                tmp_to_goal = distance.cdist(goal_position, pts_transformed, "sqeuclidean")
                 dst_to_goal = np.sqrt(np.min(tmp_to_goal))
             else:
                 dst_to_goal = None
