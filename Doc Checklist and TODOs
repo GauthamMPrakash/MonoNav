@@ -1,7 +1,10 @@
+DOCs:
 - Copter: important parameter configs for the scripts
 - Heartbeat emission modification
-- Verify parametr correctness in AP_ObstacleAvoidance banner documentation
+- Verify parameter correctness in AP_ObstacleAvoidance banner documentation
 
 TODOs:
 - Fix all other scripts to work under the new project structure
 - Try to implement a more performant way of saving data rather than as multiple files
+- Copter control may be affected by how many iterations can be done under the period of the primitive. This can be bad if compute_depth is too slow.
+  A quick workaround may be to increase yaw gain.

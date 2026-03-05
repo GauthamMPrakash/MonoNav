@@ -214,14 +214,14 @@ def main():
     # Read one frame to get actual resolution
     try:
         for i in range(0, config['num_pre_depth_frames']):
-            bgr = first_bgr if i == 0 else cap.read()
+            bgr = cap.read()
             # COMPUTE DEPTH
             start_time_test = time.time()
             # depth_numpy, depth_colormap = compute_depth_fast(bgr, INPUT_SIZE)
             depth_numpy, depth_colormap = compute_depth(bgr, depth_anything, INPUT_SIZE)
             print("TIME TO COMPUTE DEPTH:", time.time() - start_time_test)
             cv2.imshow("test", bgr)
-            cv2.waitKey(1)
+            update_key_from_cv()
         cv2.destroyAllWindows()
         
     # ARDUCOPTER CONTROL
@@ -301,7 +301,6 @@ def main():
         # Fly the selected trajectory, as applicable.
             start_time = time.time()            
             while time.time() - start_time < period:
-                update_key_from_cv(1)
                 # WARNING: This controller is tuned for the particular copter it was tested on.
                 yawrate = amplitudes[traj_index]*np.sin(np.pi/period*(time.time() - start_time)) # rad/s
                 yvel = yawrate*yvel_gain
@@ -321,6 +320,7 @@ def main():
                         last_key_pressed = 'c'
                         break
 
+                bgr = cap.read()
                 # Transform Camera Image to undistort and crop according to calibration
                 transform_bgr = transform_image(np.asarray(bgr), mtx, dist, optimal_mtx, roi)
                 transform_rgb = cv2.cvtColor(transform_bgr, cv2.COLOR_BGR2RGB)
@@ -328,6 +328,10 @@ def main():
 
                 # compute depth
                 depth_numpy, depth_colormap = compute_depth(transform_bgr, depth_anything, INPUT_SIZE)
+
+                if depth_colormap is not None:
+                    cv2.imshow("Depth", depth_colormap)
+                    update_key_from_cv(1)
 
             # SAVE DATA TO FILE (async to avoid blocking control loop)
                 if save_during_flight:

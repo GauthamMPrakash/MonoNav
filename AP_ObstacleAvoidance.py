@@ -8,7 +8,7 @@ periodically sends a GUIDED-mode body-offset position target toward the
 goal.  BendyRuler plans a collision-free path while the companion adds
 a safety layer (emergency hover when any obstacle < min_obstacle_dist_m).
 
-Required ArduCopter Parameters (set via Mission Planner / mavproxy):
+Required ArduCopter Parameters:
   OA_TYPE          = 1        # BendyRuler path planner
   OA_BR_LOOKAHEAD  = 5        # look-ahead distance (m) — tune for corridor
   OA_MARGIN_MAX    = 2        # max margin from obstacles (m)
@@ -17,7 +17,7 @@ Required ArduCopter Parameters (set via Mission Planner / mavproxy):
   PRX1_ORIENT      = 0        # forward
   PRX1_MIN         = 0.2      # m — match DEPTH_RANGE_M[0]
   PRX1_MAX         = 2        # m — match DEPTH_RANGE_M[1]
-  WPNAV_SPEED      = 50       # cm/s — conservative for indoor
+  WPNAV_SPEED      = 0.5      # m/s — conservative for indoor
 
 Requirements:
 - ArduCopter >= v4.5 with BendyRuler enabled

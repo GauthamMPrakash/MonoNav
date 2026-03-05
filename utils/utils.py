@@ -127,11 +127,6 @@ class VideoCapture:
 """
 Compute depth from an RGB image using DepthAnythingV2
 Returns depth_numpy (uint16 in mm), depth_colormap (for visualization)
-
-PERFORMANCE NOTE: This function runs inference on GPU. For best performance:
-- Ensure CUDA is enabled and tensors are on GPU device
-- Batch multiple depth estimations if processing multiple frames
-- Consider reducing INPUT_SIZE for real-time applications (trades accuracy for speed)
 """
 # cmap = colormaps.get_cmap('Spectral')
 def compute_depth(frame, depth_anything, size, make_colormap=True):
