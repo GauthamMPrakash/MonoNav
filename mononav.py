@@ -30,6 +30,7 @@ import time
 import os
 import open3d as o3d
 import sys
+import threading
 
 # Add DepthAnythingV2-metric path
 repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '.'))
@@ -87,6 +88,9 @@ if model_device.type != 'cuda' and torch.cuda.is_available():
 # GLOBAL VARIABLES
 last_key_pressed = None  # store the last key pressed
 shouldStop = False
+trajectory_execution_stop_event = threading.Event()
+current_traj_index = None  # holds the trajectory index to be executed by the thread
+trajectory_start_time = None  # when the current trajectory started
 
 # Intrinsics for undistortion
 camera_calibration_path = config['camera_calibration_path']
@@ -172,6 +176,34 @@ def update_key_from_cv(wait_ms=1):
 listener = keyboard.Listener(on_press=on_press)
 listener.start()
 
+# Trajectory execution thread: sends motion commands at fixed rate
+def trajectory_execution_loop(command_hz=50):
+    """Background thread: execute trajectory with smooth velocity commands at fixed rate."""
+    global current_traj_index, trajectory_start_time
+    period_s = 1.0 / max(command_hz, 1)
+    next_command = time.monotonic()
+    
+    while not trajectory_execution_stop_event.is_set():
+        if current_traj_index is not None and trajectory_start_time is not None:
+            elapsed = time.time() - trajectory_start_time
+            
+            # Check if we've exceeded the trajectory period
+            if elapsed < period:
+                # Compute smooth yaw rate for this instant
+                yawrate = amplitudes[current_traj_index] * np.sin(np.pi / period * elapsed)  # rad/s
+                yvel = yawrate * yvel_gain
+                yawrate_cmd = yawrate * yawrate_gain
+                
+                if FLY_VEHICLE:
+                    mavc.send_body_offset_ned_vel(forward_speed, yvel, yaw_rate=yawrate_cmd)
+        
+        next_command += period_s
+        sleep_time = next_command - time.monotonic()
+        if sleep_time > 0:
+            trajectory_execution_stop_event.wait(sleep_time)
+        else:
+            next_command = time.monotonic()
+
 # MAIN MONONAV CONTROL LOOP
 def main():
     global shouldStop
@@ -241,6 +273,15 @@ def main():
         traj_counter = 0         # how many trajectory iterations have we done?
         no_safe_traj = False
         last_time = time.time()  # for FPS counter
+        
+        # Start trajectory execution thread
+        trajectory_execution_stop_event.clear()
+        traj_thread = threading.Thread(
+            target=trajectory_execution_loop,
+            args=(50,),  # 50 Hz command rate
+            daemon=True,
+        )
+        traj_thread.start()
     #   start_time = time.time() # seconds
 
         while not shouldStop:
@@ -287,16 +328,13 @@ def main():
                 with open(save_dir + '/trajectories.csv', 'a') as file:
                     np.savetxt(file, row.reshape(1, -1), delimiter=',', fmt='%s')
 
-        # Fly the selected trajectory, as applicable.
-            start_time = time.time()            
-            while time.time() - start_time < period:
-                # WARNING: This controller is tuned for the particular copter it was tested on.
-                yawrate = amplitudes[traj_index]*np.sin(np.pi/period*(time.time() - start_time)) # rad/s
-                yvel = yawrate*yvel_gain
-                yawrate = yawrate*yawrate_gain
-                if FLY_VEHICLE:
-                    mavc.send_body_offset_ned_vel(forward_speed, yvel, yaw_rate=yawrate)
-
+        # Execute the selected trajectory in background thread.
+        # Main thread now focuses on frame processing and TSDF integration.
+            current_traj_index = traj_index
+            trajectory_start_time = time.time()
+            traj_start = trajectory_start_time
+            
+            while time.time() - traj_start < period:
                 bgr = cap.read()
             # get_latest_pose returns (x, y, z, yaw, pitch, roll) - non-blocking from thread
                 pose = get_latest_pose()
@@ -391,6 +429,11 @@ def main():
         shouldStop = True
             
     finally:
+        # Stop trajectory execution thread
+        trajectory_execution_stop_event.set()
+        if 'traj_thread' in locals():
+            traj_thread.join(timeout=2.0)
+        
         print("Releasing camera capture.")
         cap.cap.release()
         cv2.destroyAllWindows()
