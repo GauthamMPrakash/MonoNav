@@ -65,7 +65,7 @@ EKF_LAT = config['EKF_LAT']
 EKF_LON = config['EKF_LON']
 STREAM_URL = config['camera_ip']       # YOUR ESP32 HTTP MJPEG stream
 
-DEPTH_RANGE_M = [0.2, 15.0]                 # min and max ranges to be computed
+DEPTH_RANGE_M = [0.2, 10.0]                 # min and max ranges to be computed
 min_depth_cm = int(DEPTH_RANGE_M[0] * 100)  # In cm
 max_depth_cm = int(DEPTH_RANGE_M[1] * 100)  # In cm, should be a little conservative
 distances_array_length = 72

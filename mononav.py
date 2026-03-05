@@ -172,19 +172,6 @@ def update_key_from_cv(wait_ms=1):
 listener = keyboard.Listener(on_press=on_press)
 listener.start()
 
-# Helper function for async file saving
-def _async_save_frame_data(frame_data, img_dir, transform_img_dir, transform_depth_dir, pose_dir):
-    """Save frame data asynchronously without blocking control loop."""
-    try:
-        frame_num = frame_data['frame_number']
-        cv2.imwrite(img_dir + '/frame-%06d.rgb.jpg' % frame_num, frame_data['bgr'])
-        cv2.imwrite(transform_img_dir + '/transform_frame-%06d.rgb.jpg' % frame_num, frame_data['transform_bgr'])
-        cv2.imwrite(transform_depth_dir + '/transform_frame-%06d.depth.jpg' % frame_num, frame_data['depth_colormap'])
-        np.save(transform_depth_dir + '/transform_frame-%06d.depth.npy' % frame_num, frame_data['depth_numpy'])
-        np.savetxt(pose_dir + '/frame-%06d.pose.txt' % frame_num, frame_data['camera_position'])
-    except Exception as e:
-        print(f"[Warning] Async save failed for frame {frame_data['frame_number']}: {e}")
-
 # MAIN MONONAV CONTROL LOOP
 def main():
     global shouldStop
@@ -308,6 +295,7 @@ def main():
                 if FLY_VEHICLE:
                     mavc.send_body_offset_ned_vel(forward_speed, yvel, yaw_rate=yawrate)
 
+                bgr = cap.read()
             # get_latest_pose returns (x, y, z, yaw, pitch, roll) - non-blocking from thread
                 pose = get_latest_pose()
                 camera_position = get_pose_matrix(*pose)
@@ -320,7 +308,6 @@ def main():
                         last_key_pressed = 'c'
                         break
 
-                bgr = cap.read()
                 # Transform Camera Image to undistort and crop according to calibration
                 transform_bgr = transform_image(np.asarray(bgr), mtx, dist, optimal_mtx, roi)
                 transform_rgb = cv2.cvtColor(transform_bgr, cv2.COLOR_BGR2RGB)
@@ -333,28 +320,15 @@ def main():
                     cv2.imshow("Depth", depth_colormap)
                     update_key_from_cv(1)
 
-            # SAVE DATA TO FILE (async to avoid blocking control loop)
-                if save_during_flight:
-                    # Queue file saves to avoid blocking control loop during peak times
-                    frame_data = {
-                        'frame_number': frame_number,
-                        'bgr': bgr.copy() if hasattr(bgr, 'copy') else np.array(bgr),
-                        'transform_bgr': transform_bgr.copy(),
-                        'depth_colormap': depth_colormap.copy(),
-                        'depth_numpy': depth_numpy.copy(),
-                        'camera_position': camera_position.copy()
-                    }
-                    # Save asynchronously in background thread to avoid blocking
-                    import threading
-                    save_thread = threading.Thread(
-                        target=_async_save_frame_data,
-                        args=(frame_data, img_dir, transform_img_dir, transform_depth_dir, pose_dir),
-                        daemon=True
-                    )
-                    save_thread.start()
-
             # integrate the vbg (prefers rgb)
                 vbg.integration_step(transform_rgb, depth_numpy, camera_position)
+
+                if save_during_flight:
+                    cv2.imwrite(img_dir + '/frame-%06d.rgb.jpg'%(frame_number), bgr)
+                    cv2.imwrite(transform_img_dir + '/transform_frame-%06d.rgb.jpg'%(frame_number), transform_bgr)
+                    cv2.imwrite(transform_depth_dir + '/' + 'transform_frame-%06d.depth.jpg'%(frame_number), depth_colormap)
+                    np.save(transform_depth_dir + '/' + 'transform_frame-%06d.depth.npy'%(frame_number), depth_numpy) # saved in meters
+                    np.savetxt(pose_dir + '/frame-%06d.pose.txt'%(frame_number), camera_position)
 
                 frame_number += 1
             traj_counter += 1

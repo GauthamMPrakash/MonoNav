@@ -133,6 +133,8 @@ def compute_depth(frame, depth_anything, size, make_colormap=True):
 
     depth = depth_anything.infer_image(frame, size)  # as np ndarray, in meters (float32)
     depth = (1000*depth).astype(np.uint16)             # Convert to mm and uint16 for Open3D integration (depth in mm is more standard for TSDF fusion)
+    # the above line works as long as depth is ensured to be under 65.535 meters. 
+    # In case KITTI is used and you for some reason want to integrate VBG more than this limit (depth_max in config.yml), beware
 
     if make_colormap:
         depth_colormap = cv2.normalize(depth, None, 0, 255, cv2.NORM_MINMAX, cv2.CV_8U)
@@ -247,16 +249,12 @@ This object is used to visualize the trajectory in Open3D.
 Returns a list of of lineset objects representing the camera's pose.
 """
 def get_poses_lineset(poses):
-    points = []
-    lines = []
-    for pose in poses:
-        position = pose[0:3,3] # meters
-        points.append(position)
-        lines.append([len(points)-1, len(points)])
+    points = np.array([pose[0:3,3] for pose in poses])  # meters, preallocated
+    lines = np.column_stack([np.arange(len(points)-1), np.arange(1, len(points))])
 
     pose_lineset = o3d.geometry.LineSet(
         points=o3d.utility.Vector3dVector(points),
-        lines=o3d.utility.Vector2iVector(lines[:-1]),
+        lines=o3d.utility.Vector2iVector(lines),
     )
     pose_lineset.paint_uniform_color([1, 0, 0]) #optional: change the color here
     return pose_lineset
@@ -267,18 +265,10 @@ Read a list of motion primitives (trajectories) from a the "trajlib_dir" (trajec
 Returns a list of trajectory objects.
 """
 def get_trajlist(trajlib_dir):
-    # Get the list of files in the directory
-    file_list = os.listdir(trajlib_dir)
-    # Filter only .npz files
-    npz_files = [file for file in file_list if file.endswith('.npz')]
-    # Sort the list of .npz files - important for indexing!
-    sorted_files = sorted(npz_files)
-    # Iterate over the sorted list of .npz files
-    traj_list = []
-    for trajfile in sorted_files:
-        file_path = os.path.join(trajlib_dir, trajfile)
-        traj_list.append(np.load(file_path))
-    
+    # Get the list of sorted .npz files and load them (important for indexing!)
+    traj_list = [np.load(os.path.join(trajlib_dir, f)) 
+                 for f in sorted(os.listdir(trajlib_dir)) 
+                 if f.endswith('.npz')]
     return traj_list
 
 """
@@ -289,18 +279,20 @@ Returns a list of trajectory lineset objects.
 def get_traj_linesets(traj_list):
     traj_linesets = []
     amplitudes = []
+    period = None
+    forward_speed = None
+    
     for traj in traj_list:
         # traj_dict = {key: traj[key] for key in traj.files}
         z_tsdf = traj['x_sample']
         x_tsdf = traj['y_sample']
-        points = []
-        lines = []
-        for i in range(len(x_tsdf)):
-            points.append([x_tsdf[i], 0, z_tsdf[i]])
-            lines.append([len(points)-1, len(points)])
+        # Preallocate arrays more efficiently than appending
+        points = np.column_stack([x_tsdf, np.zeros_like(x_tsdf), z_tsdf])
+        lines = np.column_stack([np.arange(len(x_tsdf)-1), np.arange(1, len(x_tsdf))])
+        
         traj_lineset = o3d.geometry.LineSet(
             points=o3d.utility.Vector3dVector(points),
-            lines=o3d.utility.Vector2iVector(lines[:-1]),
+            lines=o3d.utility.Vector2iVector(lines),
         )
         traj_linesets.append(traj_lineset)
         amplitudes.append(traj['amplitude'])
@@ -331,28 +323,28 @@ def choose_primitive(vbg, camera_position, traj_linesets, goal_position, dist_th
     weights = weights[voxel_indices]
     tsdf = tsdf[voxel_indices]
 
+    # Convert tensors to numpy once at the start for efficiency
+    voxel_coords_np = voxel_coords.cpu().numpy() if hasattr(voxel_coords, 'cpu') else np.asarray(voxel_coords)
+    weights_np = weights.cpu().numpy() if hasattr(weights, 'cpu') else np.asarray(weights)
+    tsdf_np = tsdf.cpu().numpy() if hasattr(tsdf, 'cpu') else np.asarray(tsdf)
+    
     # Combined filtering in a single pass (more efficient than sequential masking)
-    mask = np.ones(len(voxel_coords), dtype=bool)
+    mask = np.ones(len(voxel_coords_np), dtype=bool)
     
     # Filter out y values (vertical) if enabled
     if filterYvals:
-        mask &= (voxel_coords[:, 1] < -0.3).cpu().numpy() if hasattr(voxel_coords[:, 1], 'cpu') else (voxel_coords[:, 1] < -0.3)
+        mask &= (voxel_coords_np[:, 1] < -0.3)
     
     # Filter by weights if enabled
     if filterWeights:
-        weights_np = weights.cpu().numpy() if hasattr(weights, 'cpu') else weights
         mask &= (weights_np > weight_threshold)
     
     # Filter by tsdf value if enabled
     if filterTSDF:
-        tsdf_np = tsdf.cpu().numpy() if hasattr(tsdf, 'cpu') else tsdf
         mask &= (tsdf_np < 0.0)
     
     # Apply combined mask once
-    voxel_coords = voxel_coords[mask]
-
-    # transfer to cpu for cdist
-    voxel_coords_numpy = voxel_coords.cpu().numpy()
+    voxel_coords_numpy = voxel_coords_np[mask]
 
     # NOW WE HAVE A FILTERED SET OF VOXELS THAT REPRESENT OBSTACLES
     # NEXT, WE DETERMINE THE BEST TRAJECTORY ACCORDING TO A COST FUNCTION
@@ -370,12 +362,13 @@ def choose_primitive(vbg, camera_position, traj_linesets, goal_position, dist_th
         if goal_position is not None:
             goal_scores = []
             for traj_idx, traj_linset in enumerate(traj_linesets):
-                traj_lineset_copy = copy.deepcopy(traj_linset)
-                traj_lineset_copy.transform(camera_position)
-                pts = np.asarray(traj_lineset_copy.points)
+                # Transform points directly without deepcopy (more efficient)
+                pts = np.asarray(traj_linset.points)
                 if pts.size == 0:
                     continue
-                tmp_to_goal = distance.cdist(goal_position, pts, "sqeuclidean")
+                pts_homogeneous = np.hstack([pts, np.ones((pts.shape[0], 1))])
+                pts_transformed = (camera_position @ pts_homogeneous.T).T[:, :3]
+                tmp_to_goal = distance.cdist(goal_position, pts_transformed, "sqeuclidean")
                 dst_to_goal = np.sqrt(np.min(tmp_to_goal))
                 goal_scores.append((traj_idx, dst_to_goal))
 
@@ -530,7 +523,9 @@ Transform the raw image
 This involves resizing the image, scaling the camera matrix, and undistorting the image.
 """
 def transform_image(image, mtx, dist, optimal_matrix, roi):
-    transformed_image = cv2.undistort(np.asarray(image), mtx, dist, None, optimal_matrix)
+    # cv2 can handle both numpy arrays and other array-like objects efficiently
+    transformed_image = cv2.undistort(image if isinstance(image, np.ndarray) else np.asarray(image), 
+                                      mtx, dist, None, optimal_matrix)
     # Crop the image to the ROI
     x, y, w, h = roi
     transformed_image = transformed_image[y:y+h, x:x+w]
