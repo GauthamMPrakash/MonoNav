@@ -112,7 +112,6 @@ DEPTH_WIDTH = None
 DEPTH_HEIGHT = None
 distances_lock = threading.Lock()
 obstacle_sender_stop_event = threading.Event()
-pitch_updater_stop_event = threading.Event()
 
 # Intrinsics for undistortion
 camera_calibration_path = config['camera_calibration_path']
@@ -273,25 +272,6 @@ def set_obstacle_distance_params_from_intrinsics(camera_matrix, width, height):
     angle_offset = camera_facing_angle_degree - (depth_hfov_deg / 2)
     increment_f = depth_hfov_deg / distances_array_length
 
-def update_vehicle_attitude():
-    global pos_x, pos_y, pos_z, vehicle_yaw_rad, vehicle_pitch_rad, vehicle_roll_rad
-    pos_x, pos_y, pos_z, vehicle_yaw_rad, vehicle_pitch_rad, vehicle_roll_rad = get_latest_pose()
-
-def pitch_updater_loop(update_hz=10):
-    """Background thread: update vehicle_pitch_rad at fixed rate (10 Hz default)."""
-    period_s = 1.0 / max(update_hz, 2)
-    next_update = time.monotonic()
-    
-    while not pitch_updater_stop_event.is_set():
-        update_vehicle_attitude()
-        
-        next_update += period_s
-        sleep_time = next_update - time.monotonic()
-        if sleep_time > 0:
-            pitch_updater_stop_event.wait(sleep_time)
-        else:
-            next_update = time.monotonic()
-
 # Calculate the distances array by dividing the FOV (horizontal) into $distances_array_length rays,
 # then pick out the depth value at the pixel corresponding to each ray. Based on the definition of
 # the MAVLink messages, the invalid distance value (below MIN/above MAX) will be replaced with MAX+1.
@@ -385,6 +365,7 @@ def main():
     global shouldStop
     global goal_position
     global mtx, dist, optimal_mtx, roi
+    global vehicle_pitch_rad
 
     goal_nav_active = False  # Track if goal navigation command has been sent
 
@@ -420,7 +401,6 @@ def main():
     mavc.printd(f"Goal position (NED): {goal_position}")
 
     sender_thread = None
-    pitch_thread = None
     last_time = time.time()
     frame_number = 0
     
@@ -460,15 +440,6 @@ def main():
         )
         sender_thread.start()
 
-    # Start pitch updater thread (10 Hz)
-    pitch_updater_stop_event.clear()
-    pitch_thread = threading.Thread(
-        target=pitch_updater_loop,
-        args=(10,),
-        daemon=True,
-    )
-    pitch_thread.start()
-
     print("\n=== Keyboard Controls ===")
     if FLY_VEHICLE:
         if goal_position is not None:
@@ -487,8 +458,8 @@ def main():
         if debug_enable:
             cv2.imshow("Camera Stream", bgr)
         # Get latest pose directly (no buffering) - read fresh values each iteration
-        pos_x, pos_y, pos_z, vehicle_yaw_rad, vehicle_pitch_rad_now, vehicle_roll_rad = get_latest_pose()
-        camera_position = get_pose_matrix(pos_x, pos_y, pos_z, vehicle_yaw_rad, vehicle_pitch_rad_now, vehicle_roll_rad)
+        pos_x, pos_y, pos_z, vehicle_yaw_rad, vehicle_pitch_rad, vehicle_roll_rad = get_latest_pose()
+        camera_position = get_pose_matrix(pos_x, pos_y, pos_z, vehicle_yaw_rad, vehicle_pitch_rad, vehicle_roll_rad)
 
         transform_bgr = transform_image(bgr, mtx, dist, optimal_mtx, roi)
         transform_rgb = cv2.cvtColor(transform_bgr, cv2.COLOR_BGR2RGB)
@@ -609,10 +580,6 @@ def main():
         obstacle_sender_stop_event.set()
         if sender_thread is not None:
             sender_thread.join(timeout=2.0)
-        
-        pitch_updater_stop_event.set()
-        if pitch_thread is not None:
-            pitch_thread.join(timeout=2.0)
 
         # Land vehicle if still flying
         if FLY_VEHICLE and shouldStop:

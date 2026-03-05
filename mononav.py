@@ -239,6 +239,7 @@ def main():
         print("Starting control.")
         traj_counter = 0         # how many trajectory iterations have we done?
         no_safe_traj = False
+        last_time = time.time()  # for FPS counter
     #   start_time = time.time() # seconds
 
         while not shouldStop:
@@ -309,7 +310,7 @@ def main():
                         break
 
                 # Transform Camera Image to undistort and crop according to calibration
-                transform_bgr = transform_image(np.asarray(bgr), mtx, dist, optimal_mtx, roi)
+                transform_bgr = transform_image(bgr, mtx, dist, optimal_mtx, roi)
                 transform_rgb = cv2.cvtColor(transform_bgr, cv2.COLOR_BGR2RGB)
                 #transform_rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
 
@@ -317,6 +318,20 @@ def main():
                 depth_numpy, depth_colormap = compute_depth(transform_bgr, depth_anything, INPUT_SIZE)
 
                 if depth_colormap is not None:
+                    # Add FPS counter to depth display
+                    processing_speed = 1 / (time.time() - last_time)
+                    fps_text = ("%0.2f" % (processing_speed,)) + ' fps'
+                    textsize = cv2.getTextSize(fps_text, cv2.FONT_HERSHEY_SIMPLEX, 1, 2)[0]
+                    cv2.putText(
+                        depth_colormap,
+                        fps_text,
+                        org=(int((depth_colormap.shape[1] - textsize[0] / 2)), int((textsize[1]) / 2)),
+                        fontFace=cv2.FONT_HERSHEY_SIMPLEX,
+                        fontScale=0.5,
+                        thickness=1,
+                        color=(255, 255, 255),
+                    )
+                    last_time = time.time()
                     cv2.imshow("Depth", depth_colormap)
                     update_key_from_cv(1)
 
