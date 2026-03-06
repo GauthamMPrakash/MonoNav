@@ -405,7 +405,7 @@ def main():
             shouldStop, max_traj_idx = choose_primitive(vbg.vbg, camera_position, traj_linesets, goal_position, min_dist2obs, filterYvals, filterWeights, filterTSDF, weight_threshold)
             if max_traj_idx is None:
                 no_safe_traj = True
-                # shouldStop = True
+                shouldStop = True
                 print("[INFO] No safe trajectory. Hovering in place.")
             else:
                 no_safe_traj = False

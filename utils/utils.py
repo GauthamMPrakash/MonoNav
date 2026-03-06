@@ -483,9 +483,7 @@ def adjust_intrinsics_to_frame_size(mtx, dist, optimal_mtx, roi, frame_width, fr
         frame_height: Actual frame height
         calib_width: Calibration frame width
         calib_height: Calibration frame height
-    
-    Returns:
-        Tuple of (mtx, dist, optimal_mtx, roi) - either scaled or original
+
     """
     if calib_width is None or calib_height is None:
         return mtx, dist, optimal_mtx, roi
