@@ -65,7 +65,7 @@ EKF_LAT = config['EKF_LAT']
 EKF_LON = config['EKF_LON']
 STREAM_URL = config['camera_ip']       # YOUR ESP32 HTTP MJPEG stream
 
-DEPTH_RANGE_M = [0.2, 10.0]                 # min and max ranges to be computed
+DEPTH_RANGE_M = [0.2, 20.0]                 # min and max ranges to be computed
 min_depth_cm = int(DEPTH_RANGE_M[0] * 100)  # In cm
 max_depth_cm = int(DEPTH_RANGE_M[1] * 100)  # In cm, should be a little conservative
 distances_array_length = 72
@@ -192,7 +192,7 @@ camera_facing_angle_degree = 0
 
 # Enable/disable each message/function individually
 enable_msg_obstacle_distance = True
-enable_msg_distance_sensor = False
+#enable_msg_distance_sensor = False
 obstacle_distance_msg_hz_default = 15.0
 
 obstacle_line_height_ratio = 0.4  # [0-1]: 0-Top, 1-Bottom. The height of the horizontal line to find distance to obstacle.
@@ -225,7 +225,7 @@ def send_obstacle_distance_message(vehicle):
         # mavc.printd(f"[OBSTACLE] Min, Max distance: {min_obstacle_dist, max_obstacle_dist} cm")
 
 def obstacle_distance_sender_loop(vehicle, send_hz):
-    period_s = 1.0 / max(send_hz, 0.1)
+    period_s = 1.0 / max(send_hz, 1)
     next_send = time.monotonic()
 
     while not obstacle_sender_stop_event.is_set():
@@ -383,27 +383,10 @@ def main():
     mavc.reboot_if_EKF_origin(0.3) 
     mavc.timesync()
 
-    if FLY_VEHICLE:
-        print("Arming Motors!")
-        mavc.set_mode('GUIDED')
-        time.sleep(0.1)
-        time.sleep(2)
-        mavc.arm()
-        mavc.takeoff(height)
-        mavc.set_speed(forward_speed)
-
-    mavc.heading_offset_init()
-        # Keep goal_position in RDF frame (same as camera_position from get_drone_pose)
-    if goal_position is not None:
-        goal_position = np.array(rdf_goal_to_ned(goal_position[0], goal_position[1], goal_position[2], mavc.heading_offset)).reshape(1, 3)
-    
-    mavc.printd(f"Heading offset : {mavc.heading_offset*180/np.pi}")
-    mavc.printd(f"Goal position (NED): {goal_position}")
-
     sender_thread = None
     last_time = time.time()
     frame_number = 0
-    
+
     # Scale intrinsics if camera resolution differs from calibration resolution
     first_frame = cap.read()
     if first_frame is not None:
@@ -422,7 +405,6 @@ def main():
         vbg.intrinsic_matrix = vbg_intrinsics
         vbg.depth_intrinsic = o3d.core.Tensor(vbg_intrinsics, o3d.core.Dtype.Float64)
 
-
     if DEPTH_HEIGHT is None or DEPTH_WIDTH is None:
         if first_frame is not None:
             DEPTH_HEIGHT, DEPTH_WIDTH = first_frame.shape[0], first_frame.shape[1]
@@ -439,6 +421,21 @@ def main():
             daemon=True,
         )
         sender_thread.start()
+
+    if FLY_VEHICLE:
+        print("Arming Motors!")
+        mavc.set_mode('GUIDED')
+        mavc.arm()
+        mavc.takeoff(height)
+        mavc.set_speed(forward_speed)
+
+    mavc.heading_offset_init()
+        # Keep goal_position in RDF frame (same as camera_position from get_drone_pose)
+    if goal_position is not None:
+        goal_position = np.array(rdf_goal_to_ned(goal_position[0], goal_position[1], goal_position[2], mavc.heading_offset)).reshape(1, 3)
+    
+    mavc.printd(f"Heading offset : {mavc.heading_offset*180/np.pi}")
+    mavc.printd(f"Goal position (NED): {goal_position}")
 
     print("\n=== Keyboard Controls ===")
     if FLY_VEHICLE:

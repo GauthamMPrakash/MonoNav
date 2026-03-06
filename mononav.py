@@ -215,7 +215,6 @@ def main():
     # Connect to the drone
         mavc.connect_drone(IP, baud=baud)
         mavc.en_pose_stream()                    # Commands AP to stream poses at a deafult value of 15 Hz
-        start_pose_thread()                    # Start background pose polling at 10 Hz (non-blocking)
         mavc.reboot_if_EKF_origin(0.5)           # Call this function after enabling pose_stream
         mavc.set_ekf_origin(EKF_LAT, EKF_LON, 0) # Ignored if already close to the previous origin, if set
 
@@ -229,13 +228,15 @@ def main():
             print("Taking off.")
             mavc.takeoff(height)
             # mavc.set_speed(forward_speed)
+            
+        start_pose_thread()                      # Start background pose polling at 10 Hz (non-blocking)
         mavc.heading_offset_init()
         # Keep goal_position in RDF frame (same as camera_position from get_drone_pose)
         if goal_position is not None:
             goal_position = np.array(rdf_goal_to_ned(goal_position[0], goal_position[1], goal_position[2], mavc.heading_offset)).reshape(1, 3)
         mavc.printd(f"Heading offset : {mavc.heading_offset*180/np.pi}")
         mavc.printd(f"Goal position (NED): {goal_position}")
-    ##########################################
+    
         print("Starting control.")
         traj_counter = 0         # how many trajectory iterations have we done?
         no_safe_traj = False

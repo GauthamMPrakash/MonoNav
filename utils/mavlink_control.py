@@ -225,7 +225,7 @@ def get_pose(blocking=False):
     got_attitude = False
     
     while True:
-        msg = drone.recv_match(type=["LOCAL_POSITION_NED", "ATTITUDE"], blocking=False, timeout=0.1)
+        msg = drone.recv_match(type=["LOCAL_POSITION_NED", "ATTITUDE"], blocking=blocking, timeout=0.1)
         
         if not msg or msg.get_type() == "BAD_DATA":
             if got_position and got_attitude:
@@ -300,7 +300,7 @@ def reboot_if_EKF_origin(pos_tolerance=0.2):
     """
 
     for i in range(3):                  # Call multiple times to ensure we get a valid message after enabling the stream
-        x, y, _, yaw, _, _ = get_pose()
+        x, y, _, _, _, _ = get_pose()
         time.sleep(0.05)
     printd(f"reboot check – x={x:.3f}, y={y:.3f}")
     if abs(x) > pos_tolerance or abs(y) > pos_tolerance:
@@ -315,6 +315,7 @@ def reboot_if_EKF_origin(pos_tolerance=0.2):
             0, 0, 0
         )
 
+def set_param(param_id, param_value, param_type, timeout=5.0):
 """
 UNTESTED
 
@@ -322,7 +323,6 @@ Set a parameter on the autopilot. Use with caution and ensure you know what the 
 Waits for PARAM_VALUE response to verify successful parameter set with configurable timeout.
 Returns True if parameter was successfully set, False otherwise.
 """
-def set_param(param_id, param_value, param_type, timeout=5.0):
     printd(f"Setting param {param_id} to {param_value}")
     drone.mav.param_set_send(
         drone.target_system,
