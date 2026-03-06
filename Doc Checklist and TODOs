@@ -1,6 +1,5 @@
 DOCs:
 - Copter: important parameter configs for the scripts
-- Heartbeat emission modification
 - Verify parameter correctness in AP_ObstacleAvoidance banner documentation
 
 TODOs:
