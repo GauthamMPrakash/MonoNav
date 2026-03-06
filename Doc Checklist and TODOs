@@ -7,3 +7,4 @@ TODOs:
 - Try to implement a more performant way of saving data rather than as multiple files
 - Copter control may be affected by how many iterations can be done under the period of the primitive. This can be bad if compute_depth is too slow.
   A quick workaround may be to increase yaw gain.
+- Remove config.yml from gitignore before code release

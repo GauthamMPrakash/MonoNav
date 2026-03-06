@@ -68,7 +68,7 @@ class VoxelBlockGrid:
             attr_names=('tsdf', 'weight', 'color'),
             attr_dtypes=(o3c.float32, o3c.float32, o3c.float32),
             attr_channels=(1, 1, 3),
-            voxel_size=3.0 / 64, # this sets the resolution of the voxel grid
+            voxel_size=3.0 / 64,                    # this sets the resolution of the voxel grid
             block_resolution=1,
             block_count=50000,
             device=device)
