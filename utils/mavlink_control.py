@@ -297,6 +297,8 @@ def reboot_if_EKF_origin(pos_tolerance=0.2):
 
     The globals x/y start at 0 and stay there until a LOCAL_POSITION_NED
     message is received.
+
+    Returns True if reboot command was sent, False otherwise.
     """
 
     for i in range(3):                  # Call multiple times to ensure we get a valid message after enabling the stream
@@ -314,15 +316,17 @@ def reboot_if_EKF_origin(pos_tolerance=0.2):
             0, 0, 0,
             0, 0, 0
         )
+        return True
+    return False
 
 def set_param(param_id, param_value, param_type, timeout=5.0):
-"""
-UNTESTED
+    """
+    UNTESTED
 
-Set a parameter on the autopilot. Use with caution and ensure you know what the parameter does before changing.
-Waits for PARAM_VALUE response to verify successful parameter set with configurable timeout.
-Returns True if parameter was successfully set, False otherwise.
-"""
+    Set a parameter on the autopilot. Use with caution and ensure you know what the parameter does before changing.
+    Waits for PARAM_VALUE response to verify successful parameter set with configurable timeout.
+    Returns True if parameter was successfully set, False otherwise.
+    """
     printd(f"Setting param {param_id} to {param_value}")
     drone.mav.param_set_send(
         drone.target_system,

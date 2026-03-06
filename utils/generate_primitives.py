@@ -45,7 +45,7 @@ assert max_yawrate > 0, "max_yawrate should be positive"
 # Derived quantities
 omega = np.pi/T                                                  # 1/s, angular frequency
 t = np.linspace(0,T,num_commands)                                # s, time vector
-Avals = np.linspace(max_yawrate, -max_yawrate, num_trajectories) # rad/s, yawrate amplitude vector
+Avals = np.linspace(-max_yawrate, max_yawrate, num_trajectories) # rad/s, yawrate amplitude vector
 
 
 # Create a subplot

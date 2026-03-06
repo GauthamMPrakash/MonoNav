@@ -107,7 +107,7 @@ weight_threshold = config['weight_threshold'] # for planning and visualization (
 if config['VoxelBlockGrid']['device'] != "None": 
     device = config['VoxelBlockGrid']['device']
 else:
-    device = 'CUDA:0' if torch.cuda.is_available() else 'CPU:0'
+    device = 'CUDA:0' if o3d.core.cuda.is_available() else 'CPU:0'
 
 vbg = VoxelBlockGrid(depth_scale, depth_max, trunc_voxel_multiplier, o3d.core.Device(device), intrinsic_matrix=fusion_intrinsics)
 
@@ -117,6 +117,7 @@ traj_list = get_trajlist(trajlib_dir)
 traj_linesets, period, forward_speed, amplitudes = get_traj_linesets(traj_list)
 max_traj_idx = int(len(traj_list)/2) # set initial value to that of FORWARD flight (should be median value)
 print("Initial trajectory chosen: %d out of %d"%(max_traj_idx, len(traj_list)))
+print(f"Trajectory amplitudes: left(idx 0)={float(amplitudes[0]):.3f}, right(idx {len(amplitudes)-1})={float(amplitudes[-1]):.3f}")
 
 # Planning presets
 filterYvals = config['filterYvals']
@@ -183,7 +184,9 @@ def trajectory_execution_loop(command_hz=10):
     period_s = 1.0 / max(command_hz, 1)
     next_command = time.monotonic()
     
+    # log whenever the execution loop begins iteration (for debugging thread activity)
     while not trajectory_execution_stop_event.is_set():
+        # (current_traj_index may be None until a trajectory is selected)
         if current_traj_index is not None and trajectory_start_time is not None:
             elapsed = time.time() - trajectory_start_time
             
@@ -192,10 +195,10 @@ def trajectory_execution_loop(command_hz=10):
                 # Compute smooth yaw rate for this instant
                 yawrate = amplitudes[current_traj_index] * np.sin(np.pi / period * elapsed)  # rad/s
                 yvel = yawrate * yvel_gain
-                yawrate_cmd = yawrate * yawrate_gain
-                
+                yawrate = yawrate * yawrate_gain
+                print(f"yawrate: {yawrate*180/np.pi}", flush=True)
                 if FLY_VEHICLE:
-                    mavc.send_body_offset_ned_vel(forward_speed, yvel, yaw_rate=yawrate_cmd)
+                    mavc.send_body_offset_ned_vel(forward_speed, yvel, yaw_rate=yawrate)
         
         next_command += period_s
         sleep_time = next_command - time.monotonic()
@@ -209,11 +212,26 @@ def main():
     global shouldStop
     global last_key_pressed
     global max_traj_idx
+    global current_traj_index
+    global trajectory_start_time
     global mtx
     global dist
     global optimal_mtx
     global roi
     global goal_position
+
+    while True:
+        # ARDUCOPTER CONTROL
+        # Connect to the drone
+        mavc.connect_drone(IP, baud=baud)
+        mavc.en_pose_stream()                    # Commands AP to stream poses at a deafult value of 15 Hz
+        mavc.set_ekf_origin(EKF_LAT, EKF_LON, 0) # Ignored if already close to the previous origin, if set
+        reboot = mavc.reboot_if_EKF_origin(0.5)  # Call this function after enabling pose_stream
+        if reboot:
+            mavc.printd("Rebooted drone to set EKF origin. Waiting for reconnection...")
+            time.sleep(7)   # Wait for drone to reboot
+            continue        # Restart connection loop
+        break
 
     # Run the depth model a few times (the first inference is slow), and skip the first few frames
     cap = VideoCapture(STREAM_URL)
@@ -242,13 +260,6 @@ def main():
             cv2.imshow("test", bgr)
             update_key_from_cv()
         cv2.destroyAllWindows()
-        
-    # ARDUCOPTER CONTROL
-    # Connect to the drone
-        mavc.connect_drone(IP, baud=baud)
-        mavc.en_pose_stream()                    # Commands AP to stream poses at a deafult value of 15 Hz
-        mavc.reboot_if_EKF_origin(0.5)           # Call this function after enabling pose_stream
-        mavc.set_ekf_origin(EKF_LAT, EKF_LON, 0) # Ignored if already close to the previous origin, if set
 
     # Initialize lists and frame counter.
         frame_number = 0
@@ -291,7 +302,7 @@ def main():
                 traj_index = 0 # left
             elif last_key_pressed == 'w':
                 print("Pressed w. Going straight.")
-                traj_index = int(len(traj_list)/2) # straight
+                traj_index = len(traj_list)//2 # straight
             elif last_key_pressed == 'd':
                 print("Pressed d. Going right.")
                 traj_index = len(traj_list)-1 # right
@@ -394,22 +405,17 @@ def main():
             shouldStop, max_traj_idx = choose_primitive(vbg.vbg, camera_position, traj_linesets, goal_position, min_dist2obs, filterYvals, filterWeights, filterTSDF, weight_threshold)
             if max_traj_idx is None:
                 no_safe_traj = True
-                shouldStop = True
-                print("[INFO]No safe trajectory. Hovering in place.")
+                # shouldStop = True
+                print("[INFO] No safe trajectory. Hovering in place.")
             else:
                 no_safe_traj = False
             print("SELECTED max_traj_idx: ", max_traj_idx)
 
     # Exited while(!shouldStop); end control!
-        print("shouldStop: ", shouldStop)
-        print("[INFO] Reached goal OR too close to obstacles.")
+        # print("shouldStop: ", shouldStop)
+        # print(f"[INFO] {end_message}")
         print("[INFO] End control.")
-
-        if FLY_VEHICLE:
-            # Stopping sequence
-            print("Landing.")
-            mavc.set_mode('LAND')
-            mavc.arm(0)
+        print("[INFO] Current NED coords:" , camera_position[0:-1, -1])
 
         # save and view vbg
         print("Saving to {}...".format(npz_save_filename))
@@ -424,9 +430,9 @@ def main():
         visualize_pointcloud(pcd_legacy, window_name="MonoNav Reconstruction")
 
     except KeyboardInterrupt:
-        mavc.eSTOP()
-        print("\n[INTERRUPT] Ctrl+C detected. Sent eSTOP.")
-        shouldStop = True
+        mavc.set_mode('LAND')
+        print("\n[INTERRUPT] Ctrl+C detected. Sent land command.")
+        # shouldStop = True
             
     finally:
         # Stop trajectory execution thread

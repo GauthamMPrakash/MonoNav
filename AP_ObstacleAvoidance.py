@@ -112,6 +112,8 @@ DEPTH_WIDTH = None
 DEPTH_HEIGHT = None
 distances_lock = threading.Lock()
 obstacle_sender_stop_event = threading.Event()
+# Event and thread for periodic timesync calls
+timesync_stop_event = threading.Event()
 
 # Intrinsics for undistortion
 camera_calibration_path = config['camera_calibration_path']
@@ -335,22 +337,23 @@ def distances_from_depth_image(obstacle_line_height, depth_mat, distances, min_d
         if dist_m > min_depth_m and dist_m < max_depth_m:
             distances[i] = dist_m * 100
 
-
-def cleanup_call(action_name, func, *args, **kwargs):
-    """Run a cleanup action and log failures without aborting overall shutdown."""
-    try:
-        return func(*args, **kwargs)
-    except Exception as e:
-        mavc.printd(f"[CLEANUP] Failed to {action_name}: {e}")
-        return None
-
+def _timesync_loop(period_s, stop_event):
+    """Background loop that calls mavc.timesync() every `period_s` seconds.
+    Exits when `stop_event` is set."""
+    next_call = time.monotonic()
+    while not stop_event.is_set():
+        mavc.timesync()
+        next_call += period_s
+        sleep_time = next_call - time.monotonic()
+        if sleep_time > 0:
+            stop_event.wait(sleep_time)
 
 def save_and_visualize_vbg(vbg, npz_save_filename, weight_threshold):
-    mavc.printd("[CLEANUP] Saving VoxelBlockGrid to {}...".format(npz_save_filename))
+    mavc.printd(" Saving VoxelBlockGrid to {}...".format(npz_save_filename))
     vbg.vbg.save(npz_save_filename)
-    mavc.printd("[CLEANUP] VoxelBlockGrid saved successfully")
+    mavc.printd(" VoxelBlockGrid saved successfully")
 
-    mavc.printd("[CLEANUP] Extracting and visualizing point cloud...")
+    mavc.printd(" Extracting and visualizing point cloud...")
     pcd = vbg.vbg.extract_point_cloud(weight_threshold)
     pcd_cpu = pcd.cpu()
     pcd_legacy = pcd_cpu.to_legacy()
@@ -369,23 +372,37 @@ def main():
 
     goal_nav_active = False  # Track if goal navigation command has been sent
 
+    while True:
+        vehicle = mavc.connect_drone(IP, baud=baud)
+        mavc.set_ekf_origin(EKF_LAT, EKF_LON, 0)
+        mavc.en_pose_stream()
+        reboot = mavc.reboot_if_EKF_origin(0.5)
+        if reboot:
+            mavc.printd("Rebooted drone to set EKF origin. Waiting for reconnection...")
+            time.sleep(7)   # Wait for drone to reboot
+            continue        # Restart connection loop
+        break
+
+    sender_thread = None
+    last_time = time.time()
+    # periodic timesync interval (0.1 Hz)
+    timesync_period_s = 10.0  # seconds
+    frame_number = 0
+    # start timesync thread
+    timesync_stop_event.clear()
+    timesync_thread = threading.Thread(
+        target=_timesync_loop,
+        args=(timesync_period_s, timesync_stop_event),
+        daemon=True,
+    )
+    timesync_thread.start()
+    
     cap = VideoCapture(STREAM_URL)
     for _ in range(0, config['num_pre_depth_frames']):
         bgr = cap.read()
         compute_depth(bgr, depth_anything, INPUT_SIZE, make_colormap=False)
         cv2.waitKey(1)
     cv2.destroyAllWindows()
-
-    vehicle = mavc.connect_drone(IP, baud=baud)
-    mavc.set_ekf_origin(EKF_LAT, EKF_LON, 0)
-    mavc.en_pose_stream()
-    start_pose_thread()  # Start background pose polling at 10 Hz (non-blocking)
-    mavc.reboot_if_EKF_origin(0.3) 
-    mavc.timesync()
-
-    sender_thread = None
-    last_time = time.time()
-    frame_number = 0
 
     # Scale intrinsics if camera resolution differs from calibration resolution
     first_frame = cap.read()
@@ -429,6 +446,7 @@ def main():
         mavc.takeoff(height)
         mavc.set_speed(forward_speed)
 
+    start_pose_thread()  # Start background pose polling at 10 Hz (non-blocking)
     mavc.heading_offset_init()
         # Keep goal_position in RDF frame (same as camera_position from get_drone_pose)
     if goal_position is not None:
@@ -513,6 +531,7 @@ def main():
             
         update_key_from_cv(1)
 
+
         if FLY_VEHICLE:
             if last_key_pressed == 'g':
                 if goal_position is not None:
@@ -560,7 +579,6 @@ def main():
             elif last_key_pressed == 'q':  # end flight immediately
                 print("Pressed q. EMERGENCY STOP.")
                 mavc.eSTOP()
-                shouldStop = True
                 goal_nav_active = False
 
     except KeyboardInterrupt:
@@ -573,30 +591,28 @@ def main():
         shouldStop = True
     finally:
         # Stop background threads
+        print(f"[INFO] Current NED coordinates: {camera_position[0:-1, -1]}")
         mavc.printd("[CLEANUP] Stopping background threads...")
         obstacle_sender_stop_event.set()
         if sender_thread is not None:
             sender_thread.join(timeout=2.0)
+        # stop timesync thread
+        timesync_stop_event.set()
+        timesync_thread.join(timeout=2.0)
 
         # Land vehicle if still flying
         if FLY_VEHICLE and shouldStop:
-            mavc.printd("[CLEANUP] Landing vehicle...")
-            cleanup_call("set LAND mode", mavc.set_mode, 'LAND')
-            time.sleep(1)  # Give time for landing command
+            mavc.printd("Landing vehicle...")
+            mavc.set_mode('LAND')
 
         # Save VoxelBlockGrid (only if enabled)
         if enable_vbg:
-            cleanup_call("save/visualize VoxelBlockGrid", save_and_visualize_vbg, vbg, npz_save_filename, weight_threshold)
-        else:
-            mavc.printd("[CLEANUP] VBG was disabled, skipping save and visualization")
+            save_and_visualize_vbg(vbg, npz_save_filename, weight_threshold)
 
         # Release camera and close windows
         mavc.printd("[CLEANUP] Releasing camera and closing windows...")
-        cleanup_call("release camera", cap.cap.release)
+        cap.cap.release()
         cv2.destroyAllWindows()
-        
-        mavc.printd("[CLEANUP] Shutdown complete.")
-        mavc.printd("="*50)
 
 if __name__ == "__main__":
     main()
