@@ -145,10 +145,11 @@ pose_dir = os.path.join(save_dir, 'poses')
 transform_img_dir = os.path.join(save_dir, 'transform-rgb-images')
 transform_depth_dir = os.path.join(save_dir, 'transform-depth-images')
 
-os.makedirs(img_dir, exist_ok=True)
-os.makedirs(pose_dir, exist_ok=True)
-os.makedirs(transform_img_dir, exist_ok=True)
-os.makedirs(transform_depth_dir, exist_ok=True)
+if save_during_flight:
+    os.makedirs(img_dir, exist_ok=True)
+    os.makedirs(pose_dir, exist_ok=True)
+    os.makedirs(transform_img_dir, exist_ok=True)
+    os.makedirs(transform_depth_dir, exist_ok=True)
 
 # Save the run information to a csv
 header = ['frame_number', 'chosen_traj_idx', 'time_elapsed']
@@ -196,7 +197,6 @@ def trajectory_execution_loop(command_hz=10):
                 yawrate = amplitudes[current_traj_index] * np.sin(np.pi / period * elapsed)  # rad/s
                 yvel = yawrate * yvel_gain
                 yawrate = yawrate * yawrate_gain
-                print(f"yawrate: {yawrate*180/np.pi}", flush=True)
                 if FLY_VEHICLE:
                     mavc.send_body_offset_ned_vel(forward_speed, yvel, yaw_rate=yawrate)
         
@@ -224,13 +224,13 @@ def main():
         # ARDUCOPTER CONTROL
         # Connect to the drone
         mavc.connect_drone(IP, baud=baud)
-        mavc.en_pose_stream()                    # Commands AP to stream poses at a deafult value of 15 Hz
         mavc.set_ekf_origin(EKF_LAT, EKF_LON, 0) # Ignored if already close to the previous origin, if set
         reboot = mavc.reboot_if_EKF_origin(0.5)  # Call this function after enabling pose_stream
         if reboot:
             mavc.printd("Rebooted drone to set EKF origin. Waiting for reconnection...")
-            time.sleep(7)   # Wait for drone to reboot
-            continue        # Restart connection loop
+            time.sleep(10)   # Wait for drone to reboot
+            mavc.printd("Reconnecting...")
+            continue         # Restart connection loop
         break
 
     # Run the depth model a few times (the first inference is slow), and skip the first few frames
@@ -245,7 +245,7 @@ def main():
 
     vbg_intrinsics = get_cropped_intrinsics(optimal_mtx, roi)
     vbg.intrinsic_matrix = vbg_intrinsics
-    vbg.depth_intrinsic = o3d.core.Tensor(vbg_intrinsics, o3d.core.Dtype.Float64).to(vbg.device)
+    vbg.depth_intrinsic = o3d.core.Tensor(vbg_intrinsics, o3d.core.Dtype.Float64)
 
     # Scale mtx, dist to match current camera resolution
     # Read one frame to get actual resolution
@@ -271,7 +271,8 @@ def main():
             print("Taking off.")
             mavc.takeoff(height)
             # mavc.set_speed(forward_speed)
-            
+        
+        mavc.en_pose_stream()                    # Commands AP to stream poses at a deafult value of 15 Hz
         start_pose_thread()                      # Start background pose polling at 10 Hz (non-blocking)
         mavc.heading_offset_init()
         # Keep goal_position in RDF frame (same as camera_position from get_drone_pose)

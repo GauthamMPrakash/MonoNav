@@ -77,13 +77,15 @@ class VoxelBlockGrid:
         # Integration Step (TSDF Fusion)
         depth_numpy = depth_numpy.astype(np.uint16)  # Convert to uint16
         depth = o3d.t.geometry.Image(depth_numpy).to(self.device)
-        extrinsic = o3d.core.Tensor(np.linalg.inv(cam_pose), o3d.core.Dtype.Float64)
+        # Open3D frustum indexing expects camera tensors on CPU even when VBG lives on CUDA.
+        depth_intrinsic_cpu = self.depth_intrinsic.to(o3d.core.Device("CPU:0"))
+        extrinsic_cpu = o3d.core.Tensor(np.linalg.inv(cam_pose), o3d.core.Dtype.Float64)
         frustum_block_coords = self.vbg.compute_unique_block_coordinates(
-            depth, self.depth_intrinsic, extrinsic, self.depth_scale, self.depth_max, self.trunc_voxel_multiplier)
+            depth, depth_intrinsic_cpu, extrinsic_cpu, self.depth_scale, self.depth_max, self.trunc_voxel_multiplier)
         color = o3d.t.geometry.Image(np.asarray(color)).to(self.device)
-        color_intrinsic = o3d.core.Tensor(self.intrinsic_matrix, o3d.core.Dtype.Float64).to(self.device)
-        self.vbg.integrate(frustum_block_coords, depth, color, self.depth_intrinsic,
-                       color_intrinsic, extrinsic, self.depth_scale, self.depth_max, self.trunc_voxel_multiplier)
+        color_intrinsic_cpu = o3d.core.Tensor(self.intrinsic_matrix, o3d.core.Dtype.Float64)
+        self.vbg.integrate(frustum_block_coords, depth, color, depth_intrinsic_cpu,
+                       color_intrinsic_cpu, extrinsic_cpu, self.depth_scale, self.depth_max, self.trunc_voxel_multiplier)
 
 
 """

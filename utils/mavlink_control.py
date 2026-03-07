@@ -125,7 +125,7 @@ def send_body_offset_ned_vel(vx, vy, vz=0, yaw_rate=0):
     Useful for high-rate control loops that call this every iteration.
     """
 
-    printd(f"Sending BODY_NED vel x={vx}, y={vy}, z={vz}")
+    #printd(f"Sending BODY_NED vel x={vx}, y={vy}, z={vz}")
     type_mask = 0b010111000111  # use velocity and yaw-rate only
     drone.mav.set_position_target_local_ned_send(
         0,
@@ -366,7 +366,7 @@ def test():
         # Arbitrary location for EKF Origin
         EKF_LAT = 8.4723591
         EKF_LON = 76.9295203
-        IP = "udpout:192.168.53.51:14550"  # Drone IP
+        IP = "udpout:10.42.0.110:14550"  # Drone IP
         connect_drone(IP)
         en_pose_stream()
         reboot_if_EKF_origin()

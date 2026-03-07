@@ -162,10 +162,11 @@ pose_dir = os.path.join(save_dir, 'poses')
 transform_img_dir = os.path.join(save_dir, 'transform-rgb-images')
 transform_depth_dir = os.path.join(save_dir, 'transform-depth-images')
 
-os.makedirs(img_dir, exist_ok=True)
-os.makedirs(pose_dir, exist_ok=True)
-os.makedirs(transform_img_dir, exist_ok=True)
-os.makedirs(transform_depth_dir, exist_ok=True)
+if save_during_flight:
+    os.makedirs(img_dir, exist_ok=True)
+    os.makedirs(pose_dir, exist_ok=True)
+    os.makedirs(transform_img_dir, exist_ok=True)
+    os.makedirs(transform_depth_dir, exist_ok=True)
 
 # key press callback function (for manual control)
 def on_press(key):
@@ -197,7 +198,7 @@ enable_msg_obstacle_distance = True
 #enable_msg_distance_sensor = False
 obstacle_distance_msg_hz_default = 15.0
 
-obstacle_line_height_ratio = 0.4  # [0-1]: 0-Top, 1-Bottom. The height of the horizontal line to find distance to obstacle.
+obstacle_line_height_ratio = 0.4   # [0-1]: 0-Top, 1-Bottom. The height of the horizontal line to find distance to obstacle.
 obstacle_line_thickness_pixel = 10 # [1-DEPTH_HEIGHT]: Number of pixel rows to use to generate the obstacle distance message. For each column, the scan will return the minimum value for those pixels centered vertically in the image.
 
 def send_obstacle_distance_message(vehicle):
@@ -379,7 +380,8 @@ def main():
         reboot = mavc.reboot_if_EKF_origin(0.5)
         if reboot:
             mavc.printd("Rebooted drone to set EKF origin. Waiting for reconnection...")
-            time.sleep(7)   # Wait for drone to reboot
+            time.sleep(10)   # Wait for drone to reboot
+            mavc.printd("Reconnecting...")
             continue        # Restart connection loop
         break
 

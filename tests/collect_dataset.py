@@ -41,8 +41,11 @@ This file collects the following synchronized data:
 CONFIG_PATH = "config.yml"
 config = load_config("config.yml")
 
+EKF_LAT = config["EKF_LAT"]
+EKF_LON = config["EKF_LON"]
+baud = config["baud"]
 # URI = uri_helper.uri_from_env(default=config["radio_uri"])
-# logging.basicConfig(level=logging.ERROR)
+
 IP = config["IP"]
 height = config["height"]
 FLY_VEHICLE = config["FLY_VEHICLE"]
