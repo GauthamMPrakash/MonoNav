@@ -20,15 +20,11 @@ If you change the trajlib_dir, be sure to update `trajlib_dir: 'utils/trajlib/'`
 import os
 import numpy as np
 import matplotlib.pyplot as plt
-import yaml
-
-with open('../config.yml', 'r') as f:
-    config = yaml.safe_load(f)
 
 # Trajectory Constants
 T = 1.0              # s, period of the primitive
-V = config.get('forward_speed')  # m/s, forward speed load from config.yml if it exists
-max_yawrate = 0.7      # rad/s
+V = 0.5              # m/s, forward speed
+max_yawrate = 0.7    # rad/s
 num_trajectories = 7 # number of trajectories should be ODD (e.g., 11) to ensure a straight line is included
 num_commands = 65    # number of points in the trajectory
 num_points = 8       # how many points should be in each primitive and each extension segment? (for primitive evaluation)

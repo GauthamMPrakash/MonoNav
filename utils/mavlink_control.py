@@ -140,7 +140,7 @@ def send_body_offset_ned_vel(vx, vy, vz=0, yaw_rate=0):
         yaw_rate
     )
 
-def send_local_ned_pos(x, y):
+def send_local_ned_pos(x, y, z):
     """
     Send position in LOCAL_NED frame (Relative to EKF-origin).
     Currently AP_ObstacleAvoidance only requires 2D position control.
@@ -156,8 +156,8 @@ def send_local_ned_pos(x, y):
         drone.target_component,
         mavutil.mavlink.MAV_FRAME_LOCAL_NED,
         type_mask,
-        x,y,0,     # pos
-        0,0,0,   # velocity
+        x,y,z,     # pos
+        0,0,0,     # velocity
         0,0,0,     # acceleration ignored
         0,
         0  
@@ -165,7 +165,7 @@ def send_local_ned_pos(x, y):
 
 def set_speed(speed):
     """
-    Set the horizontal navigation speed in meters per second
+    Set the horizontal navigation [ground] speed in meters per second
     """
     printd(f"Setting speed to {speed} m/s")
     drone.mav.command_long_send(
@@ -173,9 +173,9 @@ def set_speed(speed):
         drone.target_component,
         mavutil.mavlink.MAV_CMD_DO_CHANGE_SPEED,
         0,
-        1,
+        1,       # 0 = airspeed, 1 = groundspeed
         speed,
-        -1,
+        0,
         0,0,0,0  # Unused
     )
 

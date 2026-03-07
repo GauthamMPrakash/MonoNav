@@ -186,6 +186,25 @@ def rdf_goal_to_ned(goal_right, goal_down, goal_front, heading_offset):
     
     return goal_ned_x, goal_ned_y, goal_ned_z
 
+
+def ned_to_rdf(goal_north, goal_east, goal_down, heading_offset):
+    """
+    Convert a point from NED coordinates back to the RDF frame used internally.
+
+    This is essentially the inverse of rdf_goal_to_ned()
+    """
+    # Reverse the rotation applied in rdf_goal_to_ned by rotating by -heading_offset.
+    cos_yaw = m.cos(heading_offset)
+    sin_yaw = m.sin(heading_offset)
+
+    # Unrotate NED coordinates back to the unrotated RDF orientation
+    goal_front = goal_north * cos_yaw + goal_east * sin_yaw
+    goal_right = -goal_north * sin_yaw + goal_east * cos_yaw
+    goal_down = goal_down
+
+    return goal_right, goal_down, goal_front
+
+
 """
 Get the global pose from the vehicle, convert to the Open3D frame
 ArduPilot frame: (X, Y, Z) is NORTH EAST DOWN (NED)
@@ -261,6 +280,7 @@ def get_poses_lineset(poses):
     pose_lineset.paint_uniform_color([1, 0, 0]) #optional: change the color here
     return pose_lineset
 
+
 """
 Load the trajectory primitives (before navigation).
 Read a list of motion primitives (trajectories) from a the "trajlib_dir" (trajectory library) directory.
@@ -273,6 +293,7 @@ def get_trajlist(trajlib_dir):
                  if f.endswith('.npz')]
     return traj_list
 
+
 """
 Convert the trajectory list into a list of trajectory linesets.
 These are used for visualizing the possible trajectories at each step.
@@ -281,20 +302,18 @@ Returns a list of trajectory lineset objects.
 def get_traj_linesets(traj_list):
     traj_linesets = []
     amplitudes = []
-    period = None
-    forward_speed = None
-    
     for traj in traj_list:
         # traj_dict = {key: traj[key] for key in traj.files}
         z_tsdf = traj['x_sample']
-        x_tsdf = traj['y_sample']
-        # Preallocate arrays more efficiently than appending
-        points = np.column_stack([x_tsdf, np.zeros_like(x_tsdf), z_tsdf])
-        lines = np.column_stack([np.arange(len(x_tsdf)-1), np.arange(1, len(x_tsdf))])
-        
+        x_tsdf = -traj['y_sample']
+        points = []
+        lines = []
+        for i in range(len(x_tsdf)):
+            points.append([x_tsdf[i], 0, z_tsdf[i]])
+            lines.append([len(points)-1, len(points)])
         traj_lineset = o3d.geometry.LineSet(
             points=o3d.utility.Vector3dVector(points),
-            lines=o3d.utility.Vector2iVector(lines),
+            lines=o3d.utility.Vector2iVector(lines[:-1]),
         )
         traj_linesets.append(traj_lineset)
         amplitudes.append(traj['amplitude'])
@@ -325,111 +344,72 @@ def choose_primitive(vbg, camera_position, traj_linesets, goal_position, dist_th
     weights = weights[voxel_indices]
     tsdf = tsdf[voxel_indices]
 
-    # Convert tensors to numpy once at the start for efficiency
-    voxel_coords_np = voxel_coords.cpu().numpy() if hasattr(voxel_coords, 'cpu') else np.asarray(voxel_coords)
-    weights_np = weights.cpu().numpy() if hasattr(weights, 'cpu') else np.asarray(weights)
-    tsdf_np = tsdf.cpu().numpy() if hasattr(tsdf, 'cpu') else np.asarray(tsdf)
-    
-    # Combined filtering in a single pass (more efficient than sequential masking)
-    mask = np.ones(len(voxel_coords_np), dtype=bool)
-    
-    # Filter out y values (vertical) if enabled
+    # Generate mask to filter out y values (vertical) (+y is DOWN)
+    # This is useful to filter out the floor, and avoid obstacles in-plane
     if filterYvals:
-        mask &= (voxel_coords_np[:, 1] < -0.3)
-    
-    # Filter by weights if enabled
+        mask = voxel_coords[:, 1] < -0.3
+        # Apply mask to voxel_coords and weights
+        voxel_coords = voxel_coords[mask]
+        weights = weights[mask]
+        tsdf = tsdf[mask]
+
+    # Generate mask to filter by weights
+    # This rejects voxels below a certain weight threshold
     if filterWeights:
-        mask &= (weights_np > weight_threshold)
-    
-    # Filter by tsdf value if enabled
+        mask = weights > weight_threshold
+        # Apply mask to voxel_coords and weights
+        voxel_coords = voxel_coords[mask,:]
+        tsdf = tsdf[mask]
+
+    # Generate mask to filter by tsdf value
     if filterTSDF:
-        mask &= (tsdf_np < 0.0)
-    
-    # Apply combined mask once
-    voxel_coords_numpy = voxel_coords_np[mask]
+        # Generate mask to filter by tsdf values
+        mask = tsdf < 0.0
+        voxel_coords = voxel_coords[mask,:]
+
+    # transfer to cpu for cdist
+    voxel_coords_numpy = voxel_coords.cpu().numpy()
 
     # NOW WE HAVE A FILTERED SET OF VOXELS THAT REPRESENT OBSTACLES
     # NEXT, WE DETERMINE THE BEST TRAJECTORY ACCORDING TO A COST FUNCTION
 
     # Initialize scoring variables to evaluate the trajectories
+    max_traj_score = -np.inf # track best trajectory
+    min_goal_score = np.inf # track proximity to goal
     max_traj_idx = None # track the index of the best trajectory
-    straight_idx = len(traj_linesets) // 2  # index of the straight trajectory
 
-    # If no obstacle voxels remain after filtering, avoid argmin on empty arrays.
-    # In this case, prefer goal-directed trajectory (or straight trajectory if no goal).
-    if voxel_coords_numpy.size == 0:
-        if len(traj_linesets) == 0:
-            return True, None
-
-        if goal_position is not None:
-            goal_scores = []
-            for traj_idx, traj_linset in enumerate(traj_linesets):
-                # Transform points directly without deepcopy (more efficient)
-                pts = np.asarray(traj_linset.points)
-                if pts.size == 0:
-                    continue
-                pts_homogeneous = np.hstack([pts, np.ones((pts.shape[0], 1))])
-                pts_transformed = (camera_position @ pts_homogeneous.T).T[:, :3]
-                tmp_to_goal = distance.cdist(goal_position, pts_transformed, "sqeuclidean")
-                dst_to_goal = np.sqrt(np.min(tmp_to_goal))
-                goal_scores.append((traj_idx, dst_to_goal))
-
-            if len(goal_scores) == 0:
-                return False, straight_idx
-
-            min_goal_dist = min(score[1] for score in goal_scores)
-            goal_tolerance = 0.5
-            candidates = [score for score in goal_scores if score[1] <= min_goal_dist + goal_tolerance]
-            max_traj_idx = min(candidates, key=lambda score: abs(score[0] - straight_idx))[0]
-            return False, max_traj_idx
-
-        return False, straight_idx
-
-    # First pass: collect all safe trajectories (those that clear obstacles)
-    safe_trajectories = []  # list of (traj_idx, nearest_voxel_dist, goal_dist)
-    
+    # iterate over the sorted traj linesets
     for traj_idx, traj_linset in enumerate(traj_linesets):
-        # Avoid deepcopy: create a lightweight transformed view using Open3D's in-place transform on a copy
-        pts = np.asarray(traj_linset.points)  # Get points without deep copying the entire lineset
-        # Transform points directly (faster than deepcopy + transform)
-        pts_homogeneous = np.hstack([pts, np.ones((pts.shape[0], 1))])
-        pts_transformed = (camera_position @ pts_homogeneous.T).T[:, :3]
-        
-        if pts_transformed.size == 0:
-            continue
-        tmp = distance.cdist(voxel_coords_numpy, pts_transformed, "sqeuclidean") # compute the distance between all voxels and all points in the trajectory
-        if tmp.size == 0:
-            continue
+        traj_lineset_copy = copy.deepcopy(traj_linset)
+        traj_lineset_copy.transform(camera_position) # transform the lineset (copy) to the camera position
+        pts = np.asarray(traj_lineset_copy.points) # meters # extract the points from the lineset
+        tmp = distance.cdist(voxel_coords_numpy, pts, "sqeuclidean") # compute the distance between all voxels and all points in the trajectory
         voxel_idx, pt_idx = np.unravel_index(np.argmin(tmp), tmp.shape) # extract indices of the nearest voxel to and nearest point in the trajectory
         nearest_voxel_dist = np.sqrt(tmp[voxel_idx, pt_idx])
-        
+        mavc.printd(f"traj {traj_idx}: nearest_obstacle={nearest_voxel_dist:.3f}m (threshold={dist_threshold}m)")
         if nearest_voxel_dist > dist_threshold:
-            # This trajectory is safe (clears obstacles)
+            # the trajectory meets the dist_threshold criterion
             if goal_position is not None:
-                tmp_to_goal = distance.cdist(goal_position, pts_transformed, "sqeuclidean")
+                # the trajectory satisfies the dist_threshold; let's compute the goal score
+                tmp_to_goal = distance.cdist(goal_position, pts, "sqeuclidean")
                 dst_to_goal = np.sqrt(np.min(tmp_to_goal))
+                if dst_to_goal < min_goal_score:
+                    # we have a trajectory that gets us closer to the goal
+                    mavc.printd("traj %d gets us closer to the goal: %f"%(traj_idx, dst_to_goal))
+                    max_traj_idx = traj_idx
+                    min_goal_score = dst_to_goal
             else:
-                dst_to_goal = None
-            safe_trajectories.append((traj_idx, nearest_voxel_dist, dst_to_goal))
-    
-    # Second pass: select best trajectory among safe ones
-    if len(safe_trajectories) > 0:
-        if goal_position is not None:
-            # Find the minimum goal distance among safe trajectories
-            min_goal_dist = min(t[2] for t in safe_trajectories)
-            # Allow trajectories within 0.5m of the best goal distance (tolerance for preferring straighter paths)
-            goal_tolerance = 0.5
-            candidates = [t for t in safe_trajectories if t[2] <= min_goal_dist + goal_tolerance]
-            # Among candidates, prefer the one closest to straight (index closest to middle)
-            max_traj_idx = min(candidates, key=lambda t: abs(t[0] - straight_idx))[0]
-        else:
-            # No goal position: among safe trajectories, prefer the one closest to straight
-            max_traj_idx = min(safe_trajectories, key=lambda t: abs(t[0] - straight_idx))[0]
+                # no goal position, choose the index that maximizes distance from the obstacles
+                if max_traj_score < nearest_voxel_dist:
+                    # we have found a trajectory that gets us closer to goal
+                    max_traj_idx = traj_idx
+                    max_traj_score = nearest_voxel_dist
 
     if max_traj_idx is None:
         # No trajectory meets the dist_threshold criterion, crazyflie should stop.
         shouldStop = True
     return shouldStop, max_traj_idx
+
 
 """
 Load config.yml file
