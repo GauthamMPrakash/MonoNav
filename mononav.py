@@ -88,8 +88,9 @@ if model_device.type != 'cuda' and torch.cuda.is_available():
 # GLOBAL VARIABLES
 last_key_pressed = None  # store the last key pressed
 shouldStop = False
+allow_smart_rtl = False   # only allow SmartRTL when goal reached or no safe trajectory
 trajectory_execution_stop_event = threading.Event()
-current_traj_index = None  # holds the trajectory index to be executed by the thread
+traj_index = None
 trajectory_start_time = None  # when the current trajectory started
 
 # Intrinsics for undistortion
@@ -115,6 +116,8 @@ vbg = VoxelBlockGrid(depth_scale, depth_max, trunc_voxel_multiplier, o3d.core.De
 trajlib_dir = config['trajlib_dir']
 traj_list = get_trajlist(trajlib_dir)
 traj_linesets, period, forward_speed, amplitudes = get_traj_linesets(traj_list)
+if config['forward_speed'] is not None:
+    forward_speed = config['forward_speed']
 max_traj_idx = int(len(traj_list)/2) # set initial value to that of FORWARD flight (should be median value)
 print("Initial trajectory chosen: %d out of %d"%(max_traj_idx, len(traj_list)))
 print(f"Trajectory amplitudes: left(idx 0)={float(amplitudes[0]):.3f}, right(idx {len(amplitudes)-1})={float(amplitudes[-1]):.3f}")
@@ -181,20 +184,20 @@ listener.start()
 # Trajectory execution thread: sends motion commands at fixed rate
 def trajectory_execution_loop(command_hz=10):
     """Background thread: execute trajectory with smooth velocity commands at fixed rate."""
-    global current_traj_index, trajectory_start_time
+    global traj_index, trajectory_start_time
     period_s = 1.0 / max(command_hz, 1)
     next_command = time.monotonic()
     
     # log whenever the execution loop begins iteration (for debugging thread activity)
     while not trajectory_execution_stop_event.is_set():
-        # (current_traj_index may be None until a trajectory is selected)
-        if current_traj_index is not None and trajectory_start_time is not None:
+        # (traj_index may be None until a trajectory is selected)
+        if traj_index is not None and trajectory_start_time is not None:
             elapsed = time.time() - trajectory_start_time
             
             # Check if we've exceeded the trajectory period
             if elapsed < period:
                 # Compute smooth yaw rate for this instant
-                yawrate = amplitudes[current_traj_index] * np.sin(np.pi / period * elapsed)  # rad/s
+                yawrate = amplitudes[traj_index] * np.sin(np.pi / period * elapsed)  # rad/s
                 yvel = yawrate * yvel_gain
                 yawrate = yawrate * yawrate_gain
                 if FLY_VEHICLE:
@@ -212,13 +215,17 @@ def main():
     global shouldStop
     global last_key_pressed
     global max_traj_idx
-    global current_traj_index
+    global traj_index
     global trajectory_start_time
     global mtx
     global dist
     global optimal_mtx
     global roi
     global goal_position
+    global traj_max_none_count
+
+    traj_none_count = 0
+    traj_max_none_count = 2                      # how many times traj chooser can predict no safe traj before we force stop
 
     while True:
         # ARDUCOPTER CONTROL
@@ -275,11 +282,16 @@ def main():
         mavc.en_pose_stream()                    # Commands AP to stream poses at a deafult value of 15 Hz
         start_pose_thread()                      # Start background pose polling at 10 Hz (non-blocking)
         mavc.heading_offset_init()
-        # Keep goal_position in RDF frame (same as camera_position from get_drone_pose)
+        # Convert RDF goal to NED, then reorder to internal [E, D, N]
+        # to match camera_position[0:-1, -1] from get_pose_matrix().
         if goal_position is not None:
-            goal_position = np.array(rdf_goal_to_ned(goal_position[0], goal_position[1], goal_position[2], mavc.heading_offset)).reshape(1, 3)
+            goal_position = np.array(
+                rdf_goal_to_ned(goal_position[0], goal_position[1], goal_position[2], mavc.heading_offset),
+                dtype=np.float64,
+            )
+            print(f"Goal position (NED): {goal_position}")
+            goal_position = np.array([goal_position[1], goal_position[2], goal_position[0]], dtype=np.float64).reshape(1, 3)
         mavc.printd(f"Heading offset : {mavc.heading_offset*180/np.pi}")
-        mavc.printd(f"Goal position (NED): {goal_position}")
     
         print("Starting control.")
         traj_counter = 0         # how many trajectory iterations have we done?
@@ -315,10 +327,26 @@ def main():
                         print("No safe trajectory")
                     time.sleep(0.1)
                     continue
+
                 traj_index = max_traj_idx
+
             elif last_key_pressed == 'h':
                 print("Pressed h. Hovering in place.")
                 mavc.send_body_offset_ned_vel(0, 0, yaw_rate=0) # hover in place
+                time.sleep(0.1)
+                continue
+            elif last_key_pressed == 'r':
+                # only allow RTL if flagged by goal/no-safe-traj
+                if allow_smart_rtl:
+                    print("Pressed r. Switching to SmartRTL.")
+                    if FLY_VEHICLE:
+                        mavc.set_mode('SmartRTL')
+                    shouldStop = True
+                    break
+                else:
+                    last_key_pressed = 'g'
+                    time.sleep(0.1)
+                    continue
             elif last_key_pressed == 'c': #end control and land
                 mavc.set_mode('LAND')
                 print("Pressed c. Ending control.")
@@ -342,7 +370,6 @@ def main():
 
         # Execute the selected trajectory in background thread.
         # Main thread now focuses on frame processing and TSDF integration.
-            current_traj_index = traj_index
             trajectory_start_time = time.time()
             traj_start = trajectory_start_time
             
@@ -356,7 +383,7 @@ def main():
                     dist_to_goal = np.linalg.norm(camera_position[0:-1, -1]-goal_position[0])
                     if dist_to_goal <= min_dist2goal:
                         print("Reached goal!")
-                        shouldStop = True
+                        allow_smart_rtl = True
                         last_key_pressed = 'c'
                         break
 
@@ -405,18 +432,24 @@ def main():
 
             shouldStop, max_traj_idx = choose_primitive(vbg.vbg, camera_position, traj_linesets, goal_position, min_dist2obs, filterYvals, filterWeights, filterTSDF, weight_threshold)
             if max_traj_idx is None:
-                no_safe_traj = True
-                shouldStop = True
+                traj_none_count += 1
+                if traj_none_count > traj_max_none_count:
+                    no_safe_traj = True
+                    allow_smart_rtl = True
                 print("[INFO] No safe trajectory. Hovering in place.")
             else:
                 no_safe_traj = False
-            print("SELECTED max_traj_idx: ", max_traj_idx)
+
+            mavc.printd("SELECTED max_traj_idx: ", max_traj_idx)
 
     # Exited while(!shouldStop); end control!
         # print("shouldStop: ", shouldStop)
         # print(f"[INFO] {end_message}")
         print("[INFO] End control.")
-        print("[INFO] Current NED coords:" , camera_position[0:-1, -1])
+        print("[INFO] Current distance to goal (m): ", np.linalg.norm(camera_position-goal_position[0]) if goal_position is not None else "N/A")
+        camera_position = [camera_position[0:-1, -1][2], camera_position[0:-1, -1][0], camera_position[0:-1, -1][1]] # print in NED order for readability
+        print("[INFO] Current NED coords:" , camera_position)
+        print("[INFO] Current RDF coords:", ned_to_rdf(camera_position[0], camera_position[1], camera_position[2], mavc.heading_offset))
 
         # save and view vbg
         print("Saving to {}...".format(npz_save_filename))
@@ -433,7 +466,6 @@ def main():
     except KeyboardInterrupt:
         mavc.set_mode('LAND')
         print("\n[INTERRUPT] Ctrl+C detected. Sent land command.")
-        # shouldStop = True
             
     finally:
         # Stop trajectory execution thread

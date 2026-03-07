@@ -65,7 +65,7 @@ EKF_LAT = config['EKF_LAT']
 EKF_LON = config['EKF_LON']
 STREAM_URL = config['camera_ip']       # YOUR ESP32 HTTP MJPEG stream
 
-DEPTH_RANGE_M = [0.2, 20.0]                 # min and max ranges to be computed
+DEPTH_RANGE_M = [0.2, 10.0]                 # min and max ranges to be computed
 min_depth_cm = int(DEPTH_RANGE_M[0] * 100)  # In cm
 max_depth_cm = int(DEPTH_RANGE_M[1] * 100)  # In cm, should be a little conservative
 distances_array_length = 72
@@ -79,7 +79,7 @@ debug_enable = True
 model_configs = {
     'vits': {'encoder': 'vits', 'features': 64, 'out_channels': [48, 96, 192, 384]},
     'vitb': {'encoder': 'vitb', 'features': 128, 'out_channels': [96, 192, 384, 768]},
-    'vitl': {'encoder': 'vitl', 'features': 256, 'out_channels': [256, 512, 1024, 1024]},
+#   'vitl': {'encoder': 'vitl', 'features': 256, 'out_channels': [256, 512, 1024, 1024]},
 }
 
 # Initialize the DepthAnythingV2 model and load the checkpoint
@@ -111,6 +111,7 @@ depth_vfov_deg = None
 DEPTH_WIDTH = None
 DEPTH_HEIGHT = None
 distances_lock = threading.Lock()
+vehicle_pose_lock = threading.Lock()
 obstacle_sender_stop_event = threading.Event()
 # Event and thread for periodic timesync calls
 timesync_stop_event = threading.Event()
@@ -250,8 +251,11 @@ def find_obstacle_line_height():
     obstacle_line_height = DEPTH_HEIGHT * obstacle_line_height_ratio
 
     # Compensate for the vehicle's pitch angle if data is available
-    if vehicle_pitch_rad is not None and depth_vfov_deg is not None:
-        delta_height = m.sin(vehicle_pitch_rad / 2) / m.sin(m.radians(depth_vfov_deg) / 2) * DEPTH_HEIGHT
+    with vehicle_pose_lock:
+        pitch_rad = vehicle_pitch_rad
+    
+    if pitch_rad is not None and depth_vfov_deg is not None:
+        delta_height = m.sin(pitch_rad / 2) / m.sin(m.radians(depth_vfov_deg) / 2) * DEPTH_HEIGHT
         obstacle_line_height += delta_height
 
     # Sanity check
@@ -450,10 +454,15 @@ def main():
 
     start_pose_thread()  # Start background pose polling at 10 Hz (non-blocking)
     mavc.heading_offset_init()
-        # Keep goal_position in RDF frame (same as camera_position from get_drone_pose)
+    # Convert RDF goal to NED, then reorder to internal [E, D, N]
+    # to match camera_position[0:-1, -1] from get_pose_matrix().
     if goal_position is not None:
-        goal_position = np.array(rdf_goal_to_ned(goal_position[0], goal_position[1], goal_position[2], mavc.heading_offset)).reshape(1, 3)
-    
+        goal_position = np.array(
+            rdf_goal_to_ned(goal_position[0], goal_position[1], goal_position[2], mavc.heading_offset),
+            dtype=np.float64,
+        )
+        print(f"Goal position (NED): {goal_position}")
+        goal_position = np.array([goal_position[1], goal_position[2], goal_position[0]], dtype=np.float64).reshape(1, 3)
     mavc.printd(f"Heading offset : {mavc.heading_offset*180/np.pi}")
     mavc.printd(f"Goal position (NED): {goal_position}")
 
@@ -475,8 +484,10 @@ def main():
         if debug_enable:
             cv2.imshow("Camera Stream", bgr)
         # Get latest pose directly (no buffering) - read fresh values each iteration
-        pos_x, pos_y, pos_z, vehicle_yaw_rad, vehicle_pitch_rad, vehicle_roll_rad = get_latest_pose()
-        camera_position = get_pose_matrix(pos_x, pos_y, pos_z, vehicle_yaw_rad, vehicle_pitch_rad, vehicle_roll_rad)
+        pos_x, pos_y, pos_z, vehicle_yaw_rad, pitch_rad, vehicle_roll_rad = get_latest_pose()
+        with vehicle_pose_lock:
+            vehicle_pitch_rad = pitch_rad
+        camera_position = get_pose_matrix(pos_x, pos_y, pos_z, vehicle_yaw_rad, pitch_rad, vehicle_roll_rad)
 
         transform_bgr = transform_image(bgr, mtx, dist, optimal_mtx, roi)
         transform_rgb = cv2.cvtColor(transform_bgr, cv2.COLOR_BGR2RGB)
@@ -541,7 +552,7 @@ def main():
                     if not goal_nav_active:
                         print("Pressed g. Using BendyRuler navigation to goal.")
                         mavc.set_mode('GUIDED')
-                        mavc.send_local_ned_pos(goal_position[0, 0], goal_position[0, 1])
+                        mavc.send_local_ned_pos(goal_position[0, 2], goal_position[0, 0], goal_position[0, 1]) # remember, goal_position is now in EDN
                         goal_nav_active = True
                     
                     # Check distance to goal (both in NED frame after heading correction)
@@ -552,25 +563,28 @@ def main():
                         last_key_pressed = 'c'
                         goal_nav_active = False
                     
-                    # Companion-side safety: emergency hover if obstacle < threshold
-                    with distances_lock:
-                        valid = distances[distances < (max_depth_cm + 1)]
-                    if valid.size > 0:
-                        nearest_m = float(np.min(valid)) / 100.0
-                        if nearest_m < min_obstacle_dist_m:
-                            mavc.printd(
-                                "[SAFETY] Obstacle at %.2fm < %.2fm — emergency hover!"
-                                % (nearest_m, min_obstacle_dist_m)
-                            )
-                            mavc.send_body_offset_ned_vel(0, 0, 0, 0)
+                    # # Companion-side safety: emergency hover if obstacle < threshold
+                    # with distances_lock:
+                    #     valid = distances[distances < (max_depth_cm + 1)]
+                    # if valid.size > 0:
+                    #     nearest_m = float(np.min(valid)) / 100.0
+                    #     if nearest_m < min_obstacle_dist_m:
+                    #         mavc.printd(
+                    #             "[SAFETY] Obstacle at %.2fm < %.2fm — emergency hover!"
+                    #             % (nearest_m, min_obstacle_dist_m)
+                    #         )
+                    #         mavc.send_body_offset_ned_vel(0, 0, 0, 0)
                 else:
                     print("Pressed g. Moving forward.")
                     mavc.send_body_offset_ned_vel(forward_speed, 0, 0, 0)
 
             elif last_key_pressed == 'h':
                 print("Pressed h. Hovering in place.")
-                mavc.send_body_offset_ned_vel(0, 0, 0, 0)
                 goal_nav_active = False  # Reset flag when switching modes
+                last_key_pressed = None
+                mavc.send_body_offset_ned_vel(0, 0, 0, 0)
+                time.sleep(0.1)
+                continue
 
             elif last_key_pressed == 'c':  # end control and land
                 print("Pressed c. Landing.")
@@ -582,6 +596,7 @@ def main():
                 print("Pressed q. EMERGENCY STOP.")
                 mavc.eSTOP()
                 goal_nav_active = False
+                
 
     except KeyboardInterrupt:
         mavc.printd("\n[INTERRUPT] Ctrl+C detected in main loop, shutting down...")

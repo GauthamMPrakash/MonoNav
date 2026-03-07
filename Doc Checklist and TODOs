@@ -5,4 +5,3 @@ DOCs:
 TODOs:
 - Fix all other scripts to work under the new project structure
 - Try to implement a more performant way of saving data rather than as multiple files
-- Remove config.yml from gitignore before code release

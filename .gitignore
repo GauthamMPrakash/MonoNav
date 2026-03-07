@@ -1,5 +1,3 @@
-*config.yml
-
 # Project files
 # Ignore everything in the /data/ folder
 /data/*
