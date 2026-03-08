@@ -327,8 +327,10 @@ def get_traj_linesets(traj_list):
 
 """
 MonoNav Planner: Return the chosen trajectory index given the current position, current reconstruction, trajectory library, and goal position.
+Conservative approach: treats unexplored space as unsafe.
 """
-def choose_primitive(vbg, camera_position, traj_linesets, goal_position, dist_threshold, filterYvals, filterWeights, filterTSDF, weight_threshold):
+def choose_primitive(vbg, camera_position, traj_linesets, goal_position, dist_threshold, filterYvals, filterWeights, filterTSDF, weight_threshold, 
+                     check_explored=True, exploration_weight_threshold=5.0, exploration_radius=0.15):
 
     # Boolean for stopping criteria
     shouldStop = False
@@ -342,8 +344,16 @@ def choose_primitive(vbg, camera_position, traj_linesets, goal_position, dist_th
     # IMPORTANT
     # Use voxel_indices to rearrange weights and tsdf to match voxel_coords
     # Otherwise, the ordering of voxels from the hashmap is non-deterministic
-    weights = weights[voxel_indices]
-    tsdf = tsdf[voxel_indices]
+    weights_full = weights[voxel_indices]  # Keep full weights for exploration check
+    tsdf_full = tsdf[voxel_indices]        # Keep full tsdf for exploration check
+    
+    # Store original full voxel data for exploration checking
+    voxel_coords_full = voxel_coords.clone() if hasattr(voxel_coords, 'clone') else voxel_coords.copy()
+    
+    # Now filter for obstacle detection
+    weights = weights_full.clone() if hasattr(weights_full, 'clone') else weights_full.copy()
+    tsdf = tsdf_full.clone() if hasattr(tsdf_full, 'clone') else tsdf_full.copy()
+    voxel_coords = voxel_coords_full.clone() if hasattr(voxel_coords_full, 'clone') else voxel_coords_full.copy()
 
     # Generate mask to filter out y values (vertical) (+y is DOWN)
     # This is useful to filter out the floor, and avoid obstacles in-plane
@@ -387,6 +397,10 @@ def choose_primitive(vbg, camera_position, traj_linesets, goal_position, dist_th
     # Convert goal_position to torch tensor if provided (for GPU-accelerated distance computation)
     if goal_position is not None:
         goal_position_torch = torch.from_numpy(goal_position).to(torch_device).float()
+    
+    # Convert full voxel data to torch for exploration checking
+    voxel_coords_full_torch = torch.from_numpy(voxel_coords_full.cpu().numpy()).to(torch_device).float()
+    weights_full_torch = torch.from_numpy(weights_full.cpu().numpy()).to(torch_device).float()
 
     # iterate over the sorted traj linesets
     for traj_idx, traj_linset in enumerate(traj_linesets):
@@ -404,29 +418,233 @@ def choose_primitive(vbg, camera_position, traj_linesets, goal_position, dist_th
         min_dist_sq = torch.min(tmp)
         nearest_voxel_dist = torch.sqrt(min_dist_sq).item()  # convert to python float
         
-        mavc.printd(f"traj {traj_idx}: nearest_obstacle={nearest_voxel_dist:.3f}m (threshold={dist_threshold}m)")
-        if nearest_voxel_dist > dist_threshold:
-            # the trajectory meets the dist_threshold criterion
+        # CONSERVATIVE PLANNING: Check if trajectory passes through well-explored space
+        is_explored = True
+        exploration_coverage = 1.0
+        if check_explored:
+            # For each point on trajectory, check if nearby space has been explored
+            exploration_scores = []
+            for pt_idx in range(len(pts_torch)):
+                pt = pts_torch[pt_idx:pt_idx+1]  # Keep batch dimension
+                # Find all voxels within exploration_radius of this trajectory point
+                dists_to_pt = torch.cdist(voxel_coords_full_torch, pt, p=2).squeeze()
+                nearby_mask = dists_to_pt < exploration_radius
+                
+                if torch.sum(nearby_mask) > 0:
+                    # Check if nearby voxels are well-explored (high weight)
+                    nearby_weights = weights_full_torch[nearby_mask]
+                    max_nearby_weight = torch.max(nearby_weights).item()
+                    avg_nearby_weight = torch.mean(nearby_weights).item()
+                    exploration_scores.append(min(avg_nearby_weight / exploration_weight_threshold, 1.0))
+                    
+                    if max_nearby_weight < exploration_weight_threshold:
+                        is_explored = False
+                        mavc.printd(f"traj {traj_idx}: point {pt_idx} passes through unexplored space (max_weight={max_nearby_weight:.1f} < {exploration_weight_threshold})")
+                else:
+                    # No voxels nearby = completely unexplored
+                    is_explored = False
+                    exploration_scores.append(0.0)
+                    mavc.printd(f"traj {traj_idx}: point {pt_idx} has no nearby voxels (unexplored)")
+            
+            exploration_coverage = np.mean(exploration_scores) if exploration_scores else 0.0
+        
+        mavc.printd(f"traj {traj_idx}: nearest_obstacle={nearest_voxel_dist:.3f}m (threshold={dist_threshold}m), explored={is_explored}, coverage={exploration_coverage:.2f}")
+        
+        # Only consider trajectories that pass both obstacle and exploration checks
+        if nearest_voxel_dist > dist_threshold and is_explored:
+            # the trajectory meets the dist_threshold criterion AND is well-explored
             if goal_position is not None:
                 # the trajectory satisfies the dist_threshold; let's compute the goal score
                 tmp_to_goal = torch.cdist(goal_position_torch, pts_torch, p=2).square()
                 dst_to_goal = torch.sqrt(torch.min(tmp_to_goal)).item()
-                if dst_to_goal < min_goal_score:
+                # Weight goal distance by exploration coverage for tie-breaking
+                adjusted_goal_score = dst_to_goal * (2.0 - exploration_coverage)
+                if adjusted_goal_score < min_goal_score:
                     # we have a trajectory that gets us closer to the goal
-                    mavc.printd("traj %d gets us closer to the goal: %f"%(traj_idx, dst_to_goal))
+                    mavc.printd("traj %d gets us closer to the goal: %f (adjusted: %f)"%(traj_idx, dst_to_goal, adjusted_goal_score))
                     max_traj_idx = traj_idx
-                    min_goal_score = dst_to_goal
+                    min_goal_score = adjusted_goal_score
             else:
                 # no goal position, choose the index that maximizes distance from the obstacles
-                if max_traj_score < nearest_voxel_dist:
-                    # we have found a trajectory that gets us closer to goal
+                # Weight by exploration coverage to prefer well-explored paths
+                adjusted_traj_score = nearest_voxel_dist * exploration_coverage
+                if adjusted_traj_score > max_traj_score:
+                    # we have found a trajectory that maximizes safety in explored space
                     max_traj_idx = traj_idx
-                    max_traj_score = nearest_voxel_dist
+                    max_traj_score = adjusted_traj_score
 
     if max_traj_idx is None:
-        # No trajectory meets the dist_threshold criterion, crazyflie should stop.
+        # No trajectory meets the safety criteria (dist_threshold + exploration), drone should stop.
+        mavc.printd("No safe explored trajectory found - stopping")
         shouldStop = True
     return shouldStop, max_traj_idx
+
+
+"""
+Closed-loop trajectory tracking: Compute tracking error relative to desired trajectory.
+Returns the cross-track error, along-track error, and altitude error.
+
+Args:
+    current_position: numpy array [x, y, z] in RDF frame (meters)
+    trajectory_points: numpy array of shape (N, 3) representing trajectory waypoints in RDF frame
+    trajectory_start_time: timestamp when trajectory execution started
+    current_time: current timestamp
+    forward_speed: forward velocity of the trajectory (m/s)
+
+Returns:
+    cross_track_error: lateral deviation from trajectory (meters)
+    along_track_error: longitudinal deviation from trajectory (meters)  
+    altitude_error: vertical deviation from trajectory (meters)
+    nearest_point_idx: index of nearest trajectory point
+    desired_position: the desired position on trajectory at current time
+"""
+def compute_trajectory_tracking_error(current_position, trajectory_points, trajectory_start_time, 
+                                     current_time, forward_speed):
+    # Compute expected progress along trajectory based on time
+    elapsed_time = current_time - trajectory_start_time
+    expected_distance = forward_speed * elapsed_time
+    
+    # Find the point on trajectory corresponding to expected distance
+    cumulative_distances = np.zeros(len(trajectory_points))
+    for i in range(1, len(trajectory_points)):
+        segment_dist = np.linalg.norm(trajectory_points[i] - trajectory_points[i-1])
+        cumulative_distances[i] = cumulative_distances[i-1] + segment_dist
+    
+    # Find nearest point on trajectory (time-based)
+    nearest_point_idx = np.argmin(np.abs(cumulative_distances - expected_distance))
+    nearest_point_idx = min(nearest_point_idx, len(trajectory_points) - 1)
+    desired_position = trajectory_points[nearest_point_idx]
+    
+    # Compute error vector
+    error_vector = current_position - desired_position
+    
+    # Decompose error into cross-track, along-track, and altitude components
+    if nearest_point_idx < len(trajectory_points) - 1:
+        # Compute trajectory direction at this point
+        trajectory_direction = trajectory_points[nearest_point_idx + 1] - trajectory_points[nearest_point_idx]
+        trajectory_direction = trajectory_direction / (np.linalg.norm(trajectory_direction) + 1e-8)
+        
+        # Along-track error (projection onto trajectory direction)
+        along_track_error = np.dot(error_vector[:2], trajectory_direction[:2])  # Only x-z plane
+        
+        # Cross-track error (perpendicular to trajectory)
+        cross_track_vector = error_vector[:2] - along_track_error * trajectory_direction[:2]
+        cross_track_error = np.linalg.norm(cross_track_vector)
+    else:
+        # At end of trajectory
+        along_track_error = 0.0
+        cross_track_error = np.linalg.norm(error_vector[:2])
+    
+    # Altitude error is simply the y-component (down direction in RDF)
+    altitude_error = error_vector[1]
+    
+    return cross_track_error, along_track_error, altitude_error, nearest_point_idx, desired_position
+
+
+"""
+Closed-loop control: Apply feedback correction to trajectory tracking.
+Uses PID-like control to compute velocity corrections.
+
+Args:
+    cross_track_error: lateral deviation (meters)
+    along_track_error: longitudinal deviation (meters)
+    altitude_error: vertical deviation (meters)
+    dt: time step (seconds)
+    gains: dict with keys 'kp_cross', 'kd_cross', 'kp_along', 'kd_along', 'kp_alt', 'kd_alt'
+    prev_errors: dict with previous error values for derivative term (optional)
+
+Returns:
+    velocity_correction: numpy array [vx, vy, vz] in RDF frame (m/s)
+    updated_prev_errors: dict with current errors for next iteration
+"""
+def apply_feedback_correction(cross_track_error, along_track_error, altitude_error, dt, gains, prev_errors=None):
+    if prev_errors is None:
+        prev_errors = {'cross_track': 0.0, 'along_track': 0.0, 'altitude': 0.0}
+    
+    # Extract gains with defaults
+    kp_cross = gains.get('kp_cross', 0.5)
+    kd_cross = gains.get('kd_cross', 0.1)
+    kp_along = gains.get('kp_along', 0.3)
+    kd_along = gains.get('kd_along', 0.05)
+    kp_alt = gains.get('kp_alt', 0.4)
+    kd_alt = gains.get('kd_alt', 0.08)
+    
+    # Compute derivative terms (rate of change of error)
+    if dt > 0:
+        d_cross_track = (cross_track_error - prev_errors['cross_track']) / dt
+        d_along_track = (along_track_error - prev_errors['along_track']) / dt
+        d_altitude = (altitude_error - prev_errors['altitude']) / dt
+    else:
+        d_cross_track = d_along_track = d_altitude = 0.0
+    
+    # PD control for each axis
+    # Note: correction is negative of error (to reduce error)
+    correction_cross = -(kp_cross * cross_track_error + kd_cross * d_cross_track)
+    correction_along = -(kp_along * along_track_error + kd_along * d_along_track)
+    correction_altitude = -(kp_alt * altitude_error + kd_alt * d_altitude)
+    
+    # Limit corrections to reasonable values (safety)
+    max_correction = 1.0  # m/s
+    correction_cross = np.clip(correction_cross, -max_correction, max_correction)
+    correction_along = np.clip(correction_along, -max_correction, max_correction)
+    correction_altitude = np.clip(correction_altitude, -max_correction, max_correction)
+    
+    # Build velocity correction vector in RDF frame
+    # Assuming cross-track is in x (right), altitude is y (down), along-track is z (front)
+    velocity_correction = np.array([correction_cross, correction_altitude, correction_along])
+    
+    # Update previous errors for next iteration
+    updated_prev_errors = {
+        'cross_track': cross_track_error,
+        'along_track': along_track_error,
+        'altitude': altitude_error
+    }
+    
+    return velocity_correction, updated_prev_errors
+
+
+"""
+Closed-loop trajectory execution helper: Get current tracking state.
+Combines pose reading with trajectory tracking error computation.
+
+Args:
+    trajectory_points: numpy array of shape (N, 3) in RDF frame
+    trajectory_start_time: timestamp when execution started  
+    forward_speed: trajectory forward velocity (m/s)
+    current_pose_matrix: current 4x4 pose matrix (if None, will query from vehicle)
+
+Returns:
+    tracking_state: dict containing position, errors, desired_position, and pose_matrix
+"""
+def get_trajectory_tracking_state(trajectory_points, trajectory_start_time, forward_speed, current_pose_matrix=None):
+    current_time = time.time()
+    
+    # Get current pose
+    if current_pose_matrix is None:
+        x, y, z, yaw, pitch, roll = get_latest_pose()
+        current_pose_matrix = get_pose_matrix(x, y, z, yaw, pitch, roll)
+    
+    # Extract position from pose matrix (RDF frame)
+    current_position = current_pose_matrix[:3, 3]
+    
+    # Compute tracking errors
+    cross_track_error, along_track_error, altitude_error, nearest_idx, desired_position = \
+        compute_trajectory_tracking_error(current_position, trajectory_points, trajectory_start_time, 
+                                         current_time, forward_speed)
+    
+    tracking_state = {
+        'position': current_position,
+        'cross_track_error': cross_track_error,
+        'along_track_error': along_track_error,
+        'altitude_error': altitude_error,
+        'total_error': np.sqrt(cross_track_error**2 + along_track_error**2 + altitude_error**2),
+        'nearest_waypoint_idx': nearest_idx,
+        'desired_position': desired_position,
+        'pose_matrix': current_pose_matrix,
+        'timestamp': current_time
+    }
+    
+    return tracking_state
 
 
 """
