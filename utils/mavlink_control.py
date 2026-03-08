@@ -44,7 +44,7 @@ def connect_drone(IP, baud=115200):
     printd(f"Heartbeat received from system {drone.target_system} component {drone.target_component}")
     return drone
 
-def set_ekf_origin(lat, lon, alt):
+def set_ekf_origin(lat, lon, alt=0):
     """
     Set EKF origin for local NED frame
     This is required to use optical flow to get pose estimates without a GPS
@@ -71,7 +71,7 @@ def set_mode(mode_name):
         mode_id
     )
     printd(f"Switching to {mode_name}...")
-    time.sleep(0.05)
+    time.sleep(0.1)
 
 def arm(arm_state=1):
     """
@@ -79,8 +79,7 @@ def arm(arm_state=1):
     """
     if arm_state:
         printd("Arming motors...")
-    else:
-        printd("Disarming")
+
     drone.mav.command_long_send(
         drone.target_system,
         drone.target_component,
@@ -96,6 +95,8 @@ def arm(arm_state=1):
             print("Vehicle armed")
             break
         time.sleep(0.1)
+    if not arm_state:
+        printd("Disarming motors...")
 
 def takeoff(target_alt):
     """
@@ -249,7 +250,7 @@ def heading_offset_init():
     relative heading.
     """
     # get_pose returns (x, y, z, yaw, pitch, roll)
-    _, _, _, yaw, _, _ = get_pose(blocking=True)
+    _, _, _, yaw, _, _ = get_pose()
     heading_offset = yaw
     return heading_offset
 

@@ -381,7 +381,7 @@ def main():
 
     while True:
         vehicle = mavc.connect_drone(IP, baud=baud)
-        mavc.set_ekf_origin(EKF_LAT, EKF_LON, 0)
+        mavc.set_ekf_origin(EKF_LAT, EKF_LON)
         mavc.en_pose_stream()
         reboot = mavc.reboot_if_EKF_origin(0.5)
         if reboot:
