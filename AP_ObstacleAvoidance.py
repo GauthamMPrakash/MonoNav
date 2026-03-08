@@ -48,6 +48,8 @@ from pynput import keyboard                  # Keyboard control
 from utils.utils import *
 import utils.mavlink_control as mavc         # import the mavlink helper script 
 
+debug_enable = True
+
 # LOAD VALUES FROM CONFIG FILE
 config = load_config('config.yml')
 forward_speed = config['forward_speed']
@@ -55,7 +57,7 @@ forward_speed = config['forward_speed']
 INPUT_SIZE = config['INPUT_SIZE']      # Image size
 CHECKPOINT = config['DA2_CHECKPOINT']  # path to checkpoint for DepthAnythingV2
 ENCODER = CHECKPOINT[-8:-4]            # extract encoder type from checkpoint filename (assumes format "DA2_{ENCODER}_checkpoint.pth")  
-DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
+DEVICE = 'cuda:0' if torch.cuda.is_available() else 'cpu'
 
 IP = config['IP']                      # dronebridge IP
 height = config['height']
@@ -65,15 +67,13 @@ EKF_LAT = config['EKF_LAT']
 EKF_LON = config['EKF_LON']
 STREAM_URL = config['camera_ip']       # YOUR ESP32 HTTP MJPEG stream
 
-DEPTH_RANGE_M = [0.2, 10.0]                 # min and max ranges to be computed
+DEPTH_RANGE_M = [0.2, 20.0]                 # min and max ranges to be computed
 min_depth_cm = int(DEPTH_RANGE_M[0] * 100)  # In cm
 max_depth_cm = int(DEPTH_RANGE_M[1] * 100)  # In cm, should be a little conservative
 distances_array_length = 72
 angle_offset = None
 increment_f  = None
 distances = np.ones((distances_array_length,), dtype=np.uint16) * (max_depth_cm + 1)
-
-debug_enable = True
 
 # DepthAnythingV2 model configurations. You typically only need small or base models
 model_configs = {
@@ -110,6 +110,7 @@ depth_hfov_deg = None
 depth_vfov_deg = None
 DEPTH_WIDTH = None
 DEPTH_HEIGHT = None
+ctrl_c_exit = False
 distances_lock = threading.Lock()
 vehicle_pose_lock = threading.Lock()
 obstacle_sender_stop_event = threading.Event()
@@ -374,6 +375,7 @@ def main():
     global goal_position
     global mtx, dist, optimal_mtx, roi
     global vehicle_pitch_rad
+    global ctrl_c_exit
 
     goal_nav_active = False  # Track if goal navigation command has been sent
 
@@ -404,16 +406,17 @@ def main():
     timesync_thread.start()
     
     cap = VideoCapture(STREAM_URL)
-    for _ in range(0, config['num_pre_depth_frames']):
+    for _ in range(0, max(config['num_pre_depth_frames'], 1)):
         bgr = cap.read()
         compute_depth(bgr, depth_anything, INPUT_SIZE, make_colormap=False)
         cv2.waitKey(1)
     cv2.destroyAllWindows()
 
     # Scale intrinsics if camera resolution differs from calibration resolution
-    first_frame = cap.read()
-    if first_frame is not None:
-        DEPTH_HEIGHT, DEPTH_WIDTH = first_frame.shape[:2]
+    if bgr is not None:
+        if DEPTH_HEIGHT is None or DEPTH_WIDTH is None:
+            DEPTH_HEIGHT, DEPTH_WIDTH = bgr.shape[:2]
+        mavc.printd("DEPTH_HEIGHT: {}, DEPTH_WIDTH: {}".format(DEPTH_HEIGHT, DEPTH_WIDTH))
         calib_width, calib_height = get_calibration_resolution(camera_calibration_path)
         mtx, dist, optimal_mtx, roi = adjust_intrinsics_to_frame_size(
             mtx, dist, optimal_mtx, roi, DEPTH_WIDTH, DEPTH_HEIGHT, calib_width, calib_height
@@ -428,12 +431,9 @@ def main():
         vbg.intrinsic_matrix = vbg_intrinsics
         vbg.depth_intrinsic = o3d.core.Tensor(vbg_intrinsics, o3d.core.Dtype.Float64)
 
-    if DEPTH_HEIGHT is None or DEPTH_WIDTH is None:
-        if first_frame is not None:
-            DEPTH_HEIGHT, DEPTH_WIDTH = first_frame.shape[0], first_frame.shape[1]
-            mavc.printd("DEPTH_HEIGHT: {}, DEPTH_WIDTH: {}".format(DEPTH_HEIGHT, DEPTH_WIDTH))
-        else:
-            raise RuntimeError("Unable to read first frame from camera")
+    else:
+        raise RuntimeError("Unable to read first frame from camera")
+    
     set_obstacle_distance_params_from_intrinsics(mtx, DEPTH_WIDTH, DEPTH_HEIGHT)
 
     if enable_msg_obstacle_distance:
@@ -445,6 +445,7 @@ def main():
         )
         sender_thread.start()
 
+    mavc.heading_offset_init()
     if FLY_VEHICLE:
         print("Arming Motors!")
         mavc.set_mode('GUIDED')
@@ -453,7 +454,6 @@ def main():
         mavc.set_speed(forward_speed)
 
     start_pose_thread()  # Start background pose polling at 10 Hz (non-blocking)
-    mavc.heading_offset_init()
     # Convert RDF goal to NED, then reorder to internal [E, D, N]
     # to match camera_position[0:-1, -1] from get_pose_matrix().
     if goal_position is not None:
@@ -475,8 +475,7 @@ def main():
         print("  'h' - Hover (stop all movement)")
         print("  'c' - Land")
         print("  'q' - EMERGENCY STOP (disarm immediately)")
-    print("  'Ctrl-C' - Quit program")
-    print("========================\n")
+    print("  'Ctrl-C' - Quit program\n")
 
     try:
       while not shouldStop:
@@ -595,11 +594,22 @@ def main():
             elif last_key_pressed == 'q':  # end flight immediately
                 print("Pressed q. EMERGENCY STOP.")
                 mavc.eSTOP()
+                shouldStop = True
                 goal_nav_active = False
                 
 
     except KeyboardInterrupt:
-        mavc.printd("\n[INTERRUPT] Ctrl+C detected in main loop, shutting down...")
+        mavc.printd("\n[INTERRUPT] Ctrl+C detected. Quitting...")
+        ctrl_c_exit = True
+        if FLY_VEHICLE:
+            try:
+                mavc.printd("[INTERRUPT] Sending immediate LAND command...")
+                mavc.set_mode('LAND')
+            except Exception:
+                pass
+        # signal background threads to stop
+        obstacle_sender_stop_event.set()
+        timesync_stop_event.set()
         shouldStop = True
     except Exception as e:
         mavc.printd(f"\n[ERROR] Exception in main loop: {e}")
@@ -607,28 +617,39 @@ def main():
         traceback.print_exc()
         shouldStop = True
     finally:
-        # Stop background threads
-        print(f"[INFO] Current NED coordinates: {camera_position[0:-1, -1]}")
+        # Stop background threads and cleanup. If Ctrl-C requested immediate exit,
+        # skip long operations (VBG save/visualization) and additional landing.
+
+        mavc.printd(f"[INFO] Current NED coordinates: {camera_position[0:-1, -1]}")    
         mavc.printd("[CLEANUP] Stopping background threads...")
+        # Ensure stop events are set
         obstacle_sender_stop_event.set()
+        timesync_stop_event.set()
         if sender_thread is not None:
             sender_thread.join(timeout=2.0)
-        # stop timesync thread
-        timesync_stop_event.set()
         timesync_thread.join(timeout=2.0)
 
-        # Land vehicle if still flying
-        if FLY_VEHICLE and shouldStop:
-            mavc.printd("Landing vehicle...")
-            mavc.set_mode('LAND')
+        # If Ctrl-C was used, we already sent an immediate LAND
+        # and we must skip the VBG save/visualization to exit quickly.
+        if not ctrl_c_exit:
+            # Land vehicle if still flying (only for normal exits via 'c' or 'q')
+            if FLY_VEHICLE and shouldStop:
+                try:
+                    mavc.printd("Landing vehicle...")
+                    mavc.set_mode('LAND')
+                except Exception:
+                    pass
 
-        # Save VoxelBlockGrid (only if enabled)
-        if enable_vbg:
-            save_and_visualize_vbg(vbg, npz_save_filename, weight_threshold)
+            # Save VoxelBlockGrid (only if enabled)
+            if enable_vbg:
+                save_and_visualize_vbg(vbg, npz_save_filename, weight_threshold)
 
-        # Release camera and close windows
+        # Release camera and close windows (always do this)
         mavc.printd("[CLEANUP] Releasing camera and closing windows...")
-        cap.cap.release()
+        try:
+            cap.cap.release()
+        except Exception:
+            pass
         cv2.destroyAllWindows()
 
 if __name__ == "__main__":

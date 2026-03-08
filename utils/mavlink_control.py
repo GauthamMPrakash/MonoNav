@@ -249,7 +249,7 @@ def heading_offset_init():
     relative heading.
     """
     # get_pose returns (x, y, z, yaw, pitch, roll)
-    _, _, _, yaw, _, _ = get_pose()
+    _, _, _, yaw, _, _ = get_pose(blocking=True)
     heading_offset = yaw
     return heading_offset
 

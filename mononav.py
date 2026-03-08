@@ -235,7 +235,7 @@ def main():
         reboot = mavc.reboot_if_EKF_origin(0.5)  # Call this function after enabling pose_stream
         if reboot:
             mavc.printd("Rebooted drone to set EKF origin. Waiting for reconnection...")
-            time.sleep(10)   # Wait for drone to reboot
+            time.sleep(7)    # Wait for drone to reboot
             mavc.printd("Reconnecting...")
             continue         # Restart connection loop
         break
@@ -271,6 +271,7 @@ def main():
     # Initialize lists and frame counter.
         frame_number = 0
         start_flight_time = time.time()
+        mavc.heading_offset_init()
         if FLY_VEHICLE==True:
             print("Arming Motors!")
             mavc.set_mode('GUIDED')
@@ -281,7 +282,7 @@ def main():
         
         mavc.en_pose_stream()                    # Commands AP to stream poses at a deafult value of 15 Hz
         start_pose_thread()                      # Start background pose polling at 10 Hz (non-blocking)
-        mavc.heading_offset_init()
+        
         # Convert RDF goal to NED, then reorder to internal [E, D, N]
         # to match camera_position[0:-1, -1] from get_pose_matrix().
         if goal_position is not None:
