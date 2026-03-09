@@ -548,7 +548,6 @@ def main():
                 # Send position target only once when entering goal navigation mode
                 if not goal_nav_active:
                     print("Pressed g. Using BendyRuler navigation to goal.")
-                    mavc.set_mode('GUIDED')
                     mavc.send_local_ned_pos(goal_position[0, 2], goal_position[0, 0], goal_position[0, 1]) # remember, goal_position is now in EDN
                     goal_nav_active = True
                 
@@ -559,18 +558,6 @@ def main():
                     shouldStop = True
                     last_key_pressed = 'c'
                     goal_nav_active = False
-                
-                # # Companion-side safety: emergency hover if obstacle < threshold
-                # with distances_lock:
-                #     valid = distances[distances < (max_depth_cm + 1)]
-                # if valid.size > 0:
-                #     nearest_m = float(np.min(valid)) / 100.0
-                #     if nearest_m < min_obstacle_dist_m:
-                #         mavc.printd(
-                #             "[SAFETY] Obstacle at %.2fm < %.2fm — emergency hover!"
-                #             % (nearest_m, min_obstacle_dist_m)
-                #         )
-                #         mavc.send_body_offset_ned_vel(0, 0, 0, 0)
             else:
                 print("Pressed g. Moving forward.")
                 mavc.send_body_offset_ned_vel(forward_speed, 0, 0, 0)

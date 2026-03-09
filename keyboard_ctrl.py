@@ -1,5 +1,4 @@
-"""Simple keyboard velocity controller for an ArduCopter just using
-``send_body_offset_ned_vel``.
+"""Fun script to control an ArduCopter using PC keyboard!
 
 Keys:
   w/s  -> forward/backward
@@ -11,19 +10,26 @@ Keys:
 
 Holding a direction or yaw key will continuously send the velocity command;
 when all movement keys are released the controller immediately sends a
-zero-velocity packet to hover.  A timestamp is tracked for each pressed key
-and stale entries are purged so a missed release event cannot "stick" a key
-internally.
+zero-velocity packet to hover.
 
-Holding a key continuously will keep sending the associated velocity
-command at a fixed rate.  Releasing all movement keys immediately
-sends a zero-velocity (hover) command.  Inputs are handled with
-``pynput`` so there is no polling delay.
+SETTING SAFETY BOUNDS:
+----------------------
+The script also enforces configurable safety bounds on the drone's position by setting
+bl (left bound), br (right bound), bf (forward bound), and bb (backward bound).
+The bounds are defined in the `local body offset frame` at the drone's initial position and based on 
+its heading on the ground at startup.
+-------------------------------------
+Set any of the bounds to None to disable that bound, or set them to a positive value in meters.
 
 Run this script independently when you want to manually fly the drone.
-It does _not_ perform any of the MonoNav planning logic; it is purely a
-teleoperation helper.
 """
+
+"""
+ALWAYS KEEP IN MIND THE POSSIBILITY OF FAILURE TO RESPECT THE BOUNDS AS MAY BE THE CASE IF THE SENSORS 
+ARE BAD OR EKF FAILS. SO ALWAYS FLY WITH CAUTION!
+"""
+bl, br, bf, bb = -0.2, 0.2, None, -0.5
+# The example values above create a safety bound with 20 cm to either side, no forward bound, and a backward bound of 50 cm. Adjust as needed for your environment and testing purposes.
 
 import time
 from pynput import keyboard
@@ -31,7 +37,7 @@ from pynput.keyboard import Key
 
 import numpy as np
 from pymavlink import mavutil
-from utils.utils import load_config
+from utils.utils import load_config, start_pose_thread, get_latest_pose, stop_pose_thread
 import utils.mavlink_control as mavc
 
 # ---------------------------------------------------------------------------
@@ -40,8 +46,8 @@ import utils.mavlink_control as mavc
 CONFIG_FILE = 'config.yml'
 # single speed parameter used for both forward/backward and strafe
 SPEED = 0.5              # horizontal speed (m/s); adjustable with arrow keys
-YAW_RATE = 30.0          # deg/s when pressing 'q' or 'e'; adjustable with left/right arrows
-COMMAND_HZ = 20          # how many velocity commands per second
+YAW_RATE = 70.0          # deg/s when pressing 'q' or 'e'; adjustable with left/right arrows
+COMMAND_HZ = 15          # how many velocity commands per second
 ALT_SPEED = 0.25         # m/s vertical speed when pressing 'h' or 'n'
 # speed bounds
 MIN_SPEED = 0.1
@@ -132,9 +138,13 @@ def _on_release(key):
 
 def main():
     global config
-    bound = True
-    bl, br, bf, bb = -0.3, 0.3, 0.5, -0.1
+    global bl, br, bf, bb
 
+    if bl >= br or bb >= bf:
+        print("[KB] WARNING: invalid safety bounds! No movement will be allowed.")
+        print("[KB] Please ensure bl < br and bb < bf, or set bounds to None to disable.")
+        return
+    
     config = load_config(CONFIG_FILE)
 
     EKF_LAT = config.get('EKF_LAT')
@@ -144,8 +154,8 @@ def main():
     print(f"[KB] connecting to drone at {config.get('IP')} (baud {config.get('baud',115200)})")
     mavc.connect_drone(config['IP'], baud=config.get('baud', 115200))
     mavc.set_ekf_origin(EKF_LAT, EKF_LON)
-    mavc.set_mode('GUIDED')
-    mavc.en_pose_stream()
+    mavc.reboot_if_EKF_origin()  # Reset EKF origin to ensure the safety bounds work as intended
+    mavc.en_pose_stream(20)
     init_heading = mavc.heading_offset_init()
     print(f"[KB] initial heading offset: {np.rad2deg(init_heading):.1f} deg")
     print("[KB] vehicle should now be in GUIDED mode")
@@ -191,12 +201,12 @@ def main():
                 mavc.takeoff(alt)
                 _takeoff_requested = False
                 takeoff_in_progress = True
+                start_pose_thread(15)
             
             if _land_requested:
                 print("[KB] switching to LAND mode")
                 mavc.set_mode('LAND')
-
-                time.sleep(5)
+                time.sleep(3)
                 mavc.arm(0)
                 _land_requested = False
                 takeoff_in_progress = False
@@ -204,7 +214,8 @@ def main():
                 # give the autopilot a moment to settle on the ground
                 time.sleep(1)
                 print("[KB] landed and disarmed, ready for next takeoff")
-                mavc.set_mode('GUIDED')
+                # stop pose thread so that the pose mavlink stream doesn't overwhelm the system casuing arming check to fail
+                stop_pose_thread()
 
             vx = 0.0
             vy = 0.0
@@ -212,7 +223,7 @@ def main():
             vz = 0.0
 
             # linear velocity (using unified SPEED)
-            pose = mavc.get_pose()
+            pose = get_latest_pose()
             x_n, y_e = pose[0], pose[1]
             c, s = np.cos(init_heading), np.sin(init_heading)
             # rotate NED -> local frame where +x is "forward" at init_heading
@@ -220,25 +231,29 @@ def main():
             y_right = -s * x_n + c * y_e
 
             if 'w' in _pressed_keys:
-                if bound and x_fwd < bf:
+                if x_fwd and x_fwd <= bf:
                     vx += SPEED
                 else:
                     print("[KB] forward bound reached")
+                    time.sleep(0.1)
             if 's' in _pressed_keys:
-                if bound and x_fwd > bb:
+                if x_fwd and x_fwd >= bb:
                     vx -= SPEED
                 else:
                     print("[KB] backward bound reached")
+                    time.sleep(0.1)
             if 'd' in _pressed_keys:
-                if bound and y_right < br:
+                if y_right and y_right <= br:
                     vy += SPEED
                 else:
                     print("[KB] right bound reached")
+                    time.sleep(0.1)
             if 'a' in _pressed_keys:
-                if bound and y_right > bl:
+                if y_right and y_right >= bl:
                     vy -= SPEED
                 else:
                     print("[KB] left bound reached")
+                    time.sleep(0.1)
 
             # yaw – use a fixed rate, not accumulating each iteration
             if 'q' in _pressed_keys:
@@ -264,6 +279,7 @@ def main():
         mavc.set_mode('LAND')
     finally:
         listener.stop()
+        stop_pose_thread()
         # restore terminal echo if we changed it
         if old_settings is not None:
             try:

@@ -3,8 +3,8 @@ save_dir_prefix: 'data/mononav-'
 # Camera Settings
 camera_source: 'esp32-cam'                                   # used for naming files
 camera_calibration_path: 'utils/calibration/intrinsics.json' # camera calibration file (for undistortion)
-camera_ip: 'http://10.42.0.29:81/stream'                    # camera stream URL (otherwise enter integer for camera index)   
-# camera_ip: 'http://192.168.53.56:81/stream'
+#camera_ip: 'http://10.42.0.29:81/stream'                    # camera stream URL (otherwise enter integer for camera index)   
+camera_ip: 'http://192.168.53.56:81/stream'
 
 # Depth Model Settings
 num_pre_depth_frames: 3       # how many times to run the depth model before starting (the first few inferences are much slower)
@@ -47,8 +47,8 @@ min_dist2goal: 1.0            # termination condition for reaching the goal, met
 
 # IP and port of the telemetry module on the drone. Set appropriate connection strings.
 # Replace with serial port name (ex: 'COM9') if using serial telemetry on the PC
-IP: "udpout:10.42.0.110:14550" 
-# IP: "udpout:192.168.53.51:14550" 
+#IP: "udpout:10.42.0.110:14550" 
+IP: "udpout:192.168.53.51:14550" 
 baud: 115200               # Set baud, only required for serial telemetry
 height: 1.2                # flight altitude, meters
 EKF_LAT: 8.4723591
@@ -58,4 +58,4 @@ forward_speed: 0.5         # forward speed in m/s, set to None to use speed defi
 yvel_gain: 0.015           # yvel =  -yawrate*yvel_gain  <- for providing sideways velocity so that turns can be made sharper. Increase for faster turns.
 yawrate_gain: 1.25         # yawrate = yawrate*yawrate_gain
 
-FLY_VEHICLE: True         # whether to actually fly the drone
+FLY_VEHICLE: False         # whether to actually fly the drone

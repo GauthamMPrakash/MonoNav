@@ -405,10 +405,9 @@ def choose_primitive(vbg, camera_position, traj_linesets, goal_position, dist_th
                     max_traj_idx = traj_idx
                     max_traj_score = nearest_voxel_dist
 
-    if max_traj_idx is None:
-        # No trajectory meets the dist_threshold criterion, crazyflie should stop.
-        shouldStop = True
-    return shouldStop, max_traj_idx
+    # Do not force an immediate stop here. Let the caller (`mononav.py`) handle
+    # transient cases where `max_traj_idx` is None (e.g., hover and retry).
+    return max_traj_idx
 
 
 """

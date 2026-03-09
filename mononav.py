@@ -88,7 +88,6 @@ if model_device.type != 'cuda' and torch.cuda.is_available():
 # GLOBAL VARIABLES
 last_key_pressed = None  # store the last key pressed
 shouldStop = False
-allow_smart_rtl = False   # only allow SmartRTL when goal reached or no safe trajectory
 trajectory_execution_stop_event = threading.Event()
 traj_index = None
 trajectory_start_time = None  # when the current trajectory started
@@ -224,10 +223,9 @@ def main():
     global roi
     global goal_position
     global traj_max_none_count
-    global allow_smart_rtl
 
     traj_none_count = 0
-    traj_max_none_count = 2                      # how many times traj chooser can predict no safe traj before we force stop
+    traj_max_none_count = 1                      # how many times traj chooser can predict no safe traj before we force stop
 
     while True:
         # ARDUCOPTER CONTROL
@@ -339,17 +337,11 @@ def main():
                 time.sleep(0.1)
                 continue
             elif last_key_pressed == 'r':
-                # only allow RTL if flagged by goal/no-safe-traj
-                if allow_smart_rtl:
-                    print("Pressed r. Switching to SmartRTL.")
-                    if FLY_VEHICLE:
-                        mavc.set_mode('SmartRTL')
-                    shouldStop = True
-                    break
-                else:
-                    last_key_pressed = 'g'
-                    time.sleep(0.1)
-                    continue
+                print("Pressed r. Switching to SmartRTL.")
+                if FLY_VEHICLE:
+                    mavc.set_mode('SmartRTL')
+                shouldStop = True
+                break
             elif last_key_pressed == 'c': #end control and land
                 mavc.set_mode('LAND')
                 print("Pressed c. Ending control.")
@@ -360,9 +352,6 @@ def main():
                 print("Pressed q. EMERGENCY STOP.")
                 shouldStop = True
                 break
-            else:
-                time.sleep(0.1)
-                continue
         
         # Save trajectory information
             if save_during_flight:
@@ -432,12 +421,12 @@ def main():
             if last_key_pressed != 'g':
                 last_key_pressed = None
 
-            shouldStop, max_traj_idx = choose_primitive(vbg.vbg, camera_position, traj_linesets, goal_position, min_dist2obs, filterYvals, filterWeights, filterTSDF, weight_threshold)
+            max_traj_idx = choose_primitive(vbg.vbg, camera_position, traj_linesets, goal_position, min_dist2obs, filterYvals, filterWeights, filterTSDF, weight_threshold)
             if max_traj_idx is None:
                 traj_none_count += 1
+                mavc.printd(f"Trajectory chooser found no safe trajectory now. traj_none_count={traj_none_count}")
                 if traj_none_count > traj_max_none_count:
                     no_safe_traj = True
-                    allow_smart_rtl = True
                 print("[INFO] No safe trajectory. Hovering in place.")
             else:
                 no_safe_traj = False
