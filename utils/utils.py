@@ -384,6 +384,20 @@ def choose_primitive(vbg, camera_position, traj_linesets, goal_position, dist_th
         traj_lineset_copy.transform(camera_position) # transform the lineset (copy) to the camera position
         pts = np.asarray(traj_lineset_copy.points) # meters # extract the points from the lineset
         tmp = distance.cdist(voxel_coords_numpy, pts, "sqeuclidean") # compute the distance between all voxels and all points in the trajectory
+        
+        # Guard against empty distance matrix (e.g., no voxels mapped yet)
+        if tmp.size == 0:
+            # No voxels in the scene; allow this trajectory
+            if goal_position is not None:
+                # With a goal, prefer trajectories; just use the first safe one
+                if max_traj_idx is None:
+                    max_traj_idx = traj_idx
+            else:
+                # No goal, just pick the first trajectory
+                if max_traj_idx is None:
+                    max_traj_idx = traj_idx
+            continue
+        
         voxel_idx, pt_idx = np.unravel_index(np.argmin(tmp), tmp.shape) # extract indices of the nearest voxel to and nearest point in the trajectory
         nearest_voxel_dist = np.sqrt(tmp[voxel_idx, pt_idx])
         #mavc.printd(f"traj {traj_idx}: nearest_obstacle={nearest_voxel_dist:.3f}m (threshold={dist_threshold}m)")

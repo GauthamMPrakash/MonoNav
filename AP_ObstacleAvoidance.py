@@ -56,7 +56,10 @@ forward_speed = config['forward_speed']
 
 INPUT_SIZE = config['INPUT_SIZE']      # Image size
 CHECKPOINT = config['DA2_CHECKPOINT']  # path to checkpoint for DepthAnythingV2
-ENCODER = CHECKPOINT[-8:-4]            # extract encoder type from checkpoint filename (assumes format "DA2_{ENCODER}_checkpoint.pth")  
+ENCODER = CHECKPOINT[-8:-4]
+if ENCODER is None:
+    ENCODER = CHECKPOINT.split('_')[-1].split('.')[0]
+    print(f"[warning] DA2_ENCODER not set in config, parsed '{ENCODER}' from checkpoint name")
 DEVICE = 'cuda:0' if torch.cuda.is_available() else 'cpu'
 
 IP = config['IP']                      # dronebridge IP

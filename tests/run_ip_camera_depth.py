@@ -6,28 +6,35 @@ import os
 import sys
 
 # Add DepthAnythingV2-metric to path
-repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
-depth_model_path = os.path.join(repo_root, 'DepthanythingV2-metric')
-sys.path.insert(0, depth_model_path)
+repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+metric_path = os.path.join(repo_root, "DepthAnythingV2-metric")
+if metric_path not in sys.path:
+    sys.path.insert(0, metric_path)
 
 from depth_anything_v2.dpt import DepthAnythingV2
 
 # -----------------------------
-# CONFIG
+# ensure project root on path so utils package is importable
 # -----------------------------
-STREAM_URL = "http://10.42.0.29:81/stream"  # YOUR ESP32 HTTP MJPEG stream
-INPUT_SIZE = 336
+if repo_root not in sys.path:
+    sys.path.insert(0, repo_root)
+
+# -----------------------------
+# CONFIG (read from project config.yml)
+# -----------------------------
+from utils.utils import load_config
+cfg = load_config(os.path.join(repo_root, "config.yml"))
+STREAM_URL = cfg.get("camera_ip")
+INPUT_SIZE = cfg.get("INPUT_SIZE")
+CHECKPOINT = "../"+cfg.get("DA2_CHECKPOINT")
+ENCODER = CHECKPOINT[-8:-4]
+MAX_DEPTH = cfg.get("DA2_MAX_DEPTH", cfg.get("VoxelBlockGrid", {}).get("depth_max", 20))
+SAVE_NUMPY = cfg.get("save_numpy", False)
+PRED_ONLY = cfg.get("pred_only", False)
+GRAYSCALE = cfg.get("grayscale", False)
 OUTDIR = "./esp32_depth"
-ENCODER = 'vitb'  # must match your checkpoint
-CHECKPOINT = "../DepthanythingV2-metric/checkpoints/depth_anything_v2_metric_hypersim_vitb.pth"
-MAX_DEPTH = 20
-SAVE_NUMPY = False
-PRED_ONLY = False
-GRAYSCALE = False
 
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
-
-os.makedirs(OUTDIR, exist_ok=True)
 
 cmap = matplotlib.colormaps.get_cmap('Spectral')
 
@@ -65,7 +72,7 @@ while True:
         continue
 
     # Show RGB stream immediately, before depth estimation.
-    cv2.imshow("ESP32 RGB Stream", frame)
+    # cv2.imshow("ESP32 RGB Stream", frame)
     if cv2.waitKey(1) & 0xFF == 27:
         break
 
@@ -81,7 +88,7 @@ while True:
 
     # normalize for visualization
     
-    print(depth.min())
+    print(depth.min(), depth.max(), flush=True)
 
     if GRAYSCALE:
         depth_vis = np.repeat(depth_vis[..., np.newaxis], 3, axis=-1)

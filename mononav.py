@@ -47,9 +47,15 @@ from pynput import keyboard            # Keyboard control
 # LOAD VALUES FROM CONFIG FILE
 config = load_config('config.yml')
 
-INPUT_SIZE = config['INPUT_SIZE']      # Image size
+# model parameters read from configuration
+INPUT_SIZE = config['INPUT_SIZE']      # image scale parameter passed to compute_depth
 CHECKPOINT = config['DA2_CHECKPOINT']  # path to checkpoint for DepthAnythingV2
-ENCODER = CHECKPOINT[-8:-4]            # extract encoder type from checkpoint filename (assumes format "DA2_{ENCODER}_checkpoint.pth")  
+# The encoder is now explicitly set in the config; fall back to parsing the
+# checkpoint filename if the field is missing for backwards compatibility.
+ENCODER = CHECKPOINT[-8:-4]  # crude parse: expects filenames like "..._vits.pth", "..._vitb.pth", etc.
+if ENCODER is None:
+    ENCODER = CHECKPOINT.split('_')[-1].split('.')[0]  # crude parse: last part before extension
+    print(f"[warning] DA2_ENCODER not set in config, parsed '{ENCODER}' from checkpoint name")
 MAX_DEPTH = 20
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 IP = config['IP']
@@ -78,12 +84,12 @@ depth_anything.load_state_dict(torch.load(CHECKPOINT, map_location=DEVICE))
 depth_anything = depth_anything.to(DEVICE).eval()
 model_device = next(depth_anything.parameters()).device
 
-print(f"[device] torch.cuda.is_available()={torch.cuda.is_available()}")
-print(f"[device] selected DEVICE={DEVICE}, model_device={model_device}")
+print(f"[device] torch.cuda.is_available()={torch.cuda.is_available()}", flush=True)
+print(f"[device] selected DEVICE={DEVICE}, model_device={model_device}", flush=True)
 if torch.cuda.is_available():
-    print(f"[device] cuda_name={torch.cuda.get_device_name(torch.cuda.current_device())}")
+    print(f"[device] cuda_name={torch.cuda.get_device_name(torch.cuda.current_device())}", flush=True)
 if model_device.type != 'cuda' and torch.cuda.is_available():
-    print("[warning] CUDA is available but model is not on CUDA.")
+    print("[warning] CUDA is available but model is not on CUDA.", flush=True)
 
 # GLOBAL VARIABLES
 last_key_pressed = None  # store the last key pressed
@@ -91,6 +97,7 @@ shouldStop = False
 trajectory_execution_stop_event = threading.Event()
 traj_index = None
 trajectory_start_time = None  # when the current trajectory started
+autonomous_mode = False
 
 # Intrinsics for undistortio
 # n
@@ -118,9 +125,10 @@ traj_list = get_trajlist(trajlib_dir)
 traj_linesets, period, forward_speed, amplitudes = get_traj_linesets(traj_list)
 if config['forward_speed'] is not None:
     forward_speed = config['forward_speed']
-max_traj_idx = int(len(traj_list)/2) # set initial value to that of FORWARD flight (should be median value)
-print("Initial trajectory chosen: %d out of %d"%(max_traj_idx, len(traj_list)))
-print(f"Trajectory amplitudes: left(idx 0)={float(amplitudes[0]):.3f}, right(idx {len(amplitudes)-1})={float(amplitudes[-1]):.3f}")
+max_traj_idx = None  # Start with no trajectory; only set when user presses 'g' for MonoNav mode
+print(f"Trajectory library loaded: {len(traj_list)} trajectories", flush=True)
+print(f"Trajectory amplitudes: left(idx 0)={float(amplitudes[0]):.3f}, right(idx {len(amplitudes)-1})={float(amplitudes[-1]):.3f}", flush=True)
+print("Press 'g' to enable MonoNav autonomous mode, or 'a'/'w'/'d' for manual left/straight/right", flush=True)
 
 # Planning presets
 filterYvals = config['filterYvals']
@@ -132,15 +140,15 @@ if 'goal_position_rdf' in config:
 else:
     goal_position = None # non-directed exploration
 
-print("Goal position (RDF): ", goal_position)
+print("Goal position (RDF): ", goal_position, flush=True)
 min_dist2obs = config['min_dist2obs']
 min_dist2goal = config['min_dist2goal']
-print(f"Trajectory index convention: 0=sharp left, {len(traj_list)//2}=straight, {len(traj_list)-1}=sharp right")
+print(f"Trajectory index convention: 0=sharp left, {len(traj_list)//2}=straight, {len(traj_list)-1}=sharp right", flush=True)
 
 # Make directories for data
 time_string = time.strftime('%Y-%m-%d-%H-%M-%S')
 save_dir = config['save_dir_prefix'] + time_string
-print("Saving files to: " + save_dir)
+print("Saving files to: " + save_dir, flush=True)
 npz_save_filename = save_dir + '/vbg.npz'
 
 img_dir = os.path.join(save_dir, 'rgb-images')
@@ -163,9 +171,11 @@ with open(save_dir + '/trajectories.csv', 'w') as file:
 def on_press(key):
     global last_key_pressed
     try:
-        last_key_pressed = key.char
+        if key.char is not None:
+            last_key_pressed = key.char.lower()
     except AttributeError:
-        last_key_pressed = key
+        # Ignore non-character keys in this controller.
+        pass
 
 # Fallback key capture from OpenCV window (useful when pynput can't access keyboard,
 # e.g., running with sudo or headless input devices).
@@ -174,7 +184,7 @@ def update_key_from_cv(wait_ms=1):
     k = cv2.waitKey(wait_ms) & 0xFF
     if k != 255:
         try:
-            last_key_pressed = chr(k)
+            last_key_pressed = chr(k).lower()
         except ValueError:
             pass
 # start keyboard listener
@@ -223,6 +233,7 @@ def main():
     global roi
     global goal_position
     global traj_max_none_count
+    global autonomous_mode
 
     traj_none_count = 0
     traj_max_none_count = 1                      # how many times traj chooser can predict no safe traj before we force stop
@@ -273,10 +284,10 @@ def main():
         start_flight_time = time.time()
         mavc.heading_offset_init()
         if FLY_VEHICLE==True:
-            print("Arming Motors!")
+            print("Arming Motors!", flush=True)
             mavc.set_mode('GUIDED')
             mavc.arm()
-            print("Taking off.")
+            print("Taking off.", flush=True)
             mavc.takeoff(height)
             # mavc.set_speed(forward_speed)
         
@@ -290,11 +301,11 @@ def main():
                 rdf_goal_to_ned(goal_position[0], goal_position[1], goal_position[2], mavc.heading_offset),
                 dtype=np.float64,
             )
-            print(f"Goal position (NED): {goal_position}")
+            print(f"Goal position (NED): {goal_position}", flush=True)
             goal_position = np.array([goal_position[1], goal_position[2], goal_position[0]], dtype=np.float64).reshape(1, 3)
         mavc.printd(f"Heading offset : {mavc.heading_offset*180/np.pi}")
     
-        print("Starting control.")
+        print("Starting control.", flush=True)
         traj_counter = 0         # how many trajectory iterations have we done?
         no_safe_traj = False
         last_time = time.time()  # for FPS counter
@@ -311,48 +322,66 @@ def main():
 
         while not shouldStop:
             update_key_from_cv(1)
+            
+            # Check for stop keys first (these exit the control loop)
+            if last_key_pressed == 'q':
+                autonomous_mode = False
+                mavc.eSTOP()
+                print("Pressed q. EMERGENCY STOP.", flush=True)
+                shouldStop = True
+                break
+            elif last_key_pressed == 'c':
+                autonomous_mode = False
+                mavc.set_mode('LAND')
+                print("Pressed c. Ending control.", flush=True)
+                shouldStop = True
+                break
+            elif last_key_pressed == 'r':
+                autonomous_mode = False
+                print("\nPressed r. Switching to SmartRTL.\n", flush=True)
+                if FLY_VEHICLE:
+                    mavc.set_mode('SmartRTL')
+                shouldStop = True
+                break
+            
+            # Check for mode/command keys (these change behavior but don't stop)
+            if last_key_pressed == 'h':
+                autonomous_mode = False
+                print("Pressed h. Hovering in place.", flush=True)
+                if FLY_VEHICLE:
+                    mavc.send_body_offset_ned_vel(0, 0, yaw_rate=0) # hover in place
+                traj_index = None  # Stop following any trajectory
+                last_key_pressed = None
+            
+            # Check for trajectory control keys
             if last_key_pressed == 'a':
-                print("Pressed a. Going left.")
+                autonomous_mode = False
+                print("Pressed a. Going left.", flush=True)
                 traj_index = 0 # left
+                last_key_pressed = None
             elif last_key_pressed == 'w':
-                print("Pressed w. Going straight.")
+                autonomous_mode = False
+                print("Pressed w. Going straight.", flush=True)
                 traj_index = len(traj_list)//2 # straight
+                last_key_pressed = None
             elif last_key_pressed == 'd':
-                print("Pressed d. Going right.")
+                autonomous_mode = False
+                print("Pressed d. Going right.", flush=True)
                 traj_index = len(traj_list)-1 # right
+                last_key_pressed = None
             elif last_key_pressed == 'g':
-                print("Pressed g. Using MonoNav.")
+                autonomous_mode = True
+                print("Pressed g. Using MonoNav.", flush=True)
                 if no_safe_traj:
                     # Keep GO mode active, but execute a hover-only cycle and re-plan.
                     traj_index = None
                     if FLY_VEHICLE:
                         mavc.send_body_offset_ned_vel(0, 0, yaw_rate=0)
-                        print("No safe trajectory, hovering and retrying planner")
+                        print("No safe trajectory, hovering and retrying planner", flush=True)
                     time.sleep(0.1)
                 else:
                     traj_index = max_traj_idx
-
-            elif last_key_pressed == 'h':
-                print("Pressed h. Hovering in place.")
-                mavc.send_body_offset_ned_vel(0, 0, yaw_rate=0) # hover in place
-                time.sleep(0.1)
-                continue
-            elif last_key_pressed == 'r':
-                print("Pressed r. Switching to SmartRTL.")
-                if FLY_VEHICLE:
-                    mavc.set_mode('SmartRTL')
-                shouldStop = True
-                break
-            elif last_key_pressed == 'c': #end control and land
-                mavc.set_mode('LAND')
-                print("Pressed c. Ending control.")
-                shouldStop = True
-                break
-            elif last_key_pressed == 'q': #end flight immediately
-                mavc.eSTOP()
-                print("Pressed q. EMERGENCY STOP.")
-                shouldStop = True
-                break
+                last_key_pressed = None
         
         # Save trajectory information
             if save_during_flight:
@@ -417,48 +446,45 @@ def main():
                 frame_number += 1
             traj_counter += 1
 
-        # if not in "GO" (g) mode, reset to stopping mode
-            if last_key_pressed != 'g':
-                last_key_pressed = None
-
-            max_traj_idx = choose_primitive(vbg.vbg, camera_position, traj_linesets, goal_position, min_dist2obs, filterYvals, filterWeights, filterTSDF, weight_threshold)
-            if max_traj_idx is None:
-                traj_none_count += 1
-                mavc.printd(f"Trajectory chooser found no safe trajectory now. traj_none_count={traj_none_count}")
-                if traj_none_count > traj_max_none_count:
-                    no_safe_traj = True
-                print("[INFO] No safe trajectory. Hovering in place.")
-            else:
-                no_safe_traj = False
-                traj_none_count = 0
-
-            mavc.printd(f"SELECTED max_traj_idx: { max_traj_idx}")
+        # In autonomous GO mode, update selected trajectory from planner.
+            if autonomous_mode:
+                # In 'g' mode: run trajectory planning
+                max_traj_idx = choose_primitive(vbg.vbg, camera_position, traj_linesets, goal_position, min_dist2obs, filterYvals, filterWeights, filterTSDF, weight_threshold)
+                if max_traj_idx is None:
+                    traj_none_count += 1
+                    if traj_none_count > traj_max_none_count:
+                        no_safe_traj = True
+                    print("[INFO] No safe trajectory. Hovering in place.", flush=True)
+                else:
+                    no_safe_traj = False
+                    traj_none_count = 0
+                    print(f"[TRAJ] Selected traj: {max_traj_idx}/{len(traj_list)-1}", flush=True)
 
     # Exited while(!shouldStop); end control!
         # print("shouldStop: ", shouldStop)
         # print(f"[INFO] {end_message}")
-        print("[INFO] End control.")
-        print("[INFO] Current distance to goal (m): ", np.linalg.norm(camera_position[0:-1, -1]-goal_position) if goal_position is not None else "N/A")
+        print("[INFO] End control.", flush=True)
+        print("[INFO] Current distance to goal (m): ", np.linalg.norm(camera_position[0:-1, -1]-goal_position) if goal_position is not None else "N/A", flush=True)
         camera_position = [camera_position[0:-1, -1][2], camera_position[0:-1, -1][0], camera_position[0:-1, -1][1]] # print in NED order for readability
-        print("[INFO] Current NED coords:" , camera_position)
-        print("[INFO] Current RDF coords:", ned_to_rdf(camera_position[0], camera_position[1], camera_position[2], mavc.heading_offset))
+        print("[INFO] Current NED coords:" , camera_position, flush=True)
+        print("[INFO] Current RDF coords:", ned_to_rdf(camera_position[0], camera_position[1], camera_position[2], mavc.heading_offset), flush=True)
 
         # save and view vbg
-        print("Saving to {}...".format(npz_save_filename))
+        print("Saving to {}...".format(npz_save_filename), flush=True)
         vbg.vbg.save(npz_save_filename)
-        print("Saving finished")
-        print("Visualize raw pointcloud.")
+        print("Saving finished", flush=True)
+        print("Visualize raw pointcloud.", flush=True)
         pcd = vbg.vbg.extract_point_cloud(weight_threshold)
         pcd_cpu = pcd.cpu()
         # Convert tensor point cloud to legacy for reliable visualization
         pcd_legacy = pcd_cpu.to_legacy()
-        print(f"Point cloud has {len(pcd_legacy.points)} points")
+        print(f"Point cloud has {len(pcd_legacy.points)} points", flush=True)
         visualize_pointcloud(pcd_legacy, window_name="MonoNav Reconstruction")
 
     except KeyboardInterrupt:
         mavc.set_mode('LAND')
         shouldStop = True
-        print("\n[INTERRUPT] Ctrl+C detected. Sent land command.")
+        print("\n[INTERRUPT] Ctrl+C detected. Sent land command.", flush=True)
             
     finally:
         # Stop trajectory execution thread
