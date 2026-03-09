@@ -24,7 +24,6 @@ import math as m
 import copy
 import yaml, json
 import time
-import torch
 
 from . import mavlink_control as mavc  # ArduCopter MAVLink wrappers (relative import)
 import queue, threading                # For bufferless video capture
@@ -306,7 +305,7 @@ def get_traj_linesets(traj_list):
     for traj in traj_list:
         # traj_dict = {key: traj[key] for key in traj.files}
         z_tsdf = traj['x_sample']
-        x_tsdf = -traj['y_sample']
+        x_tsdf = traj['y_sample']
         points = []
         lines = []
         for i in range(len(x_tsdf)):
@@ -368,13 +367,8 @@ def choose_primitive(vbg, camera_position, traj_linesets, goal_position, dist_th
         mask = tsdf < 0.0
         voxel_coords = voxel_coords[mask,:]
 
-    # Convert Open3D tensor to torch tensor on same device for GPU-accelerated distance computation
-    # Determine the device from the VBG (can be CUDA or CPU)
-    vbg_device_str = vbg.device.get_type()  # returns 'CUDA' or 'CPU'
-    torch_device = torch.device('cuda:0' if vbg_device_str == 'CUDA' else 'cpu')
-    
-    # Convert voxel_coords from Open3D tensor to torch tensor (keep on same device)
-    voxel_coords_torch = torch.from_numpy(voxel_coords.cpu().numpy()).to(torch_device).float()
+    # transfer to cpu for cdist
+    voxel_coords_numpy = voxel_coords.cpu().numpy()
 
     # NOW WE HAVE A FILTERED SET OF VOXELS THAT REPRESENT OBSTACLES
     # NEXT, WE DETERMINE THE BEST TRAJECTORY ACCORDING TO A COST FUNCTION
@@ -384,33 +378,21 @@ def choose_primitive(vbg, camera_position, traj_linesets, goal_position, dist_th
     min_goal_score = np.inf # track proximity to goal
     max_traj_idx = None # track the index of the best trajectory
 
-    # Convert goal_position to torch tensor if provided (for GPU-accelerated distance computation)
-    if goal_position is not None:
-        goal_position_torch = torch.from_numpy(goal_position).to(torch_device).float()
-
     # iterate over the sorted traj linesets
     for traj_idx, traj_linset in enumerate(traj_linesets):
         traj_lineset_copy = copy.deepcopy(traj_linset)
         traj_lineset_copy.transform(camera_position) # transform the lineset (copy) to the camera position
         pts = np.asarray(traj_lineset_copy.points) # meters # extract the points from the lineset
-        
-        # Convert trajectory points to torch tensor on same device for GPU-accelerated computation
-        pts_torch = torch.from_numpy(pts).to(torch_device).float()
-        
-        # Compute squared euclidean distances on GPU using torch.cdist
-        tmp = torch.cdist(voxel_coords_torch, pts_torch, p=2).square()  # squared euclidean distance
-        
-        # Find minimum distance and its indices
-        min_dist_sq = torch.min(tmp)
-        nearest_voxel_dist = torch.sqrt(min_dist_sq).item()  # convert to python float
-        
+        tmp = distance.cdist(voxel_coords_numpy, pts, "sqeuclidean") # compute the distance between all voxels and all points in the trajectory
+        voxel_idx, pt_idx = np.unravel_index(np.argmin(tmp), tmp.shape) # extract indices of the nearest voxel to and nearest point in the trajectory
+        nearest_voxel_dist = np.sqrt(tmp[voxel_idx, pt_idx])
         mavc.printd(f"traj {traj_idx}: nearest_obstacle={nearest_voxel_dist:.3f}m (threshold={dist_threshold}m)")
         if nearest_voxel_dist > dist_threshold:
             # the trajectory meets the dist_threshold criterion
             if goal_position is not None:
                 # the trajectory satisfies the dist_threshold; let's compute the goal score
-                tmp_to_goal = torch.cdist(goal_position_torch, pts_torch, p=2).square()
-                dst_to_goal = torch.sqrt(torch.min(tmp_to_goal)).item()
+                tmp_to_goal = distance.cdist(goal_position, pts, "sqeuclidean")
+                dst_to_goal = np.sqrt(np.min(tmp_to_goal))
                 if dst_to_goal < min_goal_score:
                     # we have a trajectory that gets us closer to the goal
                     mavc.printd("traj %d gets us closer to the goal: %f"%(traj_idx, dst_to_goal))

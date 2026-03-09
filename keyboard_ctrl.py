@@ -133,7 +133,7 @@ def _on_release(key):
 def main():
     global config
     bound = True
-    bl, br, bf, bb = -0.5, 0.5, 0.5, -0.5
+    bl, br, bf, bb = -0.3, 0.3, 0.5, -0.1
 
     config = load_config(CONFIG_FILE)
 

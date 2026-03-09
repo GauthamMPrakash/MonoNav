@@ -231,7 +231,7 @@ def main():
         # ARDUCOPTER CONTROL
         # Connect to the drone
         mavc.connect_drone(IP, baud=baud)
-        mavc.set_ekf_origin(EKF_LAT, EKF_LON) # Ignored if already close to the previous origin, if set
+        mavc.set_ekf_origin(EKF_LAT, EKF_LON, 0) # Ignored if already close to the previous origin, if set
         reboot = mavc.reboot_if_EKF_origin(0.5)  # Call this function after enabling pose_stream
         if reboot:
             mavc.printd("Rebooted drone to set EKF origin. Waiting for reconnection...")
@@ -270,6 +270,7 @@ def main():
 
     # Initialize lists and frame counter.
         frame_number = 0
+        start_flight_time = time.time()
         mavc.heading_offset_init()
         if FLY_VEHICLE==True:
             print("Arming Motors!")
@@ -279,7 +280,6 @@ def main():
             mavc.takeoff(height)
             # mavc.set_speed(forward_speed)
         
-        start_flight_time = time.time()
         mavc.en_pose_stream()                    # Commands AP to stream poses at a deafult value of 15 Hz
         start_pose_thread()                      # Start background pose polling at 10 Hz (non-blocking)
         
@@ -438,10 +438,11 @@ def main():
                     no_safe_traj = True
                     allow_smart_rtl = True
                 print("[INFO] No safe trajectory. Hovering in place.")
+                shouldStop = True
             else:
                 no_safe_traj = False
 
-            mavc.printd("SELECTED max_traj_idx: ", max_traj_idx)
+            mavc.printd(f"SELECTED max_traj_idx: { max_traj_idx}")
 
     # Exited while(!shouldStop); end control!
         # print("shouldStop: ", shouldStop)

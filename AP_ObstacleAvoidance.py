@@ -445,7 +445,6 @@ def main():
         )
         sender_thread.start()
 
-    mavc.heading_offset_init()
     if FLY_VEHICLE:
         print("Arming Motors!")
         mavc.set_mode('GUIDED')
@@ -454,17 +453,18 @@ def main():
         mavc.set_speed(forward_speed)
 
     start_pose_thread()  # Start background pose polling at 10 Hz (non-blocking)
+    hdg = mavc.heading_offset_init()
     # Convert RDF goal to NED, then reorder to internal [E, D, N]
     # to match camera_position[0:-1, -1] from get_pose_matrix().
+    print("Goal position (RDF):", goal_position)
     if goal_position is not None:
         goal_position = np.array(
-            rdf_goal_to_ned(goal_position[0], goal_position[1], goal_position[2], mavc.heading_offset),
+            rdf_goal_to_ned(goal_position[0], goal_position[1], goal_position[2], hdg),
             dtype=np.float64,
         )
         print(f"Goal position (NED): {goal_position}")
         goal_position = np.array([goal_position[1], goal_position[2], goal_position[0]], dtype=np.float64).reshape(1, 3)
     mavc.printd(f"Heading offset : {mavc.heading_offset*180/np.pi}")
-    mavc.printd(f"Goal position (NED): {goal_position}")
 
     print("\n=== Keyboard Controls ===")
     if FLY_VEHICLE:
