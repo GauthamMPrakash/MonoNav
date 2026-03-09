@@ -457,13 +457,13 @@ def main():
     # Convert RDF goal to NED, then reorder to internal [E, D, N]
     # to match camera_position[0:-1, -1] from get_pose_matrix().
     print("Goal position (RDF):", goal_position)
-    if goal_position is not None:
-        goal_position = np.array(
-            rdf_goal_to_ned(goal_position[0], goal_position[1], goal_position[2], hdg),
-            dtype=np.float64,
-        )
-        print(f"Goal position (NED): {goal_position}")
-        goal_position = np.array([goal_position[1], goal_position[2], goal_position[0]], dtype=np.float64).reshape(1, 3)
+    # if goal_position is not None:
+    #     goal_position = np.array(
+    #         rdf_goal_to_ned(goal_position[0], goal_position[1], goal_position[2], hdg),
+    #         dtype=np.float64,
+    #     )
+    #     print(f"Goal position (NED): {goal_position}")
+    #     goal_position = np.array([goal_position[1], goal_position[2], goal_position[0]], dtype=np.float64).reshape(1, 3)
     mavc.printd(f"Heading offset : {mavc.heading_offset*180/np.pi}")
 
     print("\n=== Keyboard Controls ===")
@@ -551,7 +551,7 @@ def main():
                     if not goal_nav_active:
                         print("Pressed g. Using BendyRuler navigation to goal.")
                         mavc.set_mode('GUIDED')
-                        mavc.send_local_ned_pos(goal_position[0, 2], goal_position[0, 0], goal_position[0, 1]) # remember, goal_position is now in EDN
+                        mavc.send_body_offset_ned_pos(goal_position[2], goal_position[0], goal_position[1], speed=0.5) # remember, goal_position is now in EDN
                         goal_nav_active = True
                     
                     # Check distance to goal (both in NED frame after heading correction)

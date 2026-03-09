@@ -93,7 +93,8 @@ trajectory_execution_stop_event = threading.Event()
 traj_index = None
 trajectory_start_time = None  # when the current trajectory started
 
-# Intrinsics for undistortion
+# Intrinsics for undistortio
+# n
 camera_calibration_path = config['camera_calibration_path']
 mtx, dist, optimal_mtx, roi = get_calibration_values(camera_calibration_path) # for the robot's camera
 calib_width, calib_height = get_calibration_resolution(camera_calibration_path)
@@ -223,6 +224,7 @@ def main():
     global roi
     global goal_position
     global traj_max_none_count
+    global allow_smart_rtl
 
     traj_none_count = 0
     traj_max_none_count = 2                      # how many times traj chooser can predict no safe traj before we force stop
@@ -385,7 +387,6 @@ def main():
                     if dist_to_goal <= min_dist2goal:
                         print("Reached goal!")
                         allow_smart_rtl = True
-                        last_key_pressed = 'c'
                         break
 
                 # Transform Camera Image to undistort and crop according to calibration
@@ -438,7 +439,6 @@ def main():
                     no_safe_traj = True
                     allow_smart_rtl = True
                 print("[INFO] No safe trajectory. Hovering in place.")
-                shouldStop = True
             else:
                 no_safe_traj = False
 
@@ -448,7 +448,7 @@ def main():
         # print("shouldStop: ", shouldStop)
         # print(f"[INFO] {end_message}")
         print("[INFO] End control.")
-        print("[INFO] Current distance to goal (m): ", np.linalg.norm(camera_position-goal_position[0]) if goal_position is not None else "N/A")
+        print("[INFO] Current distance to goal (m): ", np.linalg.norm(camera_position[0:-1, -1]-goal_position) if goal_position is not None else "N/A")
         camera_position = [camera_position[0:-1, -1][2], camera_position[0:-1, -1][0], camera_position[0:-1, -1][1]] # print in NED order for readability
         print("[INFO] Current NED coords:" , camera_position)
         print("[INFO] Current RDF coords:", ned_to_rdf(camera_position[0], camera_position[1], camera_position[2], mavc.heading_offset))
@@ -467,6 +467,7 @@ def main():
 
     except KeyboardInterrupt:
         mavc.set_mode('LAND')
+        shouldStop = True
         print("\n[INTERRUPT] Ctrl+C detected. Sent land command.")
             
     finally:

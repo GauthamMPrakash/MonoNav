@@ -386,7 +386,7 @@ def choose_primitive(vbg, camera_position, traj_linesets, goal_position, dist_th
         tmp = distance.cdist(voxel_coords_numpy, pts, "sqeuclidean") # compute the distance between all voxels and all points in the trajectory
         voxel_idx, pt_idx = np.unravel_index(np.argmin(tmp), tmp.shape) # extract indices of the nearest voxel to and nearest point in the trajectory
         nearest_voxel_dist = np.sqrt(tmp[voxel_idx, pt_idx])
-        mavc.printd(f"traj {traj_idx}: nearest_obstacle={nearest_voxel_dist:.3f}m (threshold={dist_threshold}m)")
+        #mavc.printd(f"traj {traj_idx}: nearest_obstacle={nearest_voxel_dist:.3f}m (threshold={dist_threshold}m)")
         if nearest_voxel_dist > dist_threshold:
             # the trajectory meets the dist_threshold criterion
             if goal_position is not None:
@@ -395,7 +395,7 @@ def choose_primitive(vbg, camera_position, traj_linesets, goal_position, dist_th
                 dst_to_goal = np.sqrt(np.min(tmp_to_goal))
                 if dst_to_goal < min_goal_score:
                     # we have a trajectory that gets us closer to the goal
-                    mavc.printd("traj %d gets us closer to the goal: %f"%(traj_idx, dst_to_goal))
+                    #mavc.printd("traj %d gets us closer to the goal: %f"%(traj_idx, dst_to_goal))
                     max_traj_idx = traj_idx
                     min_goal_score = dst_to_goal
             else:
