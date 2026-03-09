@@ -323,13 +323,14 @@ def main():
             elif last_key_pressed == 'g':
                 print("Pressed g. Using MonoNav.")
                 if no_safe_traj:
+                    # Keep GO mode active, but execute a hover-only cycle and re-plan.
+                    traj_index = None
                     if FLY_VEHICLE:
                         mavc.send_body_offset_ned_vel(0, 0, yaw_rate=0)
-                        print("No safe trajectory")
+                        print("No safe trajectory, hovering and retrying planner")
                     time.sleep(0.1)
-                    continue
-
-                traj_index = max_traj_idx
+                else:
+                    traj_index = max_traj_idx
 
             elif last_key_pressed == 'h':
                 print("Pressed h. Hovering in place.")
@@ -375,7 +376,6 @@ def main():
                     dist_to_goal = np.linalg.norm(camera_position[0:-1, -1]-goal_position[0])
                     if dist_to_goal <= min_dist2goal:
                         print("Reached goal!")
-                        allow_smart_rtl = True
                         break
 
                 # Transform Camera Image to undistort and crop according to calibration
@@ -430,6 +430,7 @@ def main():
                 print("[INFO] No safe trajectory. Hovering in place.")
             else:
                 no_safe_traj = False
+                traj_none_count = 0
 
             mavc.printd(f"SELECTED max_traj_idx: { max_traj_idx}")
 
