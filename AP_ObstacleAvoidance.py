@@ -457,13 +457,12 @@ def main():
     # Convert RDF goal to NED, then reorder to internal [E, D, N]
     # to match camera_position[0:-1, -1] from get_pose_matrix().
     print("Goal position (RDF):", goal_position)
-    # if goal_position is not None:
-    #     goal_position = np.array(
-    #         rdf_goal_to_ned(goal_position[0], goal_position[1], goal_position[2], hdg),
-    #         dtype=np.float64,
-    #     )
-    #     print(f"Goal position (NED): {goal_position}")
-    #     goal_position = np.array([goal_position[1], goal_position[2], goal_position[0]], dtype=np.float64).reshape(1, 3)
+    if goal_position is not None:
+        goal_position = np.array(
+            rdf_goal_to_ned(goal_position[0], goal_position[1], goal_position[2], hdg)
+        )
+        print(f"Goal position (NED): {goal_position}")
+        goal_position = np.array([goal_position[1], goal_position[2], goal_position[0]]).reshape(1, 3)
     mavc.printd(f"Heading offset : {mavc.heading_offset*180/np.pi}")
 
     print("\n=== Keyboard Controls ===")
@@ -475,11 +474,14 @@ def main():
         print("  'h' - Hover (stop all movement)")
         print("  'c' - Land")
         print("  'q' - EMERGENCY STOP (disarm immediately)")
+    else: 
+        print("  Press 'g' to start ")
     print("  'Ctrl-C' - Quit program\n")
 
     try:
       while not shouldStop:
         bgr = cap.read()
+        update_key_from_cv(1)
         if debug_enable:
             cv2.imshow("Camera Stream", bgr)
         # Get latest pose directly (no buffering) - read fresh values each iteration
@@ -540,62 +542,58 @@ def main():
             )
             last_time = time.time()
             cv2.imshow("depth_map", display_image)
-            
-        update_key_from_cv(1)
 
+        if last_key_pressed == 'g':
+            if goal_position is not None:
+                # Send position target only once when entering goal navigation mode
+                if not goal_nav_active:
+                    print("Pressed g. Using BendyRuler navigation to goal.")
+                    mavc.set_mode('GUIDED')
+                    mavc.send_local_ned_pos(goal_position[0, 2], goal_position[0, 0], goal_position[0, 1]) # remember, goal_position is now in EDN
+                    goal_nav_active = True
+                
+                # Check distance to goal (both in NED frame after heading correction)
+                dist_to_goal = np.linalg.norm(camera_position[0:-1, -1] - goal_position)
+                if dist_to_goal <= min_dist2goal:
+                    print("Reached goal!")
+                    shouldStop = True
+                    last_key_pressed = 'c'
+                    goal_nav_active = False
+                
+                # # Companion-side safety: emergency hover if obstacle < threshold
+                # with distances_lock:
+                #     valid = distances[distances < (max_depth_cm + 1)]
+                # if valid.size > 0:
+                #     nearest_m = float(np.min(valid)) / 100.0
+                #     if nearest_m < min_obstacle_dist_m:
+                #         mavc.printd(
+                #             "[SAFETY] Obstacle at %.2fm < %.2fm — emergency hover!"
+                #             % (nearest_m, min_obstacle_dist_m)
+                #         )
+                #         mavc.send_body_offset_ned_vel(0, 0, 0, 0)
+            else:
+                print("Pressed g. Moving forward.")
+                mavc.send_body_offset_ned_vel(forward_speed, 0, 0, 0)
 
-        if FLY_VEHICLE:
-            if last_key_pressed == 'g':
-                if goal_position is not None:
-                    # Send position target only once when entering goal navigation mode
-                    if not goal_nav_active:
-                        print("Pressed g. Using BendyRuler navigation to goal.")
-                        mavc.set_mode('GUIDED')
-                        mavc.send_body_offset_ned_pos(goal_position[2], goal_position[0], goal_position[1], speed=0.5) # remember, goal_position is now in EDN
-                        goal_nav_active = True
-                    
-                    # Check distance to goal (both in NED frame after heading correction)
-                    dist_to_goal = np.linalg.norm(camera_position[0:-1, -1] - goal_position[0])
-                    if dist_to_goal <= min_dist2goal:
-                        print("Reached goal!")
-                        shouldStop = True
-                        last_key_pressed = 'c'
-                        goal_nav_active = False
-                    
-                    # # Companion-side safety: emergency hover if obstacle < threshold
-                    # with distances_lock:
-                    #     valid = distances[distances < (max_depth_cm + 1)]
-                    # if valid.size > 0:
-                    #     nearest_m = float(np.min(valid)) / 100.0
-                    #     if nearest_m < min_obstacle_dist_m:
-                    #         mavc.printd(
-                    #             "[SAFETY] Obstacle at %.2fm < %.2fm — emergency hover!"
-                    #             % (nearest_m, min_obstacle_dist_m)
-                    #         )
-                    #         mavc.send_body_offset_ned_vel(0, 0, 0, 0)
-                else:
-                    print("Pressed g. Moving forward.")
-                    mavc.send_body_offset_ned_vel(forward_speed, 0, 0, 0)
+        elif last_key_pressed == 'h':
+            print("Pressed h. Hovering in place.")
+            goal_nav_active = False  # Reset flag when switching modes
+            last_key_pressed = None
+            mavc.send_body_offset_ned_vel(0, 0, 0, 0)
+            time.sleep(0.1)
+            continue
 
-            elif last_key_pressed == 'h':
-                print("Pressed h. Hovering in place.")
-                goal_nav_active = False  # Reset flag when switching modes
-                last_key_pressed = None
-                mavc.send_body_offset_ned_vel(0, 0, 0, 0)
-                time.sleep(0.1)
-                continue
+        elif last_key_pressed == 'c':  # end control and land
+            print("Pressed c. Landing.")
+            mavc.set_mode('LAND')
+            shouldStop = True
+            goal_nav_active = False
 
-            elif last_key_pressed == 'c':  # end control and land
-                print("Pressed c. Landing.")
-                mavc.set_mode('LAND')
-                shouldStop = True
-                goal_nav_active = False
-
-            elif last_key_pressed == 'q':  # end flight immediately
-                print("Pressed q. EMERGENCY STOP.")
-                mavc.eSTOP()
-                shouldStop = True
-                goal_nav_active = False
+        elif last_key_pressed == 'q':  # end flight immediately
+            print("Pressed q. EMERGENCY STOP.")
+            mavc.eSTOP()
+            shouldStop = True
+            goal_nav_active = False
                 
 
     except KeyboardInterrupt:
@@ -620,7 +618,7 @@ def main():
         # Stop background threads and cleanup. If Ctrl-C requested immediate exit,
         # skip long operations (VBG save/visualization) and additional landing.
 
-        mavc.printd(f"[INFO] Current NED coordinates: {camera_position[0:-1, -1]}")    
+        # mavc.printd(f"[INFO] Current NED coordinates: {camera_position[0:-1, -1]}")    
         mavc.printd("[CLEANUP] Stopping background threads...")
         # Ensure stop events are set
         obstacle_sender_stop_event.set()

@@ -141,27 +141,27 @@ def send_body_offset_ned_vel(vx, vy, vz=0, yaw_rate=0):
         yaw_rate
     )
 
-def send_body_offset_ned_pos(x, y, z=0, speed=0, yaw=0, yaw_rate=0):
+def send_local_ned_pos(x, y, z):
     """
-    Send position in BODY_NED frame (forward/back, left/right, up/down).
-    The local origin is not the EKF origin, but rather with respect to the current position and heading of the drone.
+    Send position in LOCAL_NED frame (Relative to EKF-origin).
+    Currently AP_ObstacleAvoidance only requires 2D position control.
     """
-    type_mask = 0b000111000000
-    vx = speed if x > 0 else -speed if x < 0 else 0
-    vy = speed if y > 0 else -speed if y < 0 else 0 
+    type_mask = 0b110111111000
+    # vx = speed if x > 0 else -speed if x < 0 else 0
+    # vy = speed if y > 0 else -speed if y < 0 else 0 
     
     printd(f"Sending BODY_NED pos x={x}, y={y}, z={z}")
     drone.mav.set_position_target_local_ned_send(
         0,
         drone.target_system,
         drone.target_component,
-        mavutil.mavlink.MAV_FRAME_BODY_OFFSET_NED,
+        mavutil.mavlink.MAV_FRAME_LOCAL_NED,
         type_mask,
         x,y,z,     # pos
-        vx,vy,0,   # velocity
+        0,0,0,     # velocity
         0,0,0,     # acceleration ignored
-        yaw,
-        yaw_rate   
+        0,
+        0  
     )
 
 def set_speed(speed):
@@ -381,7 +381,7 @@ def test():
         print("AP time, offset:", timesync())
         arm()
         takeoff(1.2)
-        set_speed(0.25)
+        set_speed(0.3)
         time.sleep(0.2)
         #send_body_offset_ned_pos_vel(0.7, 0, pos_or_vel="pos", speed=0.3)
         """
@@ -403,13 +403,13 @@ def test():
             time.sleep(2)
             send_body_offset_ned_vel(0, -vel, yaw_rate=yaw_rate)
             time.sleep(2)
-        # square_vel()
+        #square_vel()
         time.sleep(1)
-        send_body_offset_ned_pos(1,0)
+        send_local_ned_pos(1,1,-1.2)
         time.sleep(5)
         print("Landing...")
         set_mode('LAND')
-            
+        
     except Exception as e:
         set_mode('LAND')
         print("Emergency")
