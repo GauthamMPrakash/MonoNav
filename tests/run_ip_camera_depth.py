@@ -24,7 +24,7 @@ if repo_root not in sys.path:
 # -----------------------------
 from utils.utils import load_config
 cfg = load_config(os.path.join(repo_root, "config.yml"))
-STREAM_URL = cfg.get("camera_ip")
+STREAM_URL = 0
 INPUT_SIZE = cfg.get("INPUT_SIZE")
 CHECKPOINT = "../"+cfg.get("DA2_CHECKPOINT")
 ENCODER = CHECKPOINT[-8:-4]
@@ -35,6 +35,13 @@ GRAYSCALE = cfg.get("grayscale", False)
 OUTDIR = "./esp32_depth"
 
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
+
+# Maximise CPU thread usage when running on CPU.
+if DEVICE == 'cpu':
+    _n_threads = os.cpu_count() or 1
+    torch.set_num_threads(_n_threads)
+    torch.set_num_interop_threads(max(1, _n_threads // 2))
+    print(f"CPU threads: intra={_n_threads}, inter={max(1, _n_threads // 2)}")
 
 cmap = matplotlib.colormaps.get_cmap('Spectral')
 
@@ -50,9 +57,26 @@ model_configs = {
 
 # Initialize the DepthAnythingV2 model and load the checkpoint
 depth_anything = DepthAnythingV2(**{**model_configs[ENCODER], 'max_depth': MAX_DEPTH})
-depth_anything.load_state_dict(torch.load(CHECKPOINT, map_location=DEVICE))
-depth_anything = depth_anything.to(DEVICE).eval()
-model_device = next(depth_anything.parameters()).device
+depth_anything.load_state_dict(torch.load(CHECKPOINT, map_location='cpu'))
+
+if DEVICE == 'cuda':
+    # FP16 halves memory bandwidth and speeds up Tensor Core ops significantly.
+    depth_anything = depth_anything.half().to(DEVICE, memory_format=torch.channels_last)
+else:
+    depth_anything = depth_anything.to(DEVICE)
+
+depth_anything.eval()
+
+# torch.compile (PyTorch >= 2.0): fuses ops, generates optimised kernels.
+# First few frames are slower (compilation), then throughput improves.
+if hasattr(torch, 'compile'):
+    try:
+        depth_anything = torch.compile(depth_anything, mode='max-autotune', dynamic=False)
+        print("torch.compile enabled (max-autotune)")
+    except Exception as e:
+        print(f"torch.compile skipped: {e}")
+
+model_device = DEVICE
 
 # -----------------------------
 # OPEN HTTP STREAM
