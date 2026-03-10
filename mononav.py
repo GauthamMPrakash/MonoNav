@@ -236,7 +236,7 @@ def main():
     global autonomous_mode
 
     traj_none_count = 0
-    traj_max_none_count = 1                      # how many times traj chooser can predict no safe traj before we force stop
+    traj_max_none_count = 2                      # how many times traj chooser can predict no safe traj before we force stop
 
     while True:
         # ARDUCOPTER CONTROL
@@ -307,7 +307,6 @@ def main():
     
         print("Starting control.", flush=True)
         traj_counter = 0         # how many trajectory iterations have we done?
-        no_safe_traj = False
         last_time = time.time()  # for FPS counter
         
         # Start trajectory execution thread
@@ -372,14 +371,8 @@ def main():
             elif last_key_pressed == 'g':
                 autonomous_mode = True
                 print("Pressed g. Using MonoNav.", flush=True)
-                if no_safe_traj:
                     # Keep GO mode active, but execute a hover-only cycle and re-plan.
-                    traj_index = None
-                    if FLY_VEHICLE:
-                        mavc.send_body_offset_ned_vel(0, 0, yaw_rate=0)
-                        print("No safe trajectory, hovering and retrying planner", flush=True)
-                    time.sleep(0.1)
-                else:
+                if max_traj_idx is not None:
                     traj_index = max_traj_idx
                 last_key_pressed = None
         
@@ -451,12 +444,16 @@ def main():
                 # In 'g' mode: run trajectory planning
                 max_traj_idx = choose_primitive(vbg.vbg, camera_position, traj_linesets, goal_position, min_dist2obs, filterYvals, filterWeights, filterTSDF, weight_threshold)
                 if max_traj_idx is None:
+                    if FLY_VEHICLE:
+                        mavc.send_body_offset_ned_vel(0, 0, yaw_rate=0)
+                        time.sleep(0.2)
                     traj_none_count += 1
                     if traj_none_count > traj_max_none_count:
-                        no_safe_traj = True
-                    print("[INFO] No safe trajectory. Hovering in place.", flush=True)
+                        print("[INFO] No safe trajectory. Hovering in place.", flush=True)
+                    else:
+                        print("[TRAJ] No safe trajectory found. Hit count: {}".format(traj_none_count), flush=True)
+                    time.sleep(1)
                 else:
-                    no_safe_traj = False
                     traj_none_count = 0
                     print(f"[TRAJ] Selected traj: {max_traj_idx}/{len(traj_list)-1}", flush=True)
 

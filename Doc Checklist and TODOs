@@ -1,7 +1,10 @@
 DOCs:
 - Copter: important parameter configs for the scripts
 - Verify parameter correctness in AP_ObstacleAvoidance banner documentation
+- Add what changed if DAv2 is modified
 
 TODOs:
 - Fix all other scripts to work under the new project structure
 - Try to implement a more performant way of saving data rather than as multiple files
+- Improve depth anything v2 performance
+- Update VBG with new data to support dynamic environments
