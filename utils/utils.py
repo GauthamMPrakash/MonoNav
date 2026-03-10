@@ -700,7 +700,7 @@ class ExplorationGrid:
             depth_numpy: Depth image (H, W) in meters
             camera_position: 4x4 camera pose matrix in RDF frame
             intrinsics: 3x3 camera intrinsic matrix
-            max_depth_pixels: Optional threshold on depth image values (in mm)
+            max_depth_pixels: Optional cap on number of depth points/rays used per update.
         """
         if self.grid_origin is None:
             # Initialize origin at camera position
@@ -742,16 +742,18 @@ class ExplorationGrid:
         # Filter points within grid bounds
         in_bounds = np.all((cell_indices >= 0) & (cell_indices < self.grid_dim), axis=1)
         cell_indices = cell_indices[in_bounds]
+
+        # Optional compute cap: subsample points/rays to keep runtime predictable.
+        if max_depth_pixels is not None and max_depth_pixels > 0 and len(cell_indices) > max_depth_pixels:
+            stride = max(1, len(cell_indices) // int(max_depth_pixels))
+            cell_indices = cell_indices[::stride]
         
         # Mark explored cells
         self.exploration_grid[cell_indices[:, 0], cell_indices[:, 1], cell_indices[:, 2]] = 1
         
-        # Mark ray-casting: from camera to each point marks space as empty (explored)
-        for i in range(len(points_world)):
-            if not in_bounds[i]:
-                continue
-            end_idx = cell_indices[i]
-            start_idx = ((camera_center - self.grid_origin) / self.cell_size).astype(np.int32)
+        # Mark ray-casting: from camera to each sampled point marks space as empty (explored)
+        start_idx = ((camera_center - self.grid_origin) / self.cell_size).astype(np.int32)
+        for end_idx in cell_indices:
             
             # Bresenham-like line drawing (simple version)
             steps = max(abs(end_idx[0] - start_idx[0]), 

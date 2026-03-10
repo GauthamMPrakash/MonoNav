@@ -147,10 +147,13 @@ else:
 
 vbg = VoxelBlockGrid(depth_scale, depth_max, trunc_voxel_multiplier, o3d.core.Device(device), intrinsic_matrix=fusion_intrinsics)
 
-# Initialize Exploration Grid (for treating unexplored space as unsafe)
-exploration_grid = ExplorationGrid(grid_size=50.0, cell_size=0.1, max_depth=MAX_DEPTH)
-use_exploration_grid = config.get('use_exploration_grid', True)  # Can disable if desired
+# Initialize Exploration Grid (optional; can be expensive)
+use_exploration_grid = config.get('use_exploration_grid', False)
+exploration_grid = ExplorationGrid(grid_size=50.0, cell_size=0.1, max_depth=MAX_DEPTH) if use_exploration_grid else None
 unexplored_penalty_dist = config.get('unexplored_penalty_dist', 0.5)  # Distance penalty for unexplored regions
+exploration_update_every_n_frames = int(config.get('exploration_update_every_n_frames', 3))
+exploration_max_points = int(config.get('exploration_max_points', 3000))
+print(f"Exploration grid enabled: {use_exploration_grid}", flush=True)
 
 # Initialize D* Lite Planner (for incremental replanning with partial maps)
 use_dstar_planner = config.get('use_dstar_planner', True)  # Can disable if desired
@@ -239,7 +242,7 @@ listener.start()
 
 # Trajectory execution thread: sends motion commands at fixed rate
 def trajectory_execution_loop(command_hz=10):
-    """Background thread: execute trajectory with smooth open-loop velocity commands at fixed rate."""
+    """Background thread: execute trajectory with closed-loop feedback at fixed rate."""
     global traj_index, trajectory_start_time
     period_s = 1.0 / max(command_hz, 1)
     next_command = time.monotonic()
@@ -252,13 +255,26 @@ def trajectory_execution_loop(command_hz=10):
             
             # Check if we've exceeded the trajectory period
             if elapsed < period:
-                # Open-loop primitive execution.
-                yawrate = amplitudes[traj_index] * np.sin(np.pi / period * elapsed)  # rad/s
-                yvel = yawrate * yvel_gain
-                yawrate = yawrate * yawrate_gain
+                # Open-loop primitive command.
+                yawrate_raw = amplitudes[traj_index] * np.sin(np.pi / period * elapsed)  # rad/s
+                yvel_raw = yawrate_raw * yvel_gain
+                yawrate = yawrate_raw * yawrate_gain
+
+                # Closed-loop heading correction.
+                pose = get_latest_pose()
+                current_heading = pose[3]  # yaw
+                desired_heading = amplitudes[traj_index] * np.sin(np.pi * elapsed / period)
+                heading_error = desired_heading - current_heading
+                heading_error = np.arctan2(np.sin(heading_error), np.cos(heading_error))
+
+                yawrate_feedback = config.get('kp_angular_feedback', 0.5) * heading_error
+                yvel_feedback = config.get('kp_lateral_feedback', 0.3) * heading_error
+
+                yawrate_corrected = yawrate + yawrate_feedback
+                yvel_corrected = yvel_raw + yvel_feedback
                 
                 if FLY_VEHICLE:
-                    mavc.send_body_offset_ned_vel(forward_speed, yvel, yaw_rate=yawrate)
+                    mavc.send_body_offset_ned_vel(forward_speed, yvel_corrected, yaw_rate=yawrate_corrected)
         
         next_command += period_s
         sleep_time = next_command - time.monotonic()
@@ -480,9 +496,14 @@ def main():
                 vbg.integration_step(transform_rgb, depth_numpy, camera_position)
                 
                 # Update exploration grid with new depth data
-                if use_exploration_grid:
+                if use_exploration_grid and (frame_number % max(1, exploration_update_every_n_frames) == 0):
                     try:
-                        exploration_grid.update_from_depth(depth_numpy, camera_position, vbg_intrinsics)
+                        exploration_grid.update_from_depth(
+                            depth_numpy,
+                            camera_position,
+                            vbg_intrinsics,
+                            max_depth_pixels=exploration_max_points,
+                        )
                     except Exception as e:
                         print(f"[WARNING] Failed to update exploration grid: {e}", flush=True)
 
