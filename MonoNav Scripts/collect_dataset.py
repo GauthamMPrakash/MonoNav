@@ -28,7 +28,8 @@ import time
 # from cflib.crazyflie.syncCrazyflie import SyncCrazyflie
 # from cflib.utils import uri_helper
 
-# sys.path.append('/home/nsimon/Documents/MonoNav/') 
+# Optional portable alternative if running this script outside repo root:
+# sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from utils.utils import reset_estimator, VideoCapture, get_crazyflie_pose, load_config
 import utils.mavlink_control as mavc
 '''

@@ -22,6 +22,8 @@ DICT = cv.aruco.getPredefinedDictionary(cv.aruco.DICT_4X4_50)
 
 board = cv.aruco.CharucoBoard((SQUARES_X, SQUARES_Y), SQUARE_LENGTH, MARKER_LENGTH, DICT)
 detector = cv.aruco.CharucoDetector(board)
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+INTRINSICS_PATH = os.path.join(SCRIPT_DIR, "intrinsics.json")
 
 class VideoCapture:
 
@@ -132,10 +134,10 @@ def main():
                   "refined_matrix": new_mtx.tolist(),
                   "roi": list(roi)
                 }
-                with open("intrinsics.json", "w") as f:
+                with open(INTRINSICS_PATH, "w") as f:
                   json.dump(calib_data, f, indent=4)
 
-                print("Data saved to 'intrinsics.json' in your current folder (with refined_matrix and roi).")
+                print(f"Data saved to '{INTRINSICS_PATH}' (with refined_matrix and roi).")
                 # ---------------------------------
                 calibrated = True
                 print(f"Success! RMS Error: {ret:.4f}")

@@ -5,8 +5,12 @@ Run this to verify the implementation compiles and basic functionality works.
 """
 
 import sys
+import os
 import numpy as np
-sys.path.insert(0, '/home/cesil/MonoNav')
+
+# Use a repository-root-relative import path instead of a hard-coded absolute path
+repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '.'))
+sys.path.insert(0, repo_root)
 
 print("=" * 60)
 print("MonoNav D* Lite Planner - Integration Validation")

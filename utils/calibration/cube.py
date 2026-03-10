@@ -15,13 +15,15 @@ MARKER_SIZE = 0.03 # 3cm in meters
 
 board = cv.aruco.CharucoBoard((SQUARES_X, SQUARES_Y), SQUARE_SIZE, MARKER_SIZE, DICT)
 detector = cv.aruco.CharucoDetector(board)
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+INTRINSICS_PATH = os.path.join(SCRIPT_DIR, "intrinsics.json")
 
 def main():
     # 1. Load Calibration
-    if not os.path.exists("calibration.json"):
-        print("Error: Run calibration script first!")
+    if not os.path.exists(INTRINSICS_PATH):
+        print(f"Error: Calibration file not found: {INTRINSICS_PATH}")
         return
-    with open("calibration.json", "r") as f:
+    with open(INTRINSICS_PATH, "r") as f:
         data = json.load(f)
     mtx = np.array(data["camera_matrix"])
     dist = np.array(data["dist_coeffs"])

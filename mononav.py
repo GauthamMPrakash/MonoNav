@@ -423,7 +423,6 @@ def main():
                     time.sleep(0.1)
                 else:
                     traj_index = max_traj_idx
-                last_key_pressed = None
         
         # Save trajectory information
             if save_during_flight:
