@@ -4,6 +4,7 @@ import numpy as np
 import torch
 import os
 import sys
+from contextlib import nullcontext
 
 # Add DepthAnythingV2-metric to path
 repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -24,7 +25,7 @@ if repo_root not in sys.path:
 # -----------------------------
 from utils.utils import load_config
 cfg = load_config(os.path.join(repo_root, "config.yml"))
-STREAM_URL = 0
+STREAM_URL = cfg.get("STREAM_URL")
 INPUT_SIZE = cfg.get("INPUT_SIZE")
 CHECKPOINT = "../"+cfg.get("DA2_CHECKPOINT")
 ENCODER = CHECKPOINT[-8:-4]
@@ -35,13 +36,15 @@ GRAYSCALE = cfg.get("grayscale", False)
 OUTDIR = "./esp32_depth"
 
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
+ENABLE_FP16 = bool(cfg.get("DA2_FP16", True))
+ENABLE_TORCH_COMPILE = bool(cfg.get("DA2_TORCH_COMPILE", False))
 
 # Maximise CPU thread usage when running on CPU.
-if DEVICE == 'cpu':
-    _n_threads = os.cpu_count() or 1
-    torch.set_num_threads(_n_threads)
-    torch.set_num_interop_threads(max(1, _n_threads // 2))
-    print(f"CPU threads: intra={_n_threads}, inter={max(1, _n_threads // 2)}")
+# if DEVICE == 'cpu':
+#     _n_threads = os.cpu_count() or 1
+#     torch.set_num_threads(_n_threads)
+#     torch.set_num_interop_threads(max(1, _n_threads // 2))
+#     print(f"CPU threads: intra={_n_threads}, inter={max(1, _n_threads // 2)}")
 
 cmap = matplotlib.colormaps.get_cmap('Spectral')
 
@@ -59,17 +62,18 @@ model_configs = {
 depth_anything = DepthAnythingV2(**{**model_configs[ENCODER], 'max_depth': MAX_DEPTH})
 depth_anything.load_state_dict(torch.load(CHECKPOINT, map_location='cpu'))
 
-if DEVICE == 'cuda':
+if DEVICE == 'cuda' and ENABLE_FP16:
     # FP16 halves memory bandwidth and speeds up Tensor Core ops significantly.
     depth_anything = depth_anything.half().to(DEVICE, memory_format=torch.channels_last)
 else:
-    depth_anything = depth_anything.to(DEVICE)
+    # Keep CPU (and non-FP16 paths) in full precision for stable performance.
+    depth_anything = depth_anything.float().to(DEVICE)
 
 depth_anything.eval()
 
-# torch.compile (PyTorch >= 2.0): fuses ops, generates optimised kernels.
-# First few frames are slower (compilation), then throughput improves.
-if hasattr(torch, 'compile'):
+# torch.compile can hurt throughput for this realtime loop on some setups,
+# so keep it opt-in via config.yml: DA2_TORCH_COMPILE: true
+if DEVICE == 'cuda' and ENABLE_TORCH_COMPILE and hasattr(torch, 'compile'):
     try:
         depth_anything = torch.compile(depth_anything, mode='max-autotune', dynamic=False)
         print("torch.compile enabled (max-autotune)")
@@ -103,7 +107,13 @@ while True:
     # -----------------------------
     # RUN DEPTH ESTIMATION
     # -----------------------------
-    depth = depth_anything.infer_image(frame, INPUT_SIZE)
+    if DEVICE == 'cuda' and ENABLE_FP16:
+        amp_ctx = torch.autocast(device_type='cuda', dtype=torch.float16)
+    else:
+        amp_ctx = nullcontext()
+
+    with amp_ctx:
+        depth = depth_anything.infer_image(frame, INPUT_SIZE)
     depth_vis = (depth - depth.min()) / (depth.max() - depth.min()) * 255.0
     depth_vis = depth_vis.astype(np.uint8)
     if SAVE_NUMPY:

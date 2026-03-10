@@ -4,6 +4,20 @@
 
 We here provide a simple codebase to fine-tune our Depth Anything V2 pre-trained encoder for metric depth estimation. Built on our powerful encoder, we use a simple DPT head to regress the depth. We fine-tune our pre-trained encoder on synthetic Hypersim / Virtual KITTI datasets for indoor / outdoor metric depth estimation, respectively.
 
+## Ardu-MonoNav Local Changes
+
+Current local runtime changes are in `tests/run_ip_camera_depth.py`:
+
+- Added config toggles:
+  - `DA2_FP16` (default: `true`) -> enables GPU FP16 path.
+  - `DA2_TORCH_COMPILE` (default: `false`) -> optional compile path.
+- Precision behavior:
+  - CUDA: FP16 enabled when `DA2_FP16: true`.
+  - CPU: full precision (FP32) only.
+- `torch.compile` is opt-in because it can reduce throughput on some realtime setups.
+
+`depth_anything_v2/dpt.py` is currently kept on the standard inference path (no custom CPU half/bfloat optimization).
+
 
 # Pre-trained Models
 
