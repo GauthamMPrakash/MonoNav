@@ -326,8 +326,24 @@ def get_traj_linesets(traj_list):
 
 """
 MonoNav Planner: Return the chosen trajectory index given the current position, current reconstruction, trajectory library, and goal position.
+Now with support for treating unexplored space as unsafe.
+
+Args:
+    vbg: VoxelBlockGrid with reconstruction
+    camera_position: Current camera pose (4x4 matrix)
+    traj_linesets: List of trajectory linesets to evaluate
+    goal_position: Optional goal position
+    dist_threshold: Minimum distance to obstacles
+    filterYvals: Filter vertical values
+    filterWeights: Filter by weight threshold
+    filterTSDF: Filter by TSDF values
+    weight_threshold: TSDF weight threshold
+    exploration_grid: Optional ExplorationGrid to treat unexplored space as obstacles
+    unexplored_penalty_dist: Distance penalty for unexplored regions (meters)
 """
-def choose_primitive(vbg, camera_position, traj_linesets, goal_position, dist_threshold, filterYvals, filterWeights, filterTSDF, weight_threshold):
+def choose_primitive(vbg, camera_position, traj_linesets, goal_position, dist_threshold, 
+                    filterYvals, filterWeights, filterTSDF, weight_threshold, 
+                    exploration_grid=None, unexplored_penalty_dist=0.5):
 
     # Boolean for stopping criteria
     shouldStop = False
@@ -383,25 +399,43 @@ def choose_primitive(vbg, camera_position, traj_linesets, goal_position, dist_th
         traj_lineset_copy = copy.deepcopy(traj_linset)
         traj_lineset_copy.transform(camera_position) # transform the lineset (copy) to the camera position
         pts = np.asarray(traj_lineset_copy.points) # meters # extract the points from the lineset
-        tmp = distance.cdist(voxel_coords_numpy, pts, "sqeuclidean") # compute the distance between all voxels and all points in the trajectory
         
-        # Guard against empty distance matrix (e.g., no voxels mapped yet)
-        if tmp.size == 0:
-            # No voxels in the scene; allow this trajectory
-            if goal_position is not None:
-                # With a goal, prefer trajectories; just use the first safe one
-                if max_traj_idx is None:
-                    max_traj_idx = traj_idx
-            else:
-                # No goal, just pick the first trajectory
-                if max_traj_idx is None:
-                    max_traj_idx = traj_idx
+        # Check collision with KNOWN obstacles
+        nearest_obstacle_dist = np.inf
+        if voxel_coords_numpy.shape[0] > 0:
+            tmp = distance.cdist(voxel_coords_numpy, pts, "sqeuclidean") # compute distances
+            voxel_idx, pt_idx = np.unravel_index(np.argmin(tmp), tmp.shape)
+            nearest_obstacle_dist = np.sqrt(tmp[voxel_idx, pt_idx])
+        
+        # Check collision with UNEXPLORED regions
+        nearest_unexplored_dist = np.inf
+        if exploration_grid is not None:
+            # Check if trajectory passes through unexplored regions
+            for pt in pts:
+                # Find the closest grid cell
+                grid_idx = ((pt - exploration_grid.grid_origin) / exploration_grid.cell_size).astype(np.int32)
+                
+                # Check if point is in grid bounds
+                if np.all(grid_idx >= 0) & np.all(grid_idx < exploration_grid.grid_dim):
+                    if exploration_grid.exploration_grid[grid_idx[0], grid_idx[1], grid_idx[2]] == 0:
+                        # Found unexplored voxel
+                        nearest_unexplored_dist = 0
+                        break
+                else:
+                    # Out of bounds (likely unexplored far away)
+                    nearest_unexplored_dist = 0
+                    break
+        
+        # Overall nearest obstacle distance (considering both known and unexplored)
+        if nearest_unexplored_dist < unexplored_penalty_dist:
+            # Trajectory passes too close to unexplored regions; reject it
             continue
         
-        voxel_idx, pt_idx = np.unravel_index(np.argmin(tmp), tmp.shape) # extract indices of the nearest voxel to and nearest point in the trajectory
-        nearest_voxel_dist = np.sqrt(tmp[voxel_idx, pt_idx])
-        #mavc.printd(f"traj {traj_idx}: nearest_obstacle={nearest_voxel_dist:.3f}m (threshold={dist_threshold}m)")
-        if nearest_voxel_dist > dist_threshold:
+        # Take minimum distance (more conservative)
+        nearest_total_dist = min(nearest_obstacle_dist, nearest_unexplored_dist if nearest_unexplored_dist < np.inf else nearest_obstacle_dist)
+        
+        #mavc.printd(f"traj {traj_idx}: nearest_obstacle={nearest_obstacle_dist:.3f}m, nearest_unexplored={nearest_unexplored_dist:.3f}m")
+        if nearest_total_dist > dist_threshold:
             # the trajectory meets the dist_threshold criterion
             if goal_position is not None:
                 # the trajectory satisfies the dist_threshold; let's compute the goal score
@@ -414,10 +448,10 @@ def choose_primitive(vbg, camera_position, traj_linesets, goal_position, dist_th
                     min_goal_score = dst_to_goal
             else:
                 # no goal position, choose the index that maximizes distance from the obstacles
-                if max_traj_score < nearest_voxel_dist:
+                if max_traj_score < nearest_total_dist:
                     # we have found a trajectory that gets us closer to goal
                     max_traj_idx = traj_idx
-                    max_traj_score = nearest_voxel_dist
+                    max_traj_score = nearest_total_dist
 
     # Do not force an immediate stop here. Let the caller (`mononav.py`) handle
     # transient cases where `max_traj_idx` is None (e.g., hover and retry).
@@ -595,3 +629,265 @@ def stop_pose_thread():
     if _pose_thread and _pose_thread.is_alive():
         _pose_thread.join(timeout=1.0)
     mavc.printd("Pose thread stopped")
+
+
+"""
+ExplorationGrid: Track which 3D regions have been explored (observed by the camera).
+Treats unexplored voxels as unsafe obstacles to prevent collisions with occluded obstacles.
+"""
+class ExplorationGrid:
+    """
+    Tracks explored regions of space based on camera field of view.
+    Cells that haven't been observed are marked as unexplored (unsafe).
+    
+    Args:
+        grid_size: Physical size of the grid in meters (e.g., 20m x 20m x 20m)
+        cell_size: Size of each grid cell in meters (e.g., 0.1m)
+        max_depth: Maximum depth for which we consider space "explored"
+    """
+    def __init__(self, grid_size=20.0, cell_size=0.1, max_depth=15.0):
+        self.grid_size = grid_size
+        self.cell_size = cell_size
+        self.max_depth = max_depth
+        # Grid dimensions
+        self.grid_dim = int(grid_size / cell_size)
+        # Exploration grid: 0=unexplored, 1=explored, -1=explored and empty
+        # We use int8 to save memory
+        self.exploration_grid = np.zeros((self.grid_dim, self.grid_dim, self.grid_dim), dtype=np.int8)
+        self.grid_origin = None  # Will be set at first update
+    
+    def update_from_depth(self, depth_numpy, camera_position, intrinsics, max_depth_pixels=None):
+        """
+        Update exploration grid based on depth image and camera pose.
+        Marks observed regions as explored.
+        
+        Args:
+            depth_numpy: Depth image (H, W) in meters
+            camera_position: 4x4 camera pose matrix in RDF frame
+            intrinsics: 3x3 camera intrinsic matrix
+            max_depth_pixels: Optional threshold on depth image values (in mm)
+        """
+        if self.grid_origin is None:
+            # Initialize origin at camera position
+            cam_pos = camera_position[0:3, 3]
+            self.grid_origin = cam_pos - self.grid_size / 2.0
+        
+        camera_center = camera_position[0:3, 3]
+        
+        # Convert depth to 3D points in camera frame
+        h, w = depth_numpy.shape
+        fx, fy = intrinsics[0, 0], intrinsics[1, 1]
+        cx, cy = intrinsics[0, 2], intrinsics[1, 2]
+        
+        # Create pixel coordinates
+        u = np.arange(w)
+        v = np.arange(h)
+        uu, vv = np.meshgrid(u, v)
+        
+        # Convert to camera coordinates (in meters)
+        depth_m = depth_numpy.astype(np.float32) / 1000.0  # Convert mm to meters
+        x_cam = (uu - cx) * depth_m / fx
+        y_cam = (vv - cy) * depth_m / fy
+        z_cam = depth_m
+        
+        # Only consider valid depth values
+        valid_mask = (depth_m > 0) & (depth_m < self.max_depth)
+        
+        # Transform points to world frame (RDF)
+        rotation = camera_position[0:3, 0:3]
+        translation = camera_position[0:3, 3]
+        
+        # Stack coordinates for batch transformation
+        points_cam = np.stack([x_cam[valid_mask], y_cam[valid_mask], z_cam[valid_mask]], axis=1)
+        points_world = points_cam @ rotation.T + translation
+        
+        # Mark cells as explored
+        cell_indices = ((points_world - self.grid_origin) / self.cell_size).astype(np.int32)
+        
+        # Filter points within grid bounds
+        in_bounds = np.all((cell_indices >= 0) & (cell_indices < self.grid_dim), axis=1)
+        cell_indices = cell_indices[in_bounds]
+        
+        # Mark explored cells
+        self.exploration_grid[cell_indices[:, 0], cell_indices[:, 1], cell_indices[:, 2]] = 1
+        
+        # Mark ray-casting: from camera to each point marks space as empty (explored)
+        for i in range(len(points_world)):
+            if not in_bounds[i]:
+                continue
+            end_idx = cell_indices[i]
+            start_idx = ((camera_center - self.grid_origin) / self.cell_size).astype(np.int32)
+            
+            # Bresenham-like line drawing (simple version)
+            steps = max(abs(end_idx[0] - start_idx[0]), 
+                       abs(end_idx[1] - start_idx[1]), 
+                       abs(end_idx[2] - start_idx[2])) + 1
+            
+            if steps > 1:
+                line_indices = np.linspace(start_idx, end_idx, steps, dtype=np.int32)
+                line_in_bounds = np.all((line_indices >= 0) & (line_indices < self.grid_dim), axis=1)
+                line_indices = line_indices[line_in_bounds]
+                self.exploration_grid[line_indices[:, 0], line_indices[:, 1], line_indices[:, 2]] = -1
+    
+    def get_unexplored_voxels(self, region_bounds=None):
+        """
+        Get coordinates of unexplored voxels as point cloud.
+        Useful for visualizing unexplored regions.
+        
+        Args:
+            region_bounds: Optional bounds [min_x, max_x, min_y, max_y, min_z, max_z] in meters
+        
+        Returns:
+            Array of unexplored voxel coordinates in world frame
+        """
+        unexplored_mask = self.exploration_grid == 0
+        
+        if region_bounds is not None:
+            # Filter by region
+            idx_lower = ((np.array(region_bounds[0:2:2]) - self.grid_origin) / self.cell_size).astype(np.int32)
+            idx_upper = ((np.array(region_bounds[1:2:2]) - self.grid_origin) / self.cell_size).astype(np.int32)
+            idx_lower = np.maximum(idx_lower, 0)
+            idx_upper = np.minimum(idx_upper, self.grid_dim)
+            unexplored_mask[0:idx_lower[0], :, :] = False
+            unexplored_mask[idx_upper[0]:, :, :] = False
+            unexplored_mask[:, 0:idx_lower[1], :] = False
+            unexplored_mask[:, idx_upper[1]:, :] = False
+            unexplored_mask[:, :, 0:idx_lower[2]] = False
+            unexplored_mask[:, :, idx_upper[2]:] = False
+        
+        indices = np.where(unexplored_mask)
+        if len(indices[0]) == 0:
+            return np.array([]).reshape(0, 3)
+        
+        coords = np.stack(indices, axis=1)
+        world_coords = coords * self.cell_size + self.grid_origin
+        return world_coords
+
+
+"""
+ClosedLoopPrimitiveController: Improved motion primitive tracking with feedback.
+Uses position feedback to correct tracking errors during primitive execution.
+"""
+class ClosedLoopPrimitiveController:
+    """
+    Executes motion primitives with closed-loop feedback control.
+    Tracks the expected trajectory and corrects for deviations.
+    
+    Args:
+        forward_speed: Nominal forward speed (m/s)
+        yvel_gain: Gain for lateral velocity (dimensionless)
+        yawrate_gain: Gain for yaw rate control (dimensionless)
+        kp_lateral: Proportional gain for lateral position error (default: 0.5)
+        kp_angular: Proportional gain for angular error (default: 0.3)
+    """
+    def __init__(self, forward_speed=1.0, yvel_gain=0.5, yawrate_gain=1.0, 
+                 kp_lateral=0.5, kp_angular=0.3):
+        self.forward_speed = forward_speed
+        self.yvel_gain = yvel_gain
+        self.yawrate_gain = yawrate_gain
+        self.kp_lateral = kp_lateral
+        self.kp_angular = kp_angular
+        
+        # Execution state
+        self.start_position = None
+        self.start_heading = None
+        self.trajectory_start_time = None
+        self.period = None
+        self.amplitude = None
+        self.desired_trajectory = None
+        self.trajectory_start_pose = None
+    
+    def initialize_trajectory(self, start_position, start_heading, period, amplitude, 
+                             forward_speed=None):
+        """
+        Initialize a new trajectory execution.
+        
+        Args:
+            start_position: Initial position [x, y, z]
+            start_heading: Initial heading in radians
+            period: Trajectory period in seconds
+            amplitude: Sinusoidal amplitude for yaw rate
+            forward_speed: Optional override for forward speed
+        """
+        self.start_position = np.array(start_position)
+        self.start_heading = start_heading
+        self.trajectory_start_time = time.time()
+        self.period = period
+        self.amplitude = amplitude
+        if forward_speed is not None:
+            self.forward_speed = forward_speed
+        
+        # Pre-compute ideal trajectory for reference
+        self.desired_trajectory = self._compute_desired_trajectory()
+    
+    def _compute_desired_trajectory(self, dt=0.01):
+        """
+        Pre-compute the desired trajectory for closed-loop tracking.
+        Returns list of (t, x, y, z, heading) tuples.
+        """
+        trajectory = []
+        num_steps = int(self.period / dt)
+        for i in range(num_steps + 1):
+            t = i * dt
+            if t > self.period:
+                t = self.period
+            
+            # Ideal trajectory: straight forward with sinusoidal yaw
+            x = self.forward_speed * t
+            y = 0  # Lateral offset computed from yaw rate integration
+            z = 0  # Altitude held constant
+            heading = self.amplitude * np.sin(np.pi * t / self.period)
+            
+            trajectory.append((t, x, y, z, heading))
+        
+        return trajectory
+    
+    def compute_control(self, current_position, current_heading):
+        """
+        Compute control commands with closed-loop feedback.
+        
+        Args:
+            current_position: Current position [x, y, z] in RDF frame
+            current_heading: Current heading in radians (yaw)
+        
+        Returns:
+            Tuple: (vx, vy, yaw_rate) control commands
+        """
+        if self.trajectory_start_time is None:
+            return self.forward_speed, 0, 0
+        
+        elapsed = time.time() - self.trajectory_start_time
+        
+        # Clamp elapsed time to trajectory period
+        if elapsed > self.period:
+            return 0, 0, 0
+        
+        # Get desired state from pre-computed trajectory
+        desired_heading = self.amplitude * np.sin(np.pi * elapsed / self.period)
+        desired_yaw_rate = self.amplitude * (np.pi / self.period) * np.cos(np.pi * elapsed / self.period)
+        
+        # Compute heading error
+        heading_error = desired_heading - current_heading
+        # Normalize to [-pi, pi]
+        heading_error = np.arctan2(np.sin(heading_error), np.cos(heading_error))
+        
+        # Closed-loop yaw rate correction
+        yaw_rate = desired_yaw_rate + self.kp_angular * heading_error
+        
+        # Forward speed (open-loop for now, could add feedback)
+        vx = self.forward_speed
+        
+        # Lateral velocity derived from yaw rate
+        yvel = yaw_rate * self.yvel_gain
+        
+        # Scale yaw rate for ArduCopter
+        yaw_rate_command = yaw_rate * self.yawrate_gain
+        
+        return vx, yvel, yaw_rate_command
+    
+    def is_complete(self):
+        """Check if trajectory execution is complete."""
+        if self.trajectory_start_time is None:
+            return False
+        elapsed = time.time() - self.trajectory_start_time
+        return elapsed >= self.period

@@ -119,6 +119,11 @@ else:
 
 vbg = VoxelBlockGrid(depth_scale, depth_max, trunc_voxel_multiplier, o3d.core.Device(device), intrinsic_matrix=fusion_intrinsics)
 
+# Initialize Exploration Grid (for treating unexplored space as unsafe)
+exploration_grid = ExplorationGrid(grid_size=50.0, cell_size=0.1, max_depth=MAX_DEPTH)
+use_exploration_grid = config.get('use_exploration_grid', True)  # Can disable if desired
+unexplored_penalty_dist = config.get('unexplored_penalty_dist', 0.5)  # Distance penalty for unexplored regions
+
 # Initialize Trajectory Library (Motion Primitives)
 trajlib_dir = config['trajlib_dir']
 traj_list = get_trajlist(trajlib_dir)
@@ -193,10 +198,19 @@ listener.start()
 
 # Trajectory execution thread: sends motion commands at fixed rate
 def trajectory_execution_loop(command_hz=10):
-    """Background thread: execute trajectory with smooth velocity commands at fixed rate."""
+    """Background thread: execute trajectory with smooth velocity commands at fixed rate (now with closed-loop feedback)."""
     global traj_index, trajectory_start_time
     period_s = 1.0 / max(command_hz, 1)
     next_command = time.monotonic()
+    
+    # Create closed-loop controller
+    cl_controller = ClosedLoopPrimitiveController(
+        forward_speed=forward_speed,
+        yvel_gain=yvel_gain,
+        yawrate_gain=yawrate_gain,
+        kp_lateral=config.get('kp_lateral_feedback', 0.3),
+        kp_angular=config.get('kp_angular_feedback', 0.5)
+    )
     
     # log whenever the execution loop begins iteration (for debugging thread activity)
     while not trajectory_execution_stop_event.is_set():
@@ -206,12 +220,29 @@ def trajectory_execution_loop(command_hz=10):
             
             # Check if we've exceeded the trajectory period
             if elapsed < period:
-                # Compute smooth yaw rate for this instant
+                # Use closed-loop controller for better tracking
+                # Get current pose (non-blocking from pose thread)
+                pose = get_latest_pose()
+                current_heading = pose[3]  # yaw
+                
+                # Get raw open-loop command as reference
                 yawrate = amplitudes[traj_index] * np.sin(np.pi / period * elapsed)  # rad/s
                 yvel = yawrate * yvel_gain
                 yawrate = yawrate * yawrate_gain
+                
+                # Apply closed-loop correction (simple proportional)
+                desired_heading = amplitudes[traj_index] * np.sin(np.pi * elapsed / period)
+                heading_error = desired_heading - current_heading
+                # Normalize heading error to [-pi, pi]
+                heading_error = np.arctan2(np.sin(heading_error), np.cos(heading_error))
+                
+                # Add feedback correction
+                yawrate_feedback = config.get('kp_angular_feedback', 0.5) * heading_error
+                yawrate_corrected = yawrate + yawrate_feedback
+                yvel_corrected = yvel + config.get('kp_lateral_feedback', 0.3) * heading_error
+                
                 if FLY_VEHICLE:
-                    mavc.send_body_offset_ned_vel(forward_speed, yvel, yaw_rate=yawrate)
+                    mavc.send_body_offset_ned_vel(forward_speed, yvel_corrected, yaw_rate=yawrate_corrected)
         
         next_command += period_s
         sleep_time = next_command - time.monotonic()
@@ -435,6 +466,13 @@ def main():
 
             # integrate the vbg (prefers rgb)
                 vbg.integration_step(transform_rgb, depth_numpy, camera_position)
+                
+                # Update exploration grid with new depth data
+                if use_exploration_grid:
+                    try:
+                        exploration_grid.update_from_depth(depth_numpy, camera_position, vbg_intrinsics)
+                    except Exception as e:
+                        print(f"[WARNING] Failed to update exploration grid: {e}", flush=True)
 
                 if save_during_flight:
                     cv2.imwrite(img_dir + '/frame-%06d.rgb.jpg'%(frame_number), bgr)
@@ -448,8 +486,12 @@ def main():
 
         # In autonomous GO mode, update selected trajectory from planner.
             if autonomous_mode:
-                # In 'g' mode: run trajectory planning
-                max_traj_idx = choose_primitive(vbg.vbg, camera_position, traj_linesets, goal_position, min_dist2obs, filterYvals, filterWeights, filterTSDF, weight_threshold)
+                # In 'g' mode: run trajectory planning with exploration awareness
+                exp_grid = exploration_grid if use_exploration_grid else None
+                max_traj_idx = choose_primitive(vbg.vbg, camera_position, traj_linesets, goal_position, 
+                                               min_dist2obs, filterYvals, filterWeights, filterTSDF, 
+                                               weight_threshold, exploration_grid=exp_grid, 
+                                               unexplored_penalty_dist=unexplored_penalty_dist)
                 if max_traj_idx is None:
                     traj_none_count += 1
                     if traj_none_count > traj_max_none_count:

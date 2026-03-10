@@ -58,4 +58,13 @@ forward_speed: 0.5         # forward speed in m/s, set to None to use speed defi
 yvel_gain: 0.015           # yvel =  -yawrate*yvel_gain  <- for providing sideways velocity so that turns can be made sharper. Increase for faster turns.
 yawrate_gain: 1.25         # yawrate = yawrate*yawrate_gain
 
+# Improved Navigation Settings
+# Exploration Grid: treats unexplored space as unsafe to prevent crashes
+use_exploration_grid: True   # Enable ExplorationGrid for obstacle avoidance in occluded space
+unexplored_penalty_dist: 0.5 # Distance penalty for unexplored regions (m). Trajectories passing closer are rejected.
+
+# Closed-Loop Primitive Control: feedback-based tracking for more accurate primitive execution
+kp_angular_feedback: 0.5     # Proportional gain for angular error correction (0.0 to 1.0)
+kp_lateral_feedback: 0.3     # Proportional gain for lateral error correction (0.0 to 1.0)
+
 FLY_VEHICLE: False         # whether to actually fly the drone
