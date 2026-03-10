@@ -24,7 +24,7 @@ if repo_root not in sys.path:
 # -----------------------------
 from utils.utils import load_config
 cfg = load_config(os.path.join(repo_root, "config.yml"))
-STREAM_URL = cfg.get("camera_ip")
+STREAM_URL = cfg.get("camera_ip")               # Enter URL of stream or camera number for webcam (0, 1, etc.)
 INPUT_SIZE = cfg.get("INPUT_SIZE")
 CHECKPOINT = "../"+cfg.get("DA2_CHECKPOINT")
 ENCODER = CHECKPOINT[-8:-4]
@@ -55,14 +55,16 @@ depth_anything = depth_anything.to(DEVICE).eval()
 model_device = next(depth_anything.parameters()).device
 
 # -----------------------------
-# OPEN HTTP STREAM
+# OPEN CAM STREAM
 # -----------------------------
-cap = cv2.VideoCapture(STREAM_URL)
+
+cap = cv2.VideoCapture(STREAM_URL, cv2.CAP_V4L2)
 cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+
 if not cap.isOpened():
     raise RuntimeError("Cannot open ESP32 HTTP stream")
 
-print(" ESP32 HTTP stream opened")
+print("Camera stream opened")
 
 frame_count = 0
 while True:
@@ -70,6 +72,9 @@ while True:
     if not ret:
         print(" Frame not received, retrying...")
         continue
+
+    if frame_count == 0:
+        print("Resolution: {}x{}".format(frame.shape[1], frame.shape[0]))
 
     # Show RGB stream immediately, before depth estimation.
     # cv2.imshow("ESP32 RGB Stream", frame)
