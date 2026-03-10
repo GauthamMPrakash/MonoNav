@@ -326,7 +326,7 @@ def get_traj_linesets(traj_list):
 
 """
 MonoNav Planner: Return the chosen trajectory index given the current position, current reconstruction, trajectory library, and goal position.
-Now with support for treating unexplored space as unsafe.
+Now with support for D* Lite path planning and treating unexplored space as unsafe.
 
 Args:
     vbg: VoxelBlockGrid with reconstruction
@@ -340,10 +340,150 @@ Args:
     weight_threshold: TSDF weight threshold
     exploration_grid: Optional ExplorationGrid to treat unexplored space as obstacles
     unexplored_penalty_dist: Distance penalty for unexplored regions (meters)
+    dstar_planner: Optional DStarLitePlanner for global path planning
+    use_dstar: Whether to use D* Lite for goal-directed navigation
 """
 def choose_primitive(vbg, camera_position, traj_linesets, goal_position, dist_threshold, 
                     filterYvals, filterWeights, filterTSDF, weight_threshold, 
-                    exploration_grid=None, unexplored_penalty_dist=0.5):
+                    exploration_grid=None, unexplored_penalty_dist=0.5,
+                    dstar_planner=None, use_dstar=True):
+
+    # Boolean for stopping criteria
+    shouldStop = False
+
+    # Get weights and tsdf values from the voxel block grid
+    weights = vbg.attribute("weight").reshape((-1))
+    tsdf = vbg.attribute("tsdf").reshape((-1))
+    # Get the voxel_coords, voxel_indices
+    voxel_coords, voxel_indices = vbg.voxel_coordinates_and_flattened_indices()
+
+    # IMPORTANT
+    # Use voxel_indices to rearrange weights and tsdf to match voxel_coords
+    # Otherwise, the ordering of voxels from the hashmap is non-deterministic
+    weights = weights[voxel_indices]
+    tsdf = tsdf[voxel_indices]
+
+    # Generate mask to filter out y values (vertical) (+y is DOWN)
+    # This is useful to filter out the floor, and avoid obstacles in-plane
+    if filterYvals:
+        mask = voxel_coords[:, 1] < -0.3
+        # Apply mask to voxel_coords and weights
+        voxel_coords = voxel_coords[mask]
+        weights = weights[mask]
+        tsdf = tsdf[mask]
+
+    # Generate mask to filter by weights
+    # This rejects voxels below a certain weight threshold
+    if filterWeights:
+        mask = weights > weight_threshold
+        # Apply mask to voxel_coords and weights
+        voxel_coords = voxel_coords[mask,:]
+        tsdf = tsdf[mask]
+
+    # Generate mask to filter by tsdf value
+    if filterTSDF:
+        # Generate mask to filter by tsdf values
+        mask = tsdf < 0.0
+        voxel_coords = voxel_coords[mask,:]
+
+    # transfer to cpu for cdist
+    voxel_coords_numpy = voxel_coords.cpu().numpy()
+
+    # D* Lite planning (if enabled and planner provided)
+    dstar_path = None
+    if use_dstar and dstar_planner is not None and goal_position is not None:
+        camera_pos = camera_position[0:3, 3]
+        try:
+            dstar_path = dstar_planner.plan_to_goal(
+                camera_pos, goal_position, exploration_grid, 
+                voxel_coords_numpy, camera_position, weight_threshold
+            )
+        except Exception as e:
+            mavc.printd(f"[WARNING] D* Lite planning failed: {e}, falling back to greedy")
+
+    # NOW WE HAVE A FILTERED SET OF VOXELS THAT REPRESENT OBSTACLES
+    # NEXT, WE DETERMINE THE BEST TRAJECTORY ACCORDING TO A COST FUNCTION
+
+    # Initialize scoring variables to evaluate the trajectories
+    max_traj_score = -np.inf # track best trajectory
+    min_goal_score = np.inf # track proximity to goal
+    max_traj_idx = None # track the index of the best trajectory
+
+    # iterate over the sorted traj linesets
+    for traj_idx, traj_linset in enumerate(traj_linesets):
+        traj_lineset_copy = copy.deepcopy(traj_linset)
+        traj_lineset_copy.transform(camera_position) # transform the lineset (copy) to the camera position
+        pts = np.asarray(traj_lineset_copy.points) # meters # extract the points from the lineset
+        
+        # Check collision with KNOWN obstacles
+        nearest_obstacle_dist = np.inf
+        if voxel_coords_numpy.shape[0] > 0:
+            tmp = distance.cdist(voxel_coords_numpy, pts, "sqeuclidean") # compute distances
+            voxel_idx, pt_idx = np.unravel_index(np.argmin(tmp), tmp.shape)
+            nearest_obstacle_dist = np.sqrt(tmp[voxel_idx, pt_idx])
+        
+        # Check collision with UNEXPLORED regions
+        nearest_unexplored_dist = np.inf
+        if exploration_grid is not None:
+            # Check if trajectory passes through unexplored regions
+            for pt in pts:
+                # Find the closest grid cell
+                grid_idx = ((pt - exploration_grid.grid_origin) / exploration_grid.cell_size).astype(np.int32)
+                
+                # Check if point is in grid bounds
+                if np.all(grid_idx >= 0) & np.all(grid_idx < exploration_grid.grid_dim):
+                    if exploration_grid.exploration_grid[grid_idx[0], grid_idx[1], grid_idx[2]] == 0:
+                        # Found unexplored voxel
+                        nearest_unexplored_dist = 0
+                        break
+                else:
+                    # Out of bounds (likely unexplored far away)
+                    nearest_unexplored_dist = 0
+                    break
+        
+        # Overall nearest obstacle distance (considering both known and unexplored)
+        if nearest_unexplored_dist < unexplored_penalty_dist:
+            # Trajectory passes too close to unexplored regions; reject it
+            continue
+        
+        # Take minimum distance (more conservative)
+        nearest_total_dist = min(nearest_obstacle_dist, nearest_unexplored_dist if nearest_unexplored_dist < np.inf else nearest_obstacle_dist)
+        
+        #mavc.printd(f"traj {traj_idx}: nearest_obstacle={nearest_obstacle_dist:.3f}m, nearest_unexplored={nearest_unexplored_dist:.3f}m")
+        if nearest_total_dist > dist_threshold:
+            # the trajectory meets the dist_threshold criterion
+            
+            # Score trajectory based on progress along D* Lite path (if available)
+            if dstar_path is not None and len(dstar_path) > 0:
+                # Find closest point on D* path to trajectory endpoint
+                traj_endpoint = pts[-1]
+                path_distances = [np.linalg.norm(np.array(p) - traj_endpoint) for p in dstar_path]
+                progress_score = -min(path_distances)  # Negative distance = reward
+                
+                if progress_score < max_traj_score:
+                    max_traj_idx = traj_idx
+                    max_traj_score = progress_score
+            
+            elif goal_position is not None:
+                # Fallback: greedy goal-directed selection (no D* path available)
+                tmp_to_goal = distance.cdist(goal_position, pts, "sqeuclidean")
+                dst_to_goal = np.sqrt(np.min(tmp_to_goal))
+                if dst_to_goal < min_goal_score:
+                    # we have a trajectory that gets us closer to the goal
+                    #mavc.printd("traj %d gets us closer to the goal: %f"%(traj_idx, dst_to_goal))
+                    max_traj_idx = traj_idx
+                    min_goal_score = dst_to_goal
+            else:
+                # no goal position, choose the index that maximizes distance from the obstacles (exploration mode)
+                if max_traj_score < nearest_total_dist:
+                    # we have found a trajectory that gets us closer to goal
+                    max_traj_idx = traj_idx
+                    max_traj_score = nearest_total_dist
+
+    # Do not force an immediate stop here. Let the caller (`mononav.py`) handle
+    # transient cases where `max_traj_idx` is None (e.g., hover and retry).
+    return max_traj_idx
+
 
     # Boolean for stopping criteria
     shouldStop = False
@@ -890,4 +1030,276 @@ class ClosedLoopPrimitiveController:
         if self.trajectory_start_time is None:
             return False
         elapsed = time.time() - self.trajectory_start_time
+        return elapsed >= self.period if self.period else False
+
+
+"""
+D* Lite Planner: Incremental shortest path planning for exploration with partial maps.
+Optimal for monocular vision where the map is discovered incrementally.
+
+D* Lite efficiently replans when new obstacles are discovered, making it ideal for:
+- Unknown/partially-known environments (monocular vision)
+- Goal-directed navigation with incremental map updates
+- Undirected exploration with frontier-based goals
+
+Reference: Koenig & Likhachev, "D* Lite", IJCAI 2005
+"""
+class DStarLitePlanner:
+    """
+    D* Lite path planner for navigation with incremental map updates.
+    
+    Args:
+        grid_size: Physical size of planning grid in meters (e.g., 50m)
+        cell_size: Size of each grid cell in meters (e.g., 0.2m)
+        cost_obstacle: Cost assigned to obstacles
+        cost_free: Cost of traversable space
+        k_max_iterations: Max algorithm iterations per replan
+    """
+    def __init__(self, grid_size=50.0, cell_size=0.2, cost_obstacle=1000.0, 
+                 cost_free=1.0, k_max_iterations=1000):
+        self.grid_size = grid_size
+        self.cell_size = cell_size
+        self.cost_obstacle = cost_obstacle
+        self.cost_free = cost_free
+        self.k_max_iterations = k_max_iterations
+        
+        # Grid setup
+        self.grid_dim = int(grid_size / cell_size)
+        self.h = self.grid_dim  # heuristic scale
+        self.grid_origin = None
+        
+        # Cost map: 0=free, 1=unexplored (treated as obstacle), 2=obstacle
+        self.cost_map = np.ones((self.grid_dim, self.grid_dim, self.grid_dim), dtype=np.float32)
+        
+        # D* Lite algorithm state
+        self.g = {}  # Cost-to-come from goal
+        self.rhs = {}  # Lookahead estimate
+        self.open_list = []  # Priority queue (key, cell)
+        self.start = None
+        self.goal = None
+        self.last_start = None
+        self.km = 0
+        self.path = []
+        self.replanned = False
+        
+    def _heuristic(self, a, b):
+        """Euclidean heuristic in grid space."""
+        diff = np.array(a) - np.array(b)
+        return np.linalg.norm(diff) * self.cell_size
+    
+    def _key(self, s):
+        """D* Lite key for cell s."""
+        if s == self.goal:
+            return (self.g.get(s, np.inf), 0)
+        h_val = self._heuristic(s, self.goal) if self.goal else 0
+        return (min(self.g.get(s, np.inf), self.rhs.get(s, np.inf)) + h_val + self.km, 
+                min(self.g.get(s, np.inf), self.rhs.get(s, np.inf)))
+    
+    def _get_neighbors(self, cell):
+        """Get 6-connected neighbors in 3D grid (considering only horizontal movement)."""
+        x, y, z = cell
+        neighbors = []
+        # 4-connected in horizontal plane (x,z), fixed y (height)
+        for dx, dz in [(-1,0), (1,0), (0,-1), (0,1)]:
+            nx, nz = x + dx, z + dz
+            if 0 <= nx < self.grid_dim and 0 <= nz < self.grid_dim:
+                neighbors.append((nx, y, nz))
+        return neighbors
+    
+    def _cost(self, from_cell, to_cell):
+        """Traversal cost between cells."""
+        if self._is_occupied(to_cell):
+            return self.cost_obstacle
+        return self.cost_free * self._heuristic(from_cell, to_cell)
+    
+    def _is_occupied(self, cell):
+        """Check if cell is occupied or unexplored."""
+        x, y, z = cell
+        if not (0 <= x < self.grid_dim and 0 <= y < self.grid_dim and 0 <= z < self.grid_dim):
+            return True  # Out of bounds is occupied
+        return self.cost_map[x, y, z] > 1.5  # > 1 means obstacle or unexplored
+    
+    def update_map(self, exploration_grid, voxel_coords, camera_position, weight_threshold):
+        """
+        Update the cost map based on exploration grid and voxel obstacles.
+        
+        Args:
+            exploration_grid: ExplorationGrid instance tracking explored regions
+            voxel_coords: Numpy array of known obstacle positions
+            camera_position: Current camera pose
+            weight_threshold: Obstacle weight threshold
+        """
+        if self.grid_origin is None:
+            # Initialize grid origin
+            cam_pos = camera_position[0:3, 3]
+            self.grid_origin = cam_pos - self.grid_size / 2.0
+        
+        # Update grid origin to follow camera (sliding window)
+        cam_pos = camera_position[0:3, 3]
+        new_origin = cam_pos - self.grid_size / 2.0
+        if np.linalg.norm(new_origin - self.grid_origin) > self.cell_size * 2:
+            self.grid_origin = new_origin
+            self.cost_map = np.ones_like(self.cost_map)  # Reset map
+        
+        # Mark explored regions as free or unexplored
+        if exploration_grid is not None and exploration_grid.grid_origin is not None:
+            for i in range(self.grid_dim):
+                for j in range(self.grid_dim):
+                    for k in range(self.grid_dim):
+                        world_pos = np.array([i, j, k]) * self.cell_size + self.grid_origin
+                        grid_idx = ((world_pos - exploration_grid.grid_origin) / exploration_grid.cell_size).astype(np.int32)
+                        
+                        if np.all(grid_idx >= 0) and np.all(grid_idx < exploration_grid.grid_dim):
+                            state = exploration_grid.exploration_grid[grid_idx[0], grid_idx[1], grid_idx[2]]
+                            if state == -1 or state == 1:  # Explored
+                                self.cost_map[i, j, k] = self.cost_free
+                            # state == 0 stays as 1 (unexplored/obstacle)
+        
+        # Mark known obstacles
+        if voxel_coords is not None and voxel_coords.shape[0] > 0:
+            for obs in voxel_coords:
+                cell_idx = ((obs - self.grid_origin) / self.cell_size).astype(np.int32)
+                if np.all(cell_idx >= 0) and np.all(cell_idx < self.grid_dim):
+                    self.cost_map[cell_idx[0], cell_idx[1], cell_idx[2]] = 2.0
+    
+    def plan_to_goal(self, start_pos, goal_pos, exploration_grid=None, voxel_coords=None, 
+                     camera_position=None, weight_threshold=4.0):
+        """
+        Plan a path from start to goal using D* Lite.
+        
+        Args:
+            start_pos: Starting position in world coordinates
+            goal_pos: Goal position in world coordinates (or None for exploration)
+            exploration_grid: Optional ExplorationGrid for map updates
+            voxel_coords: Optional known obstacles
+            camera_position: Current camera pose
+            weight_threshold: Obstacle threshold
+            
+        Returns:
+            Path as list of waypoints, or None if no path exists
+        """
+        # Convert world coords to grid indices
+        if self.grid_origin is None and camera_position is not None:
+            self.grid_origin = camera_position[0:3, 3] - self.grid_size / 2.0
+        
+        if self.grid_origin is None:
+            return None
+        
+        start_cell = tuple(((np.array(start_pos) - self.grid_origin) / self.cell_size).astype(np.int32))
+        goal_cell = tuple(((np.array(goal_pos) - self.grid_origin) / self.cell_size).astype(np.int32)) if goal_pos is not None else None
+        
+        # Update map with new obstacle information
+        self.update_map(exploration_grid, voxel_coords, camera_position, weight_threshold)
+        
+        # Initial planning or replan if goal changed
+        if self.start != start_cell or self.goal != goal_cell or self.last_start != start_cell:
+            self.goal = goal_cell
+            self.start = start_cell
+            
+            # Compute/recompute k_m and costs
+            if self.last_start is not None:
+                self.km += self._heuristic(self.last_start, self.start)
+            
+            self.last_start = self.start
+            self._initialize_d_star_lite()
+            
+            # Run D* Lite algorithm
+            self._compute_shortest_path()
+        
+        # Extract path from start to goal
+        if self.start in self.g and np.isfinite(self.g[self.start]):
+            path = self._extract_path()
+            return path
+        
+        return None
+    
+    def _initialize_d_star_lite(self):
+        """Initialize D* Lite algorithm."""
+        self.g = {}
+        self.rhs = {self.goal: 0}  # rhs(goal) = 0
+        self.open_list = [(self._key(self.goal), self.goal)]
+    
+    def _compute_shortest_path(self):
+        """Main D* Lite search loop."""
+        iterations = 0
+        while iterations < self.k_max_iterations:
+            if not self.open_list:
+                break
+            
+            # Get cell with minimum key
+            self.open_list.sort()
+            _, u = self.open_list.pop(0)
+            
+            k_old = self._key(u)
+            
+            if k_old[0] != float('inf') and self.rhs.get(u, np.inf) > self.g.get(u, np.inf):
+                # Over-consistent: g(u) < rhs(u)
+                self.g[u] = self.rhs.get(u, np.inf)
+                
+                # Update neighbors
+                for neighbor in self._get_neighbors(u):
+                    if neighbor != self.goal:
+                        cost = self._cost(neighbor, u)
+                        self.rhs[neighbor] = min(self.rhs.get(neighbor, np.inf), 
+                                               self.g.get(u, np.inf) + cost)
+                    
+                    key = self._key(neighbor)
+                    if neighbor in [cell for _, cell in self.open_list]:
+                        self.open_list.remove((self._key(neighbor), neighbor))
+                    
+                    if self.g.get(neighbor, np.inf) != self.rhs.get(neighbor, np.inf):
+                        self.open_list.append((key, neighbor))
+            
+            elif self.rhs.get(u, np.inf) < self.g.get(u, np.inf):
+                # Under-consistent: rhs(u) < g(u)
+                self.g[u] = np.inf
+                
+                # Update u and neighbors
+                for neighbor in self._get_neighbors(u) + [u]:
+                    if neighbor != self.goal:
+                        cost = self._cost(neighbor, u)
+                        self.rhs[neighbor] = min(self.rhs.get(neighbor, np.inf), 
+                                               self.g.get(u, np.inf) + cost)
+                    
+                    key = self._key(neighbor)
+                    if neighbor in [cell for _, cell in self.open_list]:
+                        self.open_list.remove((self._key(neighbor), neighbor))
+                    
+                    if self.g.get(neighbor, np.inf) != self.rhs.get(neighbor, np.inf):
+                        self.open_list.append((key, neighbor))
+            
+            iterations += 1
+    
+    def _extract_path(self):
+        """Extract path from start toward goal by greedy descent."""
+        path = [self.start]
+        current = self.start
+        
+        for _ in range(self.grid_dim * 3):  # Limit path length
+            if current == self.goal:
+                break
+            
+            neighbors = self._get_neighbors(current)
+            if not neighbors:
+                break
+            
+            # Greedy descent: choose neighbor with minimum g + cost
+            best_neighbor = None
+            best_cost = np.inf
+            
+            for neighbor in neighbors:
+                cost = self.g.get(neighbor, np.inf) + self._cost(current, neighbor)
+                if cost < best_cost:
+                    best_cost = cost
+                    best_neighbor = neighbor
+            
+            if best_neighbor is None or best_cost == np.inf:
+                break
+            
+            path.append(best_neighbor)
+            current = best_neighbor
+        
+        # Convert grid indices to world coordinates
+        world_path = [np.array(cell) * self.cell_size + self.grid_origin for cell in path]
+        return world_path
         return elapsed >= self.period

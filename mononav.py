@@ -124,6 +124,17 @@ exploration_grid = ExplorationGrid(grid_size=50.0, cell_size=0.1, max_depth=MAX_
 use_exploration_grid = config.get('use_exploration_grid', True)  # Can disable if desired
 unexplored_penalty_dist = config.get('unexplored_penalty_dist', 0.5)  # Distance penalty for unexplored regions
 
+# Initialize D* Lite Planner (for incremental replanning with partial maps)
+use_dstar_planner = config.get('use_dstar_planner', True)  # Can disable if desired
+dstar_grid_size = config.get('dstar_grid_size', 50.0)  # Physical grid size in meters
+dstar_cell_size = config.get('dstar_cell_size', 0.2)  # Cell size in meters
+dstar_k_max = config.get('dstar_k_max_iterations', 500)  # Max algorithm iterations
+dstar_planner = None
+if use_dstar_planner:
+    dstar_planner = DStarLitePlanner(grid_size=dstar_grid_size, cell_size=dstar_cell_size, 
+                                    k_max_iterations=dstar_k_max)
+    print(f"D* Lite planner initialized: grid_size={dstar_grid_size}m, cell_size={dstar_cell_size}m", flush=True)
+
 # Initialize Trajectory Library (Motion Primitives)
 trajlib_dir = config['trajlib_dir']
 traj_list = get_trajlist(trajlib_dir)
@@ -486,12 +497,13 @@ def main():
 
         # In autonomous GO mode, update selected trajectory from planner.
             if autonomous_mode:
-                # In 'g' mode: run trajectory planning with exploration awareness
+                # In 'g' mode: run trajectory planning with exploration awareness and D* Lite path planning
                 exp_grid = exploration_grid if use_exploration_grid else None
                 max_traj_idx = choose_primitive(vbg.vbg, camera_position, traj_linesets, goal_position, 
                                                min_dist2obs, filterYvals, filterWeights, filterTSDF, 
                                                weight_threshold, exploration_grid=exp_grid, 
-                                               unexplored_penalty_dist=unexplored_penalty_dist)
+                                               unexplored_penalty_dist=unexplored_penalty_dist,
+                                               dstar_planner=dstar_planner, use_dstar=use_dstar_planner)
                 if max_traj_idx is None:
                     traj_none_count += 1
                     if traj_none_count > traj_max_none_count:

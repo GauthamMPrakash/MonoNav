@@ -63,6 +63,13 @@ yawrate_gain: 1.25         # yawrate = yawrate*yawrate_gain
 use_exploration_grid: True   # Enable ExplorationGrid for obstacle avoidance in occluded space
 unexplored_penalty_dist: 0.5 # Distance penalty for unexplored regions (m). Trajectories passing closer are rejected.
 
+# D* Lite Path Planning: Incremental replanning for goal-directed navigation with partial maps
+# Optimal for monocular vision where map is discovered incrementally
+use_dstar_planner: True       # Enable D* Lite for global path planning
+dstar_grid_size: 50.0         # Physical size of planning grid (meters)
+dstar_cell_size: 0.2          # Size of each grid cell (meters) - smaller = finer planning but slower
+dstar_k_max_iterations: 500   # Max iterations for D* Lite algorithm (higher = more thorough)
+
 # Closed-Loop Primitive Control: feedback-based tracking for more accurate primitive execution
 kp_angular_feedback: 0.5     # Proportional gain for angular error correction (0.0 to 1.0)
 kp_lateral_feedback: 0.3     # Proportional gain for lateral error correction (0.0 to 1.0)
