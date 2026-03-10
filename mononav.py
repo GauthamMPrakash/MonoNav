@@ -31,6 +31,7 @@ import os
 import open3d as o3d
 import sys
 import threading
+from contextlib import nullcontext
 
 # Add DepthAnythingV2-metric path
 repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '.'))
@@ -58,6 +59,8 @@ if ENCODER is None:
     print(f"[warning] DA2_ENCODER not set in config, parsed '{ENCODER}' from checkpoint name")
 MAX_DEPTH = 20
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
+ENABLE_FP16 = bool(config.get('DA2_FP16', True))
+ENABLE_TORCH_COMPILE = bool(config.get('DA2_TORCH_COMPILE', False))
 IP = config['IP']
 baud = config['baud']
 height = config['height']
@@ -80,8 +83,23 @@ model_configs = {
 
 # Initialize the DepthAnythingV2 model and load the checkpoint
 depth_anything = DepthAnythingV2(**{**model_configs[ENCODER], 'max_depth': MAX_DEPTH})
-depth_anything.load_state_dict(torch.load(CHECKPOINT, map_location=DEVICE))
-depth_anything = depth_anything.to(DEVICE).eval()
+depth_anything.load_state_dict(torch.load(CHECKPOINT, map_location='cpu'))
+
+if DEVICE == 'cuda' and ENABLE_FP16:
+    depth_anything = depth_anything.half().to(DEVICE, memory_format=torch.channels_last)
+else:
+    # Match run_ip_camera_depth CPU path: full precision on CPU.
+    depth_anything = depth_anything.float().to(DEVICE)
+
+depth_anything.eval()
+
+if DEVICE == 'cuda' and ENABLE_TORCH_COMPILE and hasattr(torch, 'compile'):
+    try:
+        depth_anything = torch.compile(depth_anything, mode='max-autotune', dynamic=False)
+        print("torch.compile enabled (max-autotune)", flush=True)
+    except Exception as e:
+        print(f"torch.compile skipped: {e}", flush=True)
+
 model_device = next(depth_anything.parameters()).device
 
 print(f"[device] torch.cuda.is_available()={torch.cuda.is_available()}", flush=True)
@@ -90,6 +108,16 @@ if torch.cuda.is_available():
     print(f"[device] cuda_name={torch.cuda.get_device_name(torch.cuda.current_device())}", flush=True)
 if model_device.type != 'cuda' and torch.cuda.is_available():
     print("[warning] CUDA is available but model is not on CUDA.", flush=True)
+
+
+def run_depth_pipeline(frame_bgr):
+    if DEVICE == 'cuda' and ENABLE_FP16:
+        amp_ctx = torch.autocast(device_type='cuda', dtype=torch.float16)
+    else:
+        amp_ctx = nullcontext()
+
+    with amp_ctx:
+        return compute_depth(frame_bgr, depth_anything, INPUT_SIZE)
 
 # GLOBAL VARIABLES
 last_key_pressed = None  # store the last key pressed
@@ -159,6 +187,8 @@ else:
 print("Goal position (RDF): ", goal_position, flush=True)
 min_dist2obs = config['min_dist2obs']
 min_dist2goal = config['min_dist2goal']
+planner_local_radius_m = config.get('planner_local_radius_m', None)
+planner_every_n_cycles = int(config.get('planner_every_n_cycles', 1))
 print(f"Trajectory index convention: 0=sharp left, {len(traj_list)//2}=straight, {len(traj_list)-1}=sharp right", flush=True)
 
 # Make directories for data
@@ -209,19 +239,10 @@ listener.start()
 
 # Trajectory execution thread: sends motion commands at fixed rate
 def trajectory_execution_loop(command_hz=10):
-    """Background thread: execute trajectory with smooth velocity commands at fixed rate (now with closed-loop feedback)."""
+    """Background thread: execute trajectory with smooth open-loop velocity commands at fixed rate."""
     global traj_index, trajectory_start_time
     period_s = 1.0 / max(command_hz, 1)
     next_command = time.monotonic()
-    
-    # Create closed-loop controller
-    cl_controller = ClosedLoopPrimitiveController(
-        forward_speed=forward_speed,
-        yvel_gain=yvel_gain,
-        yawrate_gain=yawrate_gain,
-        kp_lateral=config.get('kp_lateral_feedback', 0.3),
-        kp_angular=config.get('kp_angular_feedback', 0.5)
-    )
     
     # log whenever the execution loop begins iteration (for debugging thread activity)
     while not trajectory_execution_stop_event.is_set():
@@ -231,29 +252,13 @@ def trajectory_execution_loop(command_hz=10):
             
             # Check if we've exceeded the trajectory period
             if elapsed < period:
-                # Use closed-loop controller for better tracking
-                # Get current pose (non-blocking from pose thread)
-                pose = get_latest_pose()
-                current_heading = pose[3]  # yaw
-                
-                # Get raw open-loop command as reference
+                # Open-loop primitive execution.
                 yawrate = amplitudes[traj_index] * np.sin(np.pi / period * elapsed)  # rad/s
                 yvel = yawrate * yvel_gain
                 yawrate = yawrate * yawrate_gain
                 
-                # Apply closed-loop correction (simple proportional)
-                desired_heading = amplitudes[traj_index] * np.sin(np.pi * elapsed / period)
-                heading_error = desired_heading - current_heading
-                # Normalize heading error to [-pi, pi]
-                heading_error = np.arctan2(np.sin(heading_error), np.cos(heading_error))
-                
-                # Add feedback correction
-                yawrate_feedback = config.get('kp_angular_feedback', 0.5) * heading_error
-                yawrate_corrected = yawrate + yawrate_feedback
-                yvel_corrected = yvel + config.get('kp_lateral_feedback', 0.3) * heading_error
-                
                 if FLY_VEHICLE:
-                    mavc.send_body_offset_ned_vel(forward_speed, yvel_corrected, yaw_rate=yawrate_corrected)
+                    mavc.send_body_offset_ned_vel(forward_speed, yvel, yaw_rate=yawrate)
         
         next_command += period_s
         sleep_time = next_command - time.monotonic()
@@ -315,7 +320,7 @@ def main():
             # COMPUTE DEPTH
             start_time_test = time.time()
             # depth_numpy, depth_colormap = compute_depth_fast(bgr, INPUT_SIZE)
-            depth_numpy, depth_colormap = compute_depth(bgr, depth_anything, INPUT_SIZE)
+            depth_numpy, depth_colormap = run_depth_pipeline(bgr)
             print("TIME TO COMPUTE DEPTH:", time.time() - start_time_test)
             cv2.imshow("test", bgr)
             update_key_from_cv()
@@ -414,15 +419,12 @@ def main():
             elif last_key_pressed == 'g':
                 autonomous_mode = True
                 print("Pressed g. Using MonoNav.", flush=True)
-                if no_safe_traj:
-                    # Keep GO mode active, but execute a hover-only cycle and re-plan.
-                    traj_index = None
-                    if FLY_VEHICLE:
-                        mavc.send_body_offset_ned_vel(0, 0, yaw_rate=0)
-                        print("No safe trajectory, hovering and retrying planner", flush=True)
-                    time.sleep(0.1)
-                else:
-                    traj_index = max_traj_idx
+                # Enter GO mode immediately. If no candidate exists yet, hover + re-plan.
+                traj_index = max_traj_idx
+                if traj_index is None and FLY_VEHICLE:
+                    mavc.send_body_offset_ned_vel(0, 0, yaw_rate=0)
+                    print("No trajectory yet, hovering and retrying planner", flush=True)
+                last_key_pressed = None
         
         # Save trajectory information
             if save_during_flight:
@@ -454,7 +456,7 @@ def main():
                 #transform_rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
 
                 # compute depth
-                depth_numpy, depth_colormap = compute_depth(transform_bgr, depth_anything, INPUT_SIZE)
+                depth_numpy, depth_colormap = run_depth_pipeline(transform_bgr)
 
                 if depth_colormap is not None:
                     # Add FPS counter to depth display
@@ -495,22 +497,28 @@ def main():
             traj_counter += 1
 
         # In autonomous GO mode, update selected trajectory from planner.
-            if autonomous_mode:
+            if autonomous_mode and (traj_counter % max(1, planner_every_n_cycles) == 0):
                 # In 'g' mode: run trajectory planning with exploration awareness and D* Lite path planning
                 exp_grid = exploration_grid if use_exploration_grid else None
                 max_traj_idx = choose_primitive(vbg.vbg, camera_position, traj_linesets, goal_position, 
                                                min_dist2obs, filterYvals, filterWeights, filterTSDF, 
                                                weight_threshold, exploration_grid=exp_grid, 
                                                unexplored_penalty_dist=unexplored_penalty_dist,
-                                               dstar_planner=dstar_planner, use_dstar=use_dstar_planner)
+                                               dstar_planner=dstar_planner, use_dstar=use_dstar_planner,
+                                               planner_local_radius_m=planner_local_radius_m)
                 if max_traj_idx is None:
+                    traj_index = None
+                    if FLY_VEHICLE:
+                        mavc.send_body_offset_ned_vel(0, 0, yaw_rate=0)
                     traj_none_count += 1
-                    if traj_none_count > traj_max_none_count:
+                    if traj_none_count >= traj_max_none_count:
                         no_safe_traj = True
-                    print("[INFO] No safe trajectory. Hovering in place.", flush=True)
+                    print("[INFO] No safe trajectory. Hovering and replanning.", flush=True)
                 else:
                     no_safe_traj = False
                     traj_none_count = 0
+                    traj_index = max_traj_idx
+                    trajectory_start_time = time.time()
                     print(f"[TRAJ] Selected traj: {max_traj_idx}/{len(traj_list)-1}", flush=True)
 
     # Exited while(!shouldStop); end control!

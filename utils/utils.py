@@ -16,7 +16,7 @@ Functionality should be concentrated here and shared between the scripts.
 import cv2
 import numpy as np
 from matplotlib import colormaps
-from scipy.spatial import distance
+from scipy.spatial import distance, cKDTree
 import os
 import open3d as o3d
 import open3d.core as o3c
@@ -346,10 +346,8 @@ Args:
 def choose_primitive(vbg, camera_position, traj_linesets, goal_position, dist_threshold, 
                     filterYvals, filterWeights, filterTSDF, weight_threshold, 
                     exploration_grid=None, unexplored_penalty_dist=0.5,
-                    dstar_planner=None, use_dstar=True):
-
-    # Boolean for stopping criteria
-    shouldStop = False
+                    dstar_planner=None, use_dstar=True,
+                    planner_local_radius_m=None):
 
     # Get weights and tsdf values from the voxel block grid
     weights = vbg.attribute("weight").reshape((-1))
@@ -386,16 +384,26 @@ def choose_primitive(vbg, camera_position, traj_linesets, goal_position, dist_th
         mask = tsdf < 0.0
         voxel_coords = voxel_coords[mask,:]
 
-    # transfer to cpu for cdist
+    # transfer to cpu for distance queries
     voxel_coords_numpy = voxel_coords.cpu().numpy()
+
+    # Optional local planning window around current camera position.
+    if planner_local_radius_m is not None and planner_local_radius_m > 0 and voxel_coords_numpy.shape[0] > 0:
+        cam_xyz = camera_position[0:3, 3].reshape(1, 3)
+        d2 = np.sum((voxel_coords_numpy - cam_xyz) ** 2, axis=1)
+        voxel_coords_numpy = voxel_coords_numpy[d2 <= planner_local_radius_m ** 2]
+
+    # Build once; prevents allocating huge cdist matrices per trajectory.
+    obstacle_tree = cKDTree(voxel_coords_numpy) if voxel_coords_numpy.shape[0] > 0 else None
 
     # D* Lite planning (if enabled and planner provided)
     dstar_path = None
     if use_dstar and dstar_planner is not None and goal_position is not None:
-        camera_pos = camera_position[0:3, 3]
+        camera_pos = np.asarray(camera_position[0:3, 3], dtype=np.float64).reshape(3)
+        goal_pos = np.asarray(goal_position, dtype=np.float64).reshape(-1)[:3]
         try:
             dstar_path = dstar_planner.plan_to_goal(
-                camera_pos, goal_position, exploration_grid, 
+                camera_pos, goal_pos, exploration_grid, 
                 voxel_coords_numpy, camera_position, weight_threshold
             )
         except Exception as e:
@@ -409,37 +417,36 @@ def choose_primitive(vbg, camera_position, traj_linesets, goal_position, dist_th
     min_goal_score = np.inf # track proximity to goal
     max_traj_idx = None # track the index of the best trajectory
 
-    # iterate over the sorted traj linesets
+    rot = camera_position[0:3, 0:3]
+    trans = camera_position[0:3, 3]
+
+    # iterate over trajectory library
     for traj_idx, traj_linset in enumerate(traj_linesets):
-        traj_lineset_copy = copy.deepcopy(traj_linset)
-        traj_lineset_copy.transform(camera_position) # transform the lineset (copy) to the camera position
-        pts = np.asarray(traj_lineset_copy.points) # meters # extract the points from the lineset
+        # Faster than deepcopy+transform for every primitive.
+        base_pts = np.asarray(traj_linset.points)
+        pts = base_pts @ rot.T + trans
         
         # Check collision with KNOWN obstacles
         nearest_obstacle_dist = np.inf
-        if voxel_coords_numpy.shape[0] > 0:
-            tmp = distance.cdist(voxel_coords_numpy, pts, "sqeuclidean") # compute distances
-            voxel_idx, pt_idx = np.unravel_index(np.argmin(tmp), tmp.shape)
-            nearest_obstacle_dist = np.sqrt(tmp[voxel_idx, pt_idx])
+        if obstacle_tree is not None and pts.shape[0] > 0:
+            dists, _ = obstacle_tree.query(pts, k=1)
+            nearest_obstacle_dist = float(np.min(dists))
         
         # Check collision with UNEXPLORED regions
         nearest_unexplored_dist = np.inf
         if exploration_grid is not None:
-            # Check if trajectory passes through unexplored regions
-            for pt in pts:
-                # Find the closest grid cell
-                grid_idx = ((pt - exploration_grid.grid_origin) / exploration_grid.cell_size).astype(np.int32)
-                
-                # Check if point is in grid bounds
-                if np.all(grid_idx >= 0) & np.all(grid_idx < exploration_grid.grid_dim):
-                    if exploration_grid.exploration_grid[grid_idx[0], grid_idx[1], grid_idx[2]] == 0:
-                        # Found unexplored voxel
-                        nearest_unexplored_dist = 0
-                        break
-                else:
-                    # Out of bounds (likely unexplored far away)
+            grid_idx = ((pts - exploration_grid.grid_origin) / exploration_grid.cell_size).astype(np.int32)
+            in_bounds = np.all((grid_idx >= 0) & (grid_idx < exploration_grid.grid_dim), axis=1)
+
+            # Out-of-bounds trajectory points are treated as unknown/unsafe.
+            if not np.all(in_bounds):
+                nearest_unexplored_dist = 0
+            else:
+                explored_vals = exploration_grid.exploration_grid[
+                    grid_idx[:, 0], grid_idx[:, 1], grid_idx[:, 2]
+                ]
+                if np.any(explored_vals == 0):
                     nearest_unexplored_dist = 0
-                    break
         
         # Overall nearest obstacle distance (considering both known and unexplored)
         if nearest_unexplored_dist < unexplored_penalty_dist:
@@ -460,7 +467,8 @@ def choose_primitive(vbg, camera_position, traj_linesets, goal_position, dist_th
                 path_distances = [np.linalg.norm(np.array(p) - traj_endpoint) for p in dstar_path]
                 progress_score = -min(path_distances)  # Negative distance = reward
                 
-                if progress_score < max_traj_score:
+                # Larger (closer to zero) is better, e.g. -0.2 beats -1.0.
+                if progress_score > max_traj_score:
                     max_traj_idx = traj_idx
                     max_traj_score = progress_score
             
@@ -475,119 +483,6 @@ def choose_primitive(vbg, camera_position, traj_linesets, goal_position, dist_th
                     min_goal_score = dst_to_goal
             else:
                 # no goal position, choose the index that maximizes distance from the obstacles (exploration mode)
-                if max_traj_score < nearest_total_dist:
-                    # we have found a trajectory that gets us closer to goal
-                    max_traj_idx = traj_idx
-                    max_traj_score = nearest_total_dist
-
-    # Do not force an immediate stop here. Let the caller (`mononav.py`) handle
-    # transient cases where `max_traj_idx` is None (e.g., hover and retry).
-    return max_traj_idx
-
-
-    # Boolean for stopping criteria
-    shouldStop = False
-
-    # Get weights and tsdf values from the voxel block grid
-    weights = vbg.attribute("weight").reshape((-1))
-    tsdf = vbg.attribute("tsdf").reshape((-1))
-    # Get the voxel_coords, voxel_indices
-    voxel_coords, voxel_indices = vbg.voxel_coordinates_and_flattened_indices()
-
-    # IMPORTANT
-    # Use voxel_indices to rearrange weights and tsdf to match voxel_coords
-    # Otherwise, the ordering of voxels from the hashmap is non-deterministic
-    weights = weights[voxel_indices]
-    tsdf = tsdf[voxel_indices]
-
-    # Generate mask to filter out y values (vertical) (+y is DOWN)
-    # This is useful to filter out the floor, and avoid obstacles in-plane
-    if filterYvals:
-        mask = voxel_coords[:, 1] < -0.3
-        # Apply mask to voxel_coords and weights
-        voxel_coords = voxel_coords[mask]
-        weights = weights[mask]
-        tsdf = tsdf[mask]
-
-    # Generate mask to filter by weights
-    # This rejects voxels below a certain weight threshold
-    if filterWeights:
-        mask = weights > weight_threshold
-        # Apply mask to voxel_coords and weights
-        voxel_coords = voxel_coords[mask,:]
-        tsdf = tsdf[mask]
-
-    # Generate mask to filter by tsdf value
-    if filterTSDF:
-        # Generate mask to filter by tsdf values
-        mask = tsdf < 0.0
-        voxel_coords = voxel_coords[mask,:]
-
-    # transfer to cpu for cdist
-    voxel_coords_numpy = voxel_coords.cpu().numpy()
-
-    # NOW WE HAVE A FILTERED SET OF VOXELS THAT REPRESENT OBSTACLES
-    # NEXT, WE DETERMINE THE BEST TRAJECTORY ACCORDING TO A COST FUNCTION
-
-    # Initialize scoring variables to evaluate the trajectories
-    max_traj_score = -np.inf # track best trajectory
-    min_goal_score = np.inf # track proximity to goal
-    max_traj_idx = None # track the index of the best trajectory
-
-    # iterate over the sorted traj linesets
-    for traj_idx, traj_linset in enumerate(traj_linesets):
-        traj_lineset_copy = copy.deepcopy(traj_linset)
-        traj_lineset_copy.transform(camera_position) # transform the lineset (copy) to the camera position
-        pts = np.asarray(traj_lineset_copy.points) # meters # extract the points from the lineset
-        
-        # Check collision with KNOWN obstacles
-        nearest_obstacle_dist = np.inf
-        if voxel_coords_numpy.shape[0] > 0:
-            tmp = distance.cdist(voxel_coords_numpy, pts, "sqeuclidean") # compute distances
-            voxel_idx, pt_idx = np.unravel_index(np.argmin(tmp), tmp.shape)
-            nearest_obstacle_dist = np.sqrt(tmp[voxel_idx, pt_idx])
-        
-        # Check collision with UNEXPLORED regions
-        nearest_unexplored_dist = np.inf
-        if exploration_grid is not None:
-            # Check if trajectory passes through unexplored regions
-            for pt in pts:
-                # Find the closest grid cell
-                grid_idx = ((pt - exploration_grid.grid_origin) / exploration_grid.cell_size).astype(np.int32)
-                
-                # Check if point is in grid bounds
-                if np.all(grid_idx >= 0) & np.all(grid_idx < exploration_grid.grid_dim):
-                    if exploration_grid.exploration_grid[grid_idx[0], grid_idx[1], grid_idx[2]] == 0:
-                        # Found unexplored voxel
-                        nearest_unexplored_dist = 0
-                        break
-                else:
-                    # Out of bounds (likely unexplored far away)
-                    nearest_unexplored_dist = 0
-                    break
-        
-        # Overall nearest obstacle distance (considering both known and unexplored)
-        if nearest_unexplored_dist < unexplored_penalty_dist:
-            # Trajectory passes too close to unexplored regions; reject it
-            continue
-        
-        # Take minimum distance (more conservative)
-        nearest_total_dist = min(nearest_obstacle_dist, nearest_unexplored_dist if nearest_unexplored_dist < np.inf else nearest_obstacle_dist)
-        
-        #mavc.printd(f"traj {traj_idx}: nearest_obstacle={nearest_obstacle_dist:.3f}m, nearest_unexplored={nearest_unexplored_dist:.3f}m")
-        if nearest_total_dist > dist_threshold:
-            # the trajectory meets the dist_threshold criterion
-            if goal_position is not None:
-                # the trajectory satisfies the dist_threshold; let's compute the goal score
-                tmp_to_goal = distance.cdist(goal_position, pts, "sqeuclidean")
-                dst_to_goal = np.sqrt(np.min(tmp_to_goal))
-                if dst_to_goal < min_goal_score:
-                    # we have a trajectory that gets us closer to the goal
-                    #mavc.printd("traj %d gets us closer to the goal: %f"%(traj_idx, dst_to_goal))
-                    max_traj_idx = traj_idx
-                    min_goal_score = dst_to_goal
-            else:
-                # no goal position, choose the index that maximizes distance from the obstacles
                 if max_traj_score < nearest_total_dist:
                     # we have found a trajectory that gets us closer to goal
                     max_traj_idx = traj_idx
@@ -1091,9 +986,20 @@ class DStarLitePlanner:
         """D* Lite key for cell s."""
         if s == self.goal:
             return (self.g.get(s, np.inf), 0)
-        h_val = self._heuristic(s, self.goal) if self.goal else 0
+        h_val = self._heuristic(s, self.goal) if self.goal is not None else 0
         return (min(self.g.get(s, np.inf), self.rhs.get(s, np.inf)) + h_val + self.km, 
                 min(self.g.get(s, np.inf), self.rhs.get(s, np.inf)))
+
+    def _world_to_cell(self, world_pos):
+        """Convert world position to hashable integer cell index tuple."""
+        if world_pos is None:
+            return None
+        vec = np.asarray(world_pos, dtype=np.float64).reshape(-1)
+        if vec.size < 3:
+            return None
+        vec = vec[:3]
+        idx = ((vec - self.grid_origin) / self.cell_size).astype(np.int32)
+        return (int(idx[0]), int(idx[1]), int(idx[2]))
     
     def _get_neighbors(self, cell):
         """Get 6-connected neighbors in 3D grid (considering only horizontal movement)."""
@@ -1185,8 +1091,11 @@ class DStarLitePlanner:
         if self.grid_origin is None:
             return None
         
-        start_cell = tuple(((np.array(start_pos) - self.grid_origin) / self.cell_size).astype(np.int32))
-        goal_cell = tuple(((np.array(goal_pos) - self.grid_origin) / self.cell_size).astype(np.int32)) if goal_pos is not None else None
+        start_cell = self._world_to_cell(start_pos)
+        goal_cell = self._world_to_cell(goal_pos)
+
+        if start_cell is None or goal_cell is None:
+            return None
         
         # Update map with new obstacle information
         self.update_map(exploration_grid, voxel_coords, camera_position, weight_threshold)

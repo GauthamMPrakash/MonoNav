@@ -8,8 +8,8 @@ camera_ip: 'http://192.168.53.56:81/stream'
 
 # Depth Model Settings
 num_pre_depth_frames: 3       # how many times to run the depth model before starting (the first few inferences are much slower)
-INPUT_SIZE: 252               # Multiple of 14. Scales the image by INPUT_SIZE/smaller image dimension
-DA2_CHECKPOINT: "DepthAnythingV2-metric/checkpoints/depth_anything_v2_metric_hypersim_vitb.pth" # path to checkpoint for DepthAnythingV2, make sure it matches the encoder you choose
+INPUT_SIZE: 310               # Multiple of 14. Scales the image by INPUT_SIZE/smaller image dimension
+DA2_CHECKPOINT: "DepthAnythingV2-metric/checkpoints/depth_anything_v2_metric_hypersim_vits.pth" # path to checkpoint for DepthAnythingV2, make sure it matches the encoder you choose
 
 enable_vbg : True             # Enable VoxelBlockGrid (TSDF fusion) - only for AP_ObstacleAvoidnace
 save_during_flight : True     # Whether to save images and reconstructions during flight (slows down the loop, but allows you to see the reconstruction quality on the actual flight data)
@@ -37,6 +37,8 @@ goal_position_rdf: # from EKF origin
 
 min_dist2obs: 1.0             # minimum acceptable distance from obstacles, meters (for primitive selection)
 min_dist2goal: 1.0            # termination condition for reaching the goal, meters
+planner_local_radius_m: 2.0   # only consider obstacles within this radius while planning; reduces stale global-map blocking
+planner_every_n_cycles: 1     # run planner every N control cycles (set 2-3 to reduce GO-mode lag)
 
 # BendyRuler / Obstacle Avoidance Settings
 # min_obstacle_dist_m: 0.3     # companion-side emergency-stop threshold (m) — hover if nearest obstacle closer
@@ -60,7 +62,7 @@ yawrate_gain: 1.25         # yawrate = yawrate*yawrate_gain
 
 # Improved Navigation Settings
 # Exploration Grid: treats unexplored space as unsafe to prevent crashes
-use_exploration_grid: True   # Enable ExplorationGrid for obstacle avoidance in occluded space
+use_exploration_grid: False  # Disable ExplorationGrid (unexplored-space penalty off)
 unexplored_penalty_dist: 0.5 # Distance penalty for unexplored regions (m). Trajectories passing closer are rejected.
 
 # D* Lite Path Planning: Incremental replanning for goal-directed navigation with partial maps
