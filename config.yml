@@ -35,10 +35,24 @@ goal_position_rdf: # from EKF origin
   - -1.2   # Down
   - 15.0   # Forward
 
-min_dist2obs: 1.0             # minimum acceptable distance from obstacles, meters (for primitive selection)
+min_dist2obs: 0.8             # minimum acceptable distance from obstacles, meters (for primitive selection)
 min_dist2goal: 1.0            # termination condition for reaching the goal, meters
-planner_local_radius_m: 2.0   # only consider obstacles within this radius while planning; reduces stale global-map blocking
+planner_local_radius_m: 3.0   # only consider obstacles within this radius while planning; reduces stale global-map blocking
 planner_every_n_cycles: 2     # run planner every N control cycles (set 2-3 to reduce GO-mode lag)
+
+# Improved Navigation Settings
+# Exploration Grid: treats unexplored space as unsafe to prevent crashes
+use_exploration_grid: False  # Enable/Disable ExplorationGrid (unexplored-space penalty)
+unexplored_penalty_dist: 0.7 # Distance penalty for unexplored regions (m). Trajectories passing closer are rejected.
+exploration_update_every_n_frames: 1  # update exploration map every N frames (higher = faster)
+exploration_max_points: 4000          # cap sampled depth points/rays per exploration update
+
+# D* Lite Path Planning: Incremental replanning for goal-directed navigation with partial maps
+# Optimal for monocular vision where map is discovered incrementally
+use_dstar_planner: True       # Enable D* Lite for global path planning
+dstar_grid_size: 20           # Physical size of planning grid (meters)
+dstar_cell_size: 0.3          # Size of each grid cell (meters) - smaller = finer planning but slower
+dstar_k_max_iterations: 2000  # Max iterations for D* Lite algorithm (higher = more thorough)
 
 # BendyRuler / Obstacle Avoidance Settings
 # min_obstacle_dist_m: 0.3     # companion-side emergency-stop threshold (m) — hover if nearest obstacle closer
@@ -57,25 +71,7 @@ EKF_LAT: 8.4723591
 EKF_LON: 76.9295203
 forward_speed: 0.5         # forward speed in m/s, set to None to use speed defined in generate_primitives.py
 # Control gain settings (YOU MAY NEED TO TUNE THIS YOURSELF)
-yvel_gain: 0.015           # yvel =  -yawrate*yvel_gain  <- for providing sideways velocity so that turns can be made sharper. Increase for faster turns.
+yvel_gain: 0.1             # yvel =  -yawrate*yvel_gain  <- for providing sideways velocity so that turns can be made sharper. Increase for faster turns.
 yawrate_gain: 1.25         # yawrate = yawrate*yawrate_gain
 
-# Improved Navigation Settings
-# Exploration Grid: treats unexplored space as unsafe to prevent crashes
-use_exploration_grid: True  # Disable ExplorationGrid (unexplored-space penalty off)
-unexplored_penalty_dist: 0.2 # Distance penalty for unexplored regions (m). Trajectories passing closer are rejected.
-exploration_update_every_n_frames: 3  # update exploration map every N frames (higher = faster)
-exploration_max_points: 3000          # cap sampled depth points/rays per exploration update
-
-# D* Lite Path Planning: Incremental replanning for goal-directed navigation with partial maps
-# Optimal for monocular vision where map is discovered incrementally
-use_dstar_planner: True       # Enable D* Lite for global path planning
-dstar_grid_size: 1.0         # Physical size of planning grid (meters)
-dstar_cell_size: 0.3          # Size of each grid cell (meters) - smaller = finer planning but slower
-dstar_k_max_iterations: 500   # Max iterations for D* Lite algorithm (higher = more thorough)
-
-# Closed-Loop Primitive Control: feedback-based tracking for more accurate primitive execution
-kp_angular_feedback: 0.5     # Proportional gain for angular error correction (0.0 to 1.0)
-kp_lateral_feedback: 0.3     # Proportional gain for lateral error correction (0.0 to 1.0)
-
-FLY_VEHICLE: True        # whether to actually fly the dronec
+FLY_VEHICLE: True        # whether to actually fly the drone
