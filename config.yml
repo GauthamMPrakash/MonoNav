@@ -4,7 +4,7 @@ save_dir_prefix: 'data/mononav-'
 camera_source: 'esp32-cam'                                   # used for naming files
 camera_calibration_path: 'utils/calibration/intrinsics.json' # camera calibration file (for undistortion)
 # Set to False to bypass undistort/crop transformation on incoming frames
-enable_undistort: False
+enable_undistort: True
 #camera_ip: 'http://10.42.0.29:81/stream'                    # camera stream URL (otherwise enter integer for camera index)   
 camera_ip: 'http://192.168.53.56:81/stream'
 
@@ -14,16 +14,16 @@ INPUT_SIZE: 224               # Multiple of 14. Scales the image by INPUT_SIZE/s
 DA2_CHECKPOINT: "DepthAnythingV2-metric/checkpoints/depth_anything_v2_metric_hypersim_vits.pth" # path to checkpoint for DepthAnythingV2, make sure it matches the encoder you choose
 
 enable_vbg : True             # Enable VoxelBlockGrid (TSDF fusion) - only for AP_ObstacleAvoidnace
-save_during_flight : True     # Whether to save images and reconstructions during flight (slows down the loop, but allows you to see the reconstruction quality on the actual flight data)
+save_during_flight : False     # Whether to save images and reconstructions during flight (slows down the loop, but allows you to see the reconstruction quality on the actual flight data)
 
 # Reconstruction settings
 filterYvals: True             # this helps filter out the ground / ceiling (for planar navigation)
 filterWeights: True           # this helps filter out low-weight voxels
 filterTSDF: True
-weight_threshold: 3.5         # determine the weight threshold for filtering (higher threshold -> fewer points)
+weight_threshold: 4.5         # determine the weight threshold for filtering (higher threshold -> fewer points)
 VoxelBlockGrid:
   depth_scale: 1000.0         # 1000.0 is default (mm to m), scale factor for depth values during integration
-  depth_max: 10.0             # max depth to include in the reconstruction
+  depth_max: 15.0             # max depth to include in the reconstruction
   trunc_voxel_multiplier: 8.0
   device: None                # "CUDA:0" (faster) or "CPU:0". None for auto-selection (Only selects the first CPU or GPU instance)
 

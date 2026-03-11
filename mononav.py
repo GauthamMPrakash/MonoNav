@@ -113,6 +113,7 @@ if enable_undistort and camera_calibration_path:
 else:
     # no calibration available or undistort disabled; use defaults
     mtx = dist = optimal_mtx = roi = None
+    calib_width = calib_height = None
     fusion_intrinsics = None  # VoxelBlockGrid will choose default intrinsics
 
 # Initialize VoxelBlockGrid
@@ -163,6 +164,9 @@ img_dir = os.path.join(save_dir, 'rgb-images')
 pose_dir = os.path.join(save_dir, 'poses')
 transform_img_dir = os.path.join(save_dir, 'transform-rgb-images')
 transform_depth_dir = os.path.join(save_dir, 'transform-depth-images')
+
+# Ensure the base save directory exists so file writes succeed
+os.makedirs(save_dir, exist_ok=True)
 
 if save_during_flight:
     os.makedirs(img_dir, exist_ok=True)
@@ -269,9 +273,11 @@ def main():
             mtx, dist, optimal_mtx, roi, frame_width, frame_height, calib_width, calib_height
         )
 
-    vbg_intrinsics = get_cropped_intrinsics(optimal_mtx, roi)
-    vbg.intrinsic_matrix = vbg_intrinsics
-    vbg.depth_intrinsic = o3d.core.Tensor(vbg_intrinsics, o3d.core.Dtype.Float64)
+    # Only update VBG intrinsics when valid calibration intrinsics are available.
+    if optimal_mtx is not None and roi is not None:
+        vbg_intrinsics = get_cropped_intrinsics(optimal_mtx, roi)
+        vbg.intrinsic_matrix = vbg_intrinsics
+        vbg.depth_intrinsic = o3d.core.Tensor(vbg_intrinsics, o3d.core.Dtype.Float64)
 
     # Scale mtx, dist to match current camera resolution
     # Read one frame to get actual resolution
@@ -476,7 +482,7 @@ def main():
         print("[INFO] Current distance to goal (m): ", np.linalg.norm(camera_position[0:-1, -1]-goal_position) if goal_position is not None else "N/A", flush=True)
         camera_position = [camera_position[0:-1, -1][2], camera_position[0:-1, -1][0], camera_position[0:-1, -1][1]] # print in NED order for readability
         print("[INFO] Current NED coords:" , camera_position, flush=True)
-        print("[INFO] Current RDF coords:", ned_to_rdf(camera_position[0], camera_position[1], camera_position[2], mavc.heading_offset), flush=True)
+        print("[INFO] Current RDF coords:", ned_to_rdf(camera_position[0], camera_position[1], camera_position[2], hdg), flush=True)
 
         # save and view vbg (robust to missing save dir; always attempt visualization)
         try:
