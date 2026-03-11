@@ -204,6 +204,8 @@ img_dir = os.path.join(save_dir, 'rgb-images')
 pose_dir = os.path.join(save_dir, 'poses')
 transform_img_dir = os.path.join(save_dir, 'transform-rgb-images')
 transform_depth_dir = os.path.join(save_dir, 'transform-depth-images')
+# Ensure the base save directory exists so file writes succeed
+os.makedirs(save_dir, exist_ok=True)
 
 if save_during_flight:
     os.makedirs(img_dir, exist_ok=True)

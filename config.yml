@@ -12,7 +12,7 @@ INPUT_SIZE: 224               # Multiple of 14. Scales the image by INPUT_SIZE/s
 DA2_CHECKPOINT: "DepthAnythingV2-metric/checkpoints/depth_anything_v2_metric_hypersim_vits.pth" # path to checkpoint for DepthAnythingV2, make sure it matches the encoder you choose
 
 enable_vbg : True             # Enable VoxelBlockGrid (TSDF fusion) - only for AP_ObstacleAvoidnace
-save_during_flight : True     # Whether to save images and reconstructions during flight (slows down the loop, but allows you to see the reconstruction quality on the actual flight data)
+save_during_flight : False     # Whether to save images and reconstructions during flight (slows down the loop, but allows you to see the reconstruction quality on the actual flight data)
 
 # Reconstruction settings
 filterYvals: True             # this helps filter out the ground / ceiling (for planar navigation)
@@ -38,21 +38,21 @@ goal_position_rdf: # from EKF origin
 min_dist2obs: 1.0             # minimum acceptable distance from obstacles, meters (for primitive selection)
 min_dist2goal: 1.0            # termination condition for reaching the goal, meters
 planner_local_radius_m: 3.0   # only consider obstacles within this radius while planning; reduces stale global-map blocking
-planner_every_n_cycles: 2     # run planner every N control cycles (set 2-3 to reduce GO-mode lag)
+planner_every_n_cycles: 3     # run planner every N control cycles (set 2-3 to reduce GO-mode lag)
 
 # Improved Navigation Settings
 # Exploration Grid: treats unexplored space as unsafe to prevent crashes
-use_exploration_grid: True  # Enable/Disable ExplorationGrid (unexplored-space penalty)
+use_exploration_grid: False  # Enable/Disable ExplorationGrid (unexplored-space penalty)
 unexplored_penalty_dist: 0.7 # Distance penalty for unexplored regions (m). Trajectories passing closer are rejected.
-exploration_update_every_n_frames: 1  # update exploration map every N frames (higher = faster)
-exploration_max_points: 4000          # cap sampled depth points/rays per exploration update
+exploration_update_every_n_frames: 3  # update exploration map every N frames (higher = faster)
+exploration_max_points: 3000          # cap sampled depth points/rays per exploration update
 
 # D* Lite Path Planning: Incremental replanning for goal-directed navigation with partial maps
 # Optimal for monocular vision where map is discovered incrementally
 use_dstar_planner: True       # Enable D* Lite for global path planning
 dstar_grid_size: 20           # Physical size of planning grid (meters)
 dstar_cell_size: 0.3          # Size of each grid cell (meters) - smaller = finer planning but slower
-dstar_k_max_iterations: 2000  # Max iterations for D* Lite algorithm (higher = more thorough)
+dstar_k_max_iterations: 1500  # Max iterations for D* Lite algorithm (higher = more thorough)
 
 # BendyRuler / Obstacle Avoidance Settings
 # min_obstacle_dist_m: 0.3     # companion-side emergency-stop threshold (m) — hover if nearest obstacle closer
