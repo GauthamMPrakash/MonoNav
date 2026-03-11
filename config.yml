@@ -8,7 +8,7 @@ camera_ip: 'http://192.168.53.56:81/stream'
 
 # Depth Model Settings
 num_pre_depth_frames: 3       # how many times to run the depth model before starting (the first few inferences are much slower)
-INPUT_SIZE: 310               # Multiple of 14. Scales the image by INPUT_SIZE/smaller image dimension
+INPUT_SIZE: 224               # Multiple of 14. Scales the image by INPUT_SIZE/smaller image dimension
 DA2_CHECKPOINT: "DepthAnythingV2-metric/checkpoints/depth_anything_v2_metric_hypersim_vits.pth" # path to checkpoint for DepthAnythingV2, make sure it matches the encoder you choose
 
 enable_vbg : True             # Enable VoxelBlockGrid (TSDF fusion) - only for AP_ObstacleAvoidnace
@@ -18,10 +18,10 @@ save_during_flight : True     # Whether to save images and reconstructions durin
 filterYvals: True             # this helps filter out the ground / ceiling (for planar navigation)
 filterWeights: True           # this helps filter out low-weight voxels
 filterTSDF: True
-weight_threshold: 3.0         # determine the weight threshold for filtering (higher threshold -> fewer points)
+weight_threshold: 3.5         # determine the weight threshold for filtering (higher threshold -> fewer points)
 VoxelBlockGrid:
   depth_scale: 1000.0         # 1000.0 is default (mm to m), scale factor for depth values during integration
-  depth_max: 10.0             # max depth to include in the reconstruction
+  depth_max: 15.0             # max depth to include in the reconstruction
   trunc_voxel_multiplier: 8.0
   device: None                # "CUDA:0" (faster) or "CPU:0". None for auto-selection (Only selects the first CPU or GPU instance)
 
@@ -31,11 +31,11 @@ trajlib_dir: "utils/trajlib/" # where to save & retrieve the trajectory library 
 # Goal position in RDF frame (metres). 
 # Comment out for undirected exploration.
 goal_position_rdf: # from EKF origin
-  - 0.0 # Right
+  - 2.0 # Right
   - -1.2   # Down
-  - 10.0   # Forward
+  - 15.0   # Forward
 
-min_dist2obs: 0.8             # minimum acceptable distance from obstacles, meters (for primitive selection)
+min_dist2obs: 1.0             # minimum acceptable distance from obstacles, meters (for primitive selection)
 min_dist2goal: 1.0            # termination condition for reaching the goal, meters
 planner_local_radius_m: 2.0   # only consider obstacles within this radius while planning; reduces stale global-map blocking
 planner_every_n_cycles: 2     # run planner every N control cycles (set 2-3 to reduce GO-mode lag)
@@ -52,7 +52,7 @@ planner_every_n_cycles: 2     # run planner every N control cycles (set 2-3 to r
 #IP: "udpout:10.42.0.110:14550" 
 IP: "udpout:192.168.53.51:14550" 
 baud: 115200               # Set baud, only required for serial telemetry
-height: 1.2                # flight altitude, meters
+height: 1.5                # flight altitude, meters
 EKF_LAT: 8.4723591
 EKF_LON: 76.9295203
 forward_speed: 0.5         # forward speed in m/s, set to None to use speed defined in generate_primitives.py
@@ -63,14 +63,14 @@ yawrate_gain: 1.25         # yawrate = yawrate*yawrate_gain
 # Improved Navigation Settings
 # Exploration Grid: treats unexplored space as unsafe to prevent crashes
 use_exploration_grid: True  # Disable ExplorationGrid (unexplored-space penalty off)
-unexplored_penalty_dist: 0.5 # Distance penalty for unexplored regions (m). Trajectories passing closer are rejected.
+unexplored_penalty_dist: 0.2 # Distance penalty for unexplored regions (m). Trajectories passing closer are rejected.
 exploration_update_every_n_frames: 3  # update exploration map every N frames (higher = faster)
 exploration_max_points: 3000          # cap sampled depth points/rays per exploration update
 
 # D* Lite Path Planning: Incremental replanning for goal-directed navigation with partial maps
 # Optimal for monocular vision where map is discovered incrementally
 use_dstar_planner: True       # Enable D* Lite for global path planning
-dstar_grid_size: 7.0         # Physical size of planning grid (meters)
+dstar_grid_size: 1.0         # Physical size of planning grid (meters)
 dstar_cell_size: 0.3          # Size of each grid cell (meters) - smaller = finer planning but slower
 dstar_k_max_iterations: 500   # Max iterations for D* Lite algorithm (higher = more thorough)
 
@@ -78,4 +78,4 @@ dstar_k_max_iterations: 500   # Max iterations for D* Lite algorithm (higher = m
 kp_angular_feedback: 0.5     # Proportional gain for angular error correction (0.0 to 1.0)
 kp_lateral_feedback: 0.3     # Proportional gain for lateral error correction (0.0 to 1.0)
 
-FLY_VEHICLE: False         # whether to actually fly the drone
+FLY_VEHICLE: True        # whether to actually fly the dronec

@@ -255,26 +255,13 @@ def trajectory_execution_loop(command_hz=10):
             
             # Check if we've exceeded the trajectory period
             if elapsed < period:
-                # Open-loop primitive command.
+                # Open-loop primitive command (closed-loop feedback disabled).
                 yawrate_raw = amplitudes[traj_index] * np.sin(np.pi / period * elapsed)  # rad/s
                 yvel_raw = yawrate_raw * yvel_gain
                 yawrate = yawrate_raw * yawrate_gain
-
-                # Closed-loop heading correction.
-                pose = get_latest_pose()
-                current_heading = pose[3]  # yaw
-                desired_heading = amplitudes[traj_index] * np.sin(np.pi * elapsed / period)
-                heading_error = desired_heading - current_heading
-                heading_error = np.arctan2(np.sin(heading_error), np.cos(heading_error))
-
-                yawrate_feedback = config.get('kp_angular_feedback', 0.5) * heading_error
-                yvel_feedback = config.get('kp_lateral_feedback', 0.3) * heading_error
-
-                yawrate_corrected = yawrate + yawrate_feedback
-                yvel_corrected = yvel_raw + yvel_feedback
                 
                 if FLY_VEHICLE:
-                    mavc.send_body_offset_ned_vel(forward_speed, yvel_corrected, yaw_rate=yawrate_corrected)
+                    mavc.send_body_offset_ned_vel(forward_speed, yvel_raw, yaw_rate=yawrate)
         
         next_command += period_s
         sleep_time = next_command - time.monotonic()
@@ -299,7 +286,7 @@ def main():
     global autonomous_mode
 
     traj_none_count = 0
-    traj_max_none_count = 1                      # how many times traj chooser can predict no safe traj before we force stop
+    traj_max_none_count = 3                      # how many times traj chooser can predict no safe traj before we force stop
 
     while True:
         # ARDUCOPTER CONTROL
