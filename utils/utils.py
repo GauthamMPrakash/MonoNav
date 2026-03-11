@@ -512,10 +512,30 @@ def get_cropped_intrinsics(intrinsic_matrix, roi):
     return cropped_intrinsic
 
 """
-Transform the raw image 
-This involves resizing the image, scaling the camera matrix, and undistorting the image.
+Transform the raw image.
+
+This involves resizing the image, scaling the camera matrix, and undistorting
+and cropping the image.  The undistortion step may be bypassed by setting
+``apply_undistort`` to ``False`` (for example when a sensor is already
+rectified or when you want to work with raw frames).
+
+Args:
+    image: Input colour image (numpy array or array-like).
+    mtx: Camera matrix from calibration.
+    dist: Distortion coefficients.
+    optimal_matrix: Optimal camera matrix after undistortion.
+    roi: Region of interest for cropping (x, y, w, h).
+    apply_undistort: If False, the original image is returned (cropped if
+        ``roi`` is not ``None``); no undistortion is performed.
 """
-def transform_image(image, mtx, dist, optimal_matrix, roi):
+def transform_image(image, mtx, dist, optimal_matrix, roi, apply_undistort: bool = True):
+    # optionally skip undistortion entirely
+    if not apply_undistort:
+        if roi is not None:
+            x, y, w, h = roi
+            return image[y:y+h, x:x+w]
+        return image
+
     # cv2 can handle both numpy arrays and other array-like objects efficiently
     transformed_image = cv2.undistort(image if isinstance(image, np.ndarray) else np.asarray(image), 
                                       mtx, dist, None, optimal_matrix)

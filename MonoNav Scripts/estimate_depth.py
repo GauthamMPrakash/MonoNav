@@ -55,8 +55,8 @@ print("Saving Depth images to: ", kinect_depth_dir)
 
 # Load the calibration values
 camera_calibration_path = config["camera_calibration_path"]
-mtx, dist, undist_mtx = get_calibration_values(camera_calibration_path)
-# Kinect intrinsic matrix
+mtx, dist, optimal_mtx, roi = get_calibration_values(camera_calibration_path)
+# Kinect intrinsic matrix (PrimeSense defaults roughly match kinect)
 kinect = o3d.camera.PinholeCameraIntrinsic(o3d.camera.PinholeCameraIntrinsicParameters.PrimeSenseDefault)
 
 # Load the ZoeDepth model
@@ -77,8 +77,15 @@ for frame_number in range(0, end_frame):
     filename = rgb_dir + "/" + camera_source + "_frame-%06d.rgb.jpg"%(frame_number)
     # Read in image with Pillow and convert to RGB
     crazyflie_rgb = Image.open(filename)#.convert("RGB")  # load
-    # Resize, Undistort, and Warp image to kinect's dimensions and intrinsics
-    kinect_rgb = transform_image(np.asarray(crazyflie_rgb), mtx, dist, kinect, undist_mtx=undist_mtx)
+    # Resize, undistort (optional), and warp image to kinect's dimensions and intrinsics
+    kinect_rgb = transform_image(
+        np.asarray(crazyflie_rgb),
+        mtx,
+        dist,
+        kinect,
+        roi,
+        apply_undistort=config.get("enable_undistort", True),
+    )
     kinect_rgb = cv2.cvtColor(kinect_rgb, cv2.COLOR_BGR2RGB)
     # Compute depth
     depth_numpy, depth_colormap = compute_depth(kinect_rgb, zoe)

@@ -120,11 +120,25 @@ obstacle_sender_stop_event = threading.Event()
 # Event and thread for periodic timesync calls
 timesync_stop_event = threading.Event()
 
-# Intrinsics for undistortion
-camera_calibration_path = config['camera_calibration_path']
-mtx, dist, optimal_mtx, roi = get_calibration_values(camera_calibration_path) # for the robot's camera
-calib_width, calib_height = get_calibration_resolution(camera_calibration_path)
-fusion_intrinsics = get_cropped_intrinsics(optimal_mtx, roi)
+# Intrinsics for undistortion (optional)
+camera_calibration_path = config.get('camera_calibration_path')
+enable_undistort = config.get('enable_undistort', True)
+if enable_undistort and camera_calibration_path:
+    mtx, dist, optimal_mtx, roi = get_calibration_values(camera_calibration_path) # for the robot's camera
+else:
+    mtx = dist = optimal_mtx = roi = None
+
+# compute fusion intrinsics if we have a valid ROI
+if roi is not None:
+    fusion_intrinsics = get_cropped_intrinsics(optimal_mtx, roi)
+else:
+    fusion_intrinsics = None
+
+# retrieve calibration resolution if available (used elsewhere?)
+if camera_calibration_path:
+    calib_width, calib_height = get_calibration_resolution(camera_calibration_path)
+else:
+    calib_width = calib_height = None
 
 # Initialize VoxelBlockGrid
 depth_scale = config['VoxelBlockGrid']['depth_scale']
@@ -132,8 +146,6 @@ obstacle_depth_scale_m_per_unit = 1.0 / float(depth_scale)
 depth_max = config['VoxelBlockGrid']['depth_max']
 trunc_voxel_multiplier = config['VoxelBlockGrid']['trunc_voxel_multiplier']
 weight_threshold = config['weight_threshold'] # for planning and visualization (!! important !!)
-# Use cropped intrinsics for VoxelBlockGrid from the start
-cropped_mtx = get_cropped_intrinsics(optimal_mtx, roi)
 if config['VoxelBlockGrid']['device'] != "None": 
     device = config['VoxelBlockGrid']['device']
 else:
@@ -274,6 +286,17 @@ def find_obstacle_line_height():
 def set_obstacle_distance_params_from_intrinsics(camera_matrix, width, height):
     global angle_offset, camera_facing_angle_degree, increment_f
     global depth_hfov_deg, depth_vfov_deg
+    # If no camera intrinsics are available (e.g., undistort disabled),
+    # fall back to reasonable default FOV assumptions so obstacle-distance
+    # messaging can still operate.
+    if camera_matrix is None:
+        mavc.printd("No camera intrinsics available; using fallback FOV values")
+        # Common approximate FOV for many small RGB sensors; conservative defaults
+        depth_hfov_deg = 62.2
+        depth_vfov_deg = 48.8
+        angle_offset = camera_facing_angle_degree - (depth_hfov_deg / 2)
+        increment_f = depth_hfov_deg / distances_array_length
+        return
 
     fx = camera_matrix[0, 0]
     fy = camera_matrix[1, 1]
@@ -358,17 +381,34 @@ def _timesync_loop(period_s, stop_event):
             stop_event.wait(sleep_time)
 
 def save_and_visualize_vbg(vbg, npz_save_filename, weight_threshold):
-    mavc.printd(" Saving VoxelBlockGrid to {}...".format(npz_save_filename))
-    vbg.vbg.save(npz_save_filename)
-    mavc.printd(" VoxelBlockGrid saved successfully")
+    # Attempt to save VoxelBlockGrid if the target directory exists; if not,
+    # skip saving but still extract & visualize the point cloud so the user
+    # can inspect the reconstruction even when file saving is disabled.
+    try:
+        save_dir = os.path.dirname(npz_save_filename) if npz_save_filename else None
+        if save_dir and os.path.isdir(save_dir):
+            mavc.printd(" Saving VoxelBlockGrid to {}...".format(npz_save_filename))
+            try:
+                vbg.vbg.save(npz_save_filename)
+                mavc.printd(" VoxelBlockGrid saved successfully")
+            except Exception as e:
+                mavc.printd(f"[warning] failed to save VoxelBlockGrid: {e}")
+        else:
+            mavc.printd(" Save directory not present or saving disabled; skipping VBG file save")
+    except Exception as e:
+        mavc.printd(f"[warning] exception while attempting to save VBG: {e}")
 
-    mavc.printd(" Extracting and visualizing point cloud...")
-    pcd = vbg.vbg.extract_point_cloud(weight_threshold)
-    pcd_cpu = pcd.cpu()
-    pcd_legacy = pcd_cpu.to_legacy()
-    num_points = len(pcd_legacy.points)
-    mavc.printd("Point cloud has {} points (weight_threshold={})".format(num_points, weight_threshold))
-    visualize_pointcloud(pcd_legacy)
+    # Always attempt to extract and visualize the point cloud (do not fail here)
+    try:
+        mavc.printd(" Extracting and visualizing point cloud...")
+        pcd = vbg.vbg.extract_point_cloud(weight_threshold)
+        pcd_cpu = pcd.cpu()
+        pcd_legacy = pcd_cpu.to_legacy()
+        num_points = len(pcd_legacy.points)
+        mavc.printd("Point cloud has {} points (weight_threshold={})".format(num_points, weight_threshold))
+        visualize_pointcloud(pcd_legacy)
+    except Exception as e:
+        mavc.printd(f"[warning] failed to extract/visualize point cloud: {e}")
 
 # MAIN MONONAV CONTROL LOOP
 def main():
@@ -429,10 +469,13 @@ def main():
             scale_y = DEPTH_HEIGHT / calib_height
             if abs(scale_x - 1.0) > 1e-6 or abs(scale_y - 1.0) > 1e-6:
                 mavc.printd(f"Scaling intrinsics: {calib_width}x{calib_height} → {DEPTH_WIDTH}x{DEPTH_HEIGHT}")
-        # Update VoxelBlockGrid with adjusted intrinsics
-        vbg_intrinsics = get_cropped_intrinsics(optimal_mtx, roi)
-        vbg.intrinsic_matrix = vbg_intrinsics
-        vbg.depth_intrinsic = o3d.core.Tensor(vbg_intrinsics, o3d.core.Dtype.Float64)
+        # Update VoxelBlockGrid with adjusted intrinsics (if ROI available)
+        if roi is not None:
+            vbg_intrinsics = get_cropped_intrinsics(optimal_mtx, roi)
+            vbg.intrinsic_matrix = vbg_intrinsics
+            vbg.depth_intrinsic = o3d.core.Tensor(vbg_intrinsics, o3d.core.Dtype.Float64)
+        else:
+            mavc.printd("No ROI available; skipping cropped intrinsics update")
 
     else:
         raise RuntimeError("Unable to read first frame from camera")
@@ -501,8 +544,13 @@ def main():
         # extract translation component (x,y,z) from 4x4 pose for distance checks
         cam_xyz = camera_position[:3, 3]
 
-        transform_bgr = transform_image(bgr, mtx, dist, optimal_mtx, roi)
-        transform_rgb = cv2.cvtColor(transform_bgr, cv2.COLOR_BGR2RGB)
+        # apply undistort/crop only if enabled in config
+        if config.get("enable_undistort", True):
+            transform_bgr = transform_image(bgr, mtx, dist, optimal_mtx, roi)
+            transform_rgb = cv2.cvtColor(transform_bgr, cv2.COLOR_BGR2RGB)
+        else:
+            transform_bgr = bgr
+            transform_rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
 
         depth_mat, depth_colormap = compute_depth(transform_bgr, depth_anything, INPUT_SIZE)
 

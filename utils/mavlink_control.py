@@ -36,6 +36,8 @@ def connect_drone(IP, baud=115200):
     """
     global drone
     drone = mavutil.mavlink_connection(IP, baud, autoreconnect=True)
+    while not drone:
+        pass
     printd("Connected")
     send_heartbeat()
     printd("Waiting for heartbeat...")
@@ -363,7 +365,7 @@ def test():
         # Arbitrary location for EKF Origin
         EKF_LAT = 8.4723591
         EKF_LON = 76.9295203
-        IP = "udpout:10.42.0.110:14550"  # Drone IP
+        IP = "udpout:192.168.53.51:14550"  # Drone IP
         connect_drone(IP)
         en_pose_stream()
         reboot_if_EKF_origin()
@@ -373,7 +375,6 @@ def test():
         for i in range(40):
             pose = get_pose()
             print(pose, flush=True)
-            time.sleep(0.1)
         print("AP time, offset:", timesync())
         arm()
         takeoff(1)
@@ -386,7 +387,6 @@ def test():
         tested that the drone will land with an acceptable heading' that gives it space for another round.
         """
         yaw_rate = 1
-        length = 0.7
         vel = 0.5
         def square_vel():
             send_body_offset_ned_vel(vel, 0, yaw_rate=yaw_rate)
@@ -398,11 +398,6 @@ def test():
             send_body_offset_ned_vel(0, -vel, yaw_rate=yaw_rate)
             time.sleep(2)
         #square_vel()
-        # convert an RDF offset to NED using utility from utils/utils
-        from utils import rdf_goal_to_ned
-        pos = rdf_goal_to_ned(1, 0.5, 0, get_pose()[3])  # (north,east,down) as tuple
-        send_local_ned_pos(pos[0], pos[1], pos[2])
-        time.sleep(5)
         print("Landing...")
         set_mode('LAND')
         
@@ -410,6 +405,7 @@ def test():
         set_mode('LAND')
         print("Emergency")
         print("Exception occurred:", e) 
- 
+    finally:
+        set_mode('LAND')
 if __name__ == '__main__':
     test()

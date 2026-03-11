@@ -99,13 +99,21 @@ traj_index = None
 trajectory_start_time = None  # when the current trajectory started
 autonomous_mode = False
 
-# Intrinsics for undistortio
-# n
-camera_calibration_path = config['camera_calibration_path']
-mtx, dist, optimal_mtx, roi = get_calibration_values(camera_calibration_path) # for the robot's camera
-calib_width, calib_height = get_calibration_resolution(camera_calibration_path)
-fusion_intrinsics = get_cropped_intrinsics(optimal_mtx, roi)
-# kinect = o3d.camera.PinholeCameraIntrinsic(o3d.camera.PinholeCameraIntrinsicParameters.PrimeSenseDefault) # for the kinect
+# Intrinsics for undistort (optional)
+camera_calibration_path = config.get('camera_calibration_path')
+enable_undistort = config.get('enable_undistort', True)
+if enable_undistort and camera_calibration_path:
+    mtx, dist, optimal_mtx, roi = get_calibration_values(camera_calibration_path) # for the robot's camera
+    calib_width, calib_height = get_calibration_resolution(camera_calibration_path)
+    # only compute cropped intrinsics if roi is valid
+    if roi is not None:
+        fusion_intrinsics = get_cropped_intrinsics(optimal_mtx, roi)
+    else:
+        fusion_intrinsics = None
+else:
+    # no calibration available or undistort disabled; use defaults
+    mtx = dist = optimal_mtx = roi = None
+    fusion_intrinsics = None  # VoxelBlockGrid will choose default intrinsics
 
 # Initialize VoxelBlockGrid
 depth_scale = config['VoxelBlockGrid']['depth_scale']
@@ -400,9 +408,13 @@ def main():
                         print("Reached goal!")
                         break
 
-                # Transform Camera Image to undistort and crop according to calibration
-                transform_bgr = transform_image(bgr, mtx, dist, optimal_mtx, roi)
-                transform_rgb = cv2.cvtColor(transform_bgr, cv2.COLOR_BGR2RGB)
+                # Optionally transform camera image (undistort + crop) based on config
+                if config.get("enable_undistort", True):
+                    transform_bgr = transform_image(bgr, mtx, dist, optimal_mtx, roi)
+                    transform_rgb = cv2.cvtColor(transform_bgr, cv2.COLOR_BGR2RGB)
+                else:
+                    transform_bgr = bgr
+                    transform_rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
                 #transform_rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
 
                 # compute depth
@@ -466,17 +478,32 @@ def main():
         print("[INFO] Current NED coords:" , camera_position, flush=True)
         print("[INFO] Current RDF coords:", ned_to_rdf(camera_position[0], camera_position[1], camera_position[2], mavc.heading_offset), flush=True)
 
-        # save and view vbg
-        print("Saving to {}...".format(npz_save_filename), flush=True)
-        vbg.vbg.save(npz_save_filename)
-        print("Saving finished", flush=True)
-        print("Visualize raw pointcloud.", flush=True)
-        pcd = vbg.vbg.extract_point_cloud(weight_threshold)
-        pcd_cpu = pcd.cpu()
-        # Convert tensor point cloud to legacy for reliable visualization
-        pcd_legacy = pcd_cpu.to_legacy()
-        print(f"Point cloud has {len(pcd_legacy.points)} points", flush=True)
-        visualize_pointcloud(pcd_legacy, window_name="MonoNav Reconstruction")
+        # save and view vbg (robust to missing save dir; always attempt visualization)
+        try:
+            save_dir = os.path.dirname(npz_save_filename) if npz_save_filename else None
+            if save_dir and os.path.isdir(save_dir):
+                print("Saving to {}...".format(npz_save_filename), flush=True)
+                try:
+                    vbg.vbg.save(npz_save_filename)
+                    print("Saving finished", flush=True)
+                except Exception as e:
+                    print(f"[warning] failed to save VoxelBlockGrid: {e}", flush=True)
+            else:
+                print("Save directory not present or saving disabled; skipping VBG file save", flush=True)
+        except Exception as e:
+            print(f"[warning] exception while attempting to save VBG: {e}", flush=True)
+
+        # Attempt to extract and visualize point cloud regardless of save success
+        try:
+            print("Visualize raw pointcloud.", flush=True)
+            pcd = vbg.vbg.extract_point_cloud(weight_threshold)
+            pcd_cpu = pcd.cpu()
+            # Convert tensor point cloud to legacy for reliable visualization
+            pcd_legacy = pcd_cpu.to_legacy()
+            print(f"Point cloud has {len(pcd_legacy.points)} points", flush=True)
+            visualize_pointcloud(pcd_legacy, window_name="MonoNav Reconstruction")
+        except Exception as e:
+            print(f"[warning] failed to extract/visualize point cloud: {e}", flush=True)
 
     except KeyboardInterrupt:
         mavc.set_mode('LAND')

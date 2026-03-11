@@ -219,6 +219,8 @@ if __name__ == "__main__":
         action="store_true",
         help="do not apply camera undistort/warp to frames before depth estimation",
     )
+    # set default based on configuration option
+    parser.set_defaults(no_transform=not cfg.get("enable_undistort", True))
     args = parser.parse_args()
 
     # try converting camera_ip to integer if possible
