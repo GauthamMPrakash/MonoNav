@@ -35,14 +35,14 @@ goal_position_rdf: # from EKF origin
   - -1.2   # Down
   - 15.0   # Forward
 
-min_dist2obs: 0.8             # minimum acceptable distance from obstacles, meters (for primitive selection)
+min_dist2obs: 1.0             # minimum acceptable distance from obstacles, meters (for primitive selection)
 min_dist2goal: 1.0            # termination condition for reaching the goal, meters
 planner_local_radius_m: 3.0   # only consider obstacles within this radius while planning; reduces stale global-map blocking
 planner_every_n_cycles: 2     # run planner every N control cycles (set 2-3 to reduce GO-mode lag)
 
 # Improved Navigation Settings
 # Exploration Grid: treats unexplored space as unsafe to prevent crashes
-use_exploration_grid: False  # Enable/Disable ExplorationGrid (unexplored-space penalty)
+use_exploration_grid: True  # Enable/Disable ExplorationGrid (unexplored-space penalty)
 unexplored_penalty_dist: 0.7 # Distance penalty for unexplored regions (m). Trajectories passing closer are rejected.
 exploration_update_every_n_frames: 1  # update exploration map every N frames (higher = faster)
 exploration_max_points: 4000          # cap sampled depth points/rays per exploration update
@@ -74,4 +74,4 @@ forward_speed: 0.5         # forward speed in m/s, set to None to use speed defi
 yvel_gain: 0.1             # yvel =  -yawrate*yvel_gain  <- for providing sideways velocity so that turns can be made sharper. Increase for faster turns.
 yawrate_gain: 1.25         # yawrate = yawrate*yawrate_gain
 
-FLY_VEHICLE: True        # whether to actually fly the drone
+FLY_VEHICLE: False        # whether to actually fly the drone
