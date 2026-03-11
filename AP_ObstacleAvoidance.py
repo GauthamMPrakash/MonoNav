@@ -265,8 +265,8 @@ def find_obstacle_line_height():
     # Sanity check
     if obstacle_line_height < 0:
         obstacle_line_height = 0
-    elif obstacle_line_height > DEPTH_HEIGHT:
-        obstacle_line_height = DEPTH_HEIGHT
+    elif obstacle_line_height >= DEPTH_HEIGHT:
+        obstacle_line_height = DEPTH_HEIGHT - 1
     
     return obstacle_line_height
 
@@ -461,12 +461,18 @@ def main():
     # to match camera_position[0:-1, -1] from get_pose_matrix().
     print("Goal position (RDF):", goal_position)
     if goal_position is not None:
-        goal_position = np.array(
-            rdf_goal_to_ned(goal_position[0], goal_position[1], goal_position[2], hdg)
-        )
-        print(f"Goal position (NED): {goal_position}")
-        goal_position = np.array([goal_position[1], goal_position[2], goal_position[0]]).reshape(1, 3)
-    mavc.printd(f"Heading offset : {mavc.heading_offset*180/np.pi}")
+        # convert user-specified RDF goal into NED frame
+        goal_position_ned = np.array(rdf_goal_to_ned(goal_position[0], goal_position[1], goal_position[2], hdg))
+        print(f"Goal position (NED): {goal_position_ned}")
+        # we keep a copy in NED for MAVLink commands
+        # but camera_position (from get_pose_matrix) is expressed in EDN order
+        # (east, down, north) because of the internal permutation in get_pose_matrix.
+        # to compute distances we convert the goal to EDN as well.
+        goal_position = np.array([goal_position_ned[1], goal_position_ned[2], goal_position_ned[0]])
+        # goal_position variable now holds the EDN version; shape (3,)
+    else:
+        goal_position_ned = None
+    mavc.printd(f"Heading offset : {hdg*180/np.pi}")
 
     print("\n=== Keyboard Controls ===")
     if FLY_VEHICLE:
@@ -492,6 +498,8 @@ def main():
         with vehicle_pose_lock:
             vehicle_pitch_rad = pitch_rad
         camera_position = get_pose_matrix(pos_x, pos_y, pos_z, vehicle_yaw_rad, pitch_rad, vehicle_roll_rad)
+        # extract translation component (x,y,z) from 4x4 pose for distance checks
+        cam_xyz = camera_position[:3, 3]
 
         transform_bgr = transform_image(bgr, mtx, dist, optimal_mtx, roi)
         transform_rgb = cv2.cvtColor(transform_bgr, cv2.COLOR_BGR2RGB)
@@ -551,11 +559,14 @@ def main():
                 # Send position target only once when entering goal navigation mode
                 if not goal_nav_active:
                     print("Pressed g. Using BendyRuler navigation to goal.")
-                    mavc.send_local_ned_pos(goal_position[0, 2], goal_position[0, 0], goal_position[0, 1]) # remember, goal_position is now in EDN
+                    # send value in true NED order: north, east, down.
+                    # use goal_position_ned computed earlier rather than EDN copy.
+                    mavc.send_local_ned_pos(goal_position_ned[0], goal_position_ned[1], goal_position_ned[2])
                     goal_nav_active = True
                 
                 # Check distance to goal (both in NED frame after heading correction)
-                dist_to_goal = np.linalg.norm(camera_position[0:-1, -1] - goal_position)
+                # cam_xyz is in EDN (east, down, north); goal_position is the EDN goal.
+                dist_to_goal = np.linalg.norm(cam_xyz - goal_position)
                 if dist_to_goal <= min_dist2goal:
                     print("Reached goal!")
                     shouldStop = True

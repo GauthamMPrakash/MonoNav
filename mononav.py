@@ -282,7 +282,7 @@ def main():
     # Initialize lists and frame counter.
         frame_number = 0
         start_flight_time = time.time()
-        mavc.heading_offset_init()
+        hdg = mavc.heading_offset_init()
         if FLY_VEHICLE==True:
             print("Arming Motors!", flush=True)
             mavc.set_mode('GUIDED')
@@ -298,12 +298,12 @@ def main():
         # to match camera_position[0:-1, -1] from get_pose_matrix().
         if goal_position is not None:
             goal_position = np.array(
-                rdf_goal_to_ned(goal_position[0], goal_position[1], goal_position[2], mavc.heading_offset),
+                rdf_goal_to_ned(goal_position[0], goal_position[1], goal_position[2], hdg),
                 dtype=np.float64,
             )
             print(f"Goal position (NED): {goal_position}", flush=True)
             goal_position = np.array([goal_position[1], goal_position[2], goal_position[0]], dtype=np.float64).reshape(1, 3)
-        mavc.printd(f"Heading offset : {mavc.heading_offset*180/np.pi}")
+        mavc.printd(f"Heading offset : {hdg*180/np.pi}")
     
         print("Starting control.", flush=True)
         traj_counter = 0         # how many trajectory iterations have we done?

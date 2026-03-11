@@ -10,8 +10,7 @@ from pymavlink import mavutil
 import time
 
 FLTMODES = {'GUIDED': 4, 'LOITER':5, 'LAND':9, 'BRAKE':17, 'SmartRTL':21}
-time_boot, x, y, z, roll, pitch, yaw = 0, 0, 0, 0, 0, 0, 0
-heading_offset = None
+
 DEBUG = True                                                # Whether to print debug messages
 
 def printd(string):
@@ -150,7 +149,7 @@ def send_local_ned_pos(x, y, z):
     # vx = speed if x > 0 else -speed if x < 0 else 0
     # vy = speed if y > 0 else -speed if y < 0 else 0 
     
-    printd(f"Sending BODY_NED pos x={x}, y={y}, z={z}")
+    printd(f"Sending LOCAL_NED pos North={x}, East={y}, Down={z}")
     drone.mav.set_position_target_local_ned_send(
         0,
         drone.target_system,
@@ -219,8 +218,7 @@ def get_pose(blocking=False):
     Return the position (Local NED) and attitude (in radians) of the drone
     Polls for both LOCAL_POSITION_NED and ATTITUDE messages until both are received
     """
-    global time_boot, x, y, z, roll, pitch, yaw
-    
+
     # Keep polling until we get fresh messages (or timeout)
     got_position = False
     got_attitude = False
@@ -243,7 +241,6 @@ def get_pose(blocking=False):
     return x, y, z, yaw, pitch, roll
 
 def heading_offset_init():
-    global heading_offset
     """
     Call once to get initial absolute heading.  Subsequently subtract
     heading_offset from the absolute heading (ATTITUDE.yaw) to get
@@ -251,8 +248,7 @@ def heading_offset_init():
     """
     # get_pose returns (x, y, z, yaw, pitch, roll)
     _, _, _, yaw, _, _ = get_pose()
-    heading_offset = yaw
-    return heading_offset
+    return yaw
 
 def eSTOP():
     """
@@ -380,10 +376,8 @@ def test():
             time.sleep(0.1)
         print("AP time, offset:", timesync())
         arm()
-        takeoff(1.2)
+        takeoff(1)
         set_speed(0.3)
-        time.sleep(0.2)
-        #send_body_offset_ned_pos_vel(0.7, 0, pos_or_vel="pos", speed=0.3)
         """
         Move along a square
 
@@ -404,8 +398,10 @@ def test():
             send_body_offset_ned_vel(0, -vel, yaw_rate=yaw_rate)
             time.sleep(2)
         #square_vel()
-        time.sleep(1)
-        send_local_ned_pos(1,1,-1.2)
+        # convert an RDF offset to NED using utility from utils/utils
+        from utils import rdf_goal_to_ned
+        pos = rdf_goal_to_ned(1, 0.5, 0, get_pose()[3])  # (north,east,down) as tuple
+        send_local_ned_pos(pos[0], pos[1], pos[2])
         time.sleep(5)
         print("Landing...")
         set_mode('LAND')
