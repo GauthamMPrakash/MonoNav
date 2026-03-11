@@ -407,7 +407,7 @@ def choose_primitive(vbg, camera_position, traj_linesets, goal_position, dist_th
                 voxel_coords_numpy, camera_position, weight_threshold
             )
         except Exception as e:
-            mavc.printd(f"[WARNING] D* Lite planning failed: {e}, falling back to greedy")
+            mavc.printd(f"[WARNING] D* Lite planning failed: {e}, falling back to greedy planner")
 
     # NOW WE HAVE A FILTERED SET OF VOXELS THAT REPRESENT OBSTACLES
     # NEXT, WE DETERMINE THE BEST TRAJECTORY ACCORDING TO A COST FUNCTION
