@@ -18,12 +18,15 @@ save_during_flight : True     # Whether to save images and reconstructions durin
 filterYvals: True             # this helps filter out the ground / ceiling (for planar navigation)
 filterWeights: True           # this helps filter out low-weight voxels
 filterTSDF: True
-weight_threshold: 3.5         # determine the weight threshold for filtering (higher threshold -> fewer points)
+weight_threshold: 3.0         # determine the weight threshold for filtering (higher threshold -> fewer points)
 VoxelBlockGrid:
   depth_scale: 1000.0         # 1000.0 is default (mm to m), scale factor for depth values during integration
   depth_max: 15.0             # max depth to include in the reconstruction
   trunc_voxel_multiplier: 8.0
   device: None                # "CUDA:0" (faster) or "CPU:0". None for auto-selection (Only selects the first CPU or GPU instance)
+vbg_in_view_refresh_enabled: True       # Soft-refresh voxels currently in camera view (decays old confidence before integrating new frame)
+vbg_in_view_decay_factor: 0.5           # 0..1, lower = stronger refresh of visible voxels
+vbg_in_view_refresh_max_distance: 5.0   # only refresh visible voxels closer than this distance (meters)
 
 # Planning Settings
 trajlib_dir: "utils/trajlib/" # where to save & retrieve the trajectory library (motion primitives)

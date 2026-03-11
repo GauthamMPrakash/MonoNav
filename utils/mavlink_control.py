@@ -10,8 +10,7 @@ from pymavlink import mavutil
 import time
 
 FLTMODES = {'GUIDED': 4, 'LOITER':5, 'LAND':9, 'BRAKE':17, 'SmartRTL':21}
-time_boot, x, y, z, roll, pitch, yaw = 0, 0, 0, 0, 0, 0, 0
-heading_offset = None
+
 DEBUG = True                                                # Whether to print debug messages
 
 def printd(string):
@@ -219,7 +218,6 @@ def get_pose(blocking=False):
     Return the position (Local NED) and attitude (in radians) of the drone
     Polls for both LOCAL_POSITION_NED and ATTITUDE messages until both are received
     """
-    global time_boot, x, y, z, roll, pitch, yaw
     
     # Keep polling until we get fresh messages (or timeout)
     got_position = False
@@ -229,21 +227,16 @@ def get_pose(blocking=False):
         msg = drone.recv_match(type=["LOCAL_POSITION_NED", "ATTITUDE"], blocking=blocking, timeout=0.1)
         
         if not msg or msg.get_type() == "BAD_DATA":
-            if got_position and got_attitude:
-                break
             continue
 
         if msg.get_type() == "LOCAL_POSITION_NED":
             x, y, z = msg.x, msg.y, msg.z
-            got_position = True
         elif msg.get_type() == "ATTITUDE":
             roll, pitch, yaw = msg.roll, msg.pitch, msg.yaw
-            got_attitude = True
                 
     return x, y, z, yaw, pitch, roll
 
 def heading_offset_init():
-    global heading_offset
     """
     Call once to get initial absolute heading.  Subsequently subtract
     heading_offset from the absolute heading (ATTITUDE.yaw) to get
@@ -251,8 +244,7 @@ def heading_offset_init():
     """
     # get_pose returns (x, y, z, yaw, pitch, roll)
     _, _, _, yaw, _, _ = get_pose()
-    heading_offset = yaw
-    return heading_offset
+    return yaw
 
 def eSTOP():
     """
@@ -318,45 +310,6 @@ def reboot_if_EKF_origin(pos_tolerance=0.2):
             0, 0, 0
         )
         return True
-    return False
-
-def set_param(param_id, param_value, param_type, timeout=5.0):
-    """
-    UNTESTED
-
-    Set a parameter on the autopilot. Use with caution and ensure you know what the parameter does before changing.
-    Waits for PARAM_VALUE response to verify successful parameter set with configurable timeout.
-    Returns True if parameter was successfully set, False otherwise.
-    """
-    printd(f"Setting param {param_id} to {param_value}")
-    drone.mav.param_set_send(
-        drone.target_system,
-        drone.target_component,
-        param_id.encode('utf-8'),
-        float(param_value),
-        param_type
-    )
-    
-    # Wait for PARAM_VALUE response to confirm parameter was set successfully
-    start_time = time.time()
-    while time.time() - start_time < timeout:
-        msg = drone.recv_match(type='PARAM_VALUE', blocking=False, timeout=0.1)
-        if msg is not None:
-            # Decode param_id from message (may be null-terminated)
-            recv_param_id = msg.param_id.split('\x00')[0] if isinstance(msg.param_id, str) else msg.param_id.decode('utf-8').split('\x00')[0]
-            
-            # Check if this is the parameter we just set
-            if recv_param_id == param_id:
-                # Verify the value matches (with small tolerance for floating point)
-                value_match = abs(msg.param_value - float(param_value)) < 1e-6
-                if value_match:
-                    printd(f"Parameter {param_id} successfully set to {msg.param_value}")
-                    return True
-                else:
-                    printd(f"ERROR: Parameter {param_id} value mismatch. Expected {param_value}, got {msg.param_value}")
-                    return False
-    
-    printd(f"ERROR: No PARAM_VALUE response received for {param_id} within {timeout}s timeout")
     return False
 
 def test(): 

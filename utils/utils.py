@@ -49,6 +49,9 @@ class VoxelBlockGrid:
         trunc_voxel_multiplier=8.0,
         device=o3d.core.Device("CUDA:0"),
         intrinsic_matrix=None,
+        in_view_refresh_enabled=False,
+        in_view_decay_factor=0.5,
+        in_view_refresh_max_distance=4.0,
     ):
         # Reconstruction Information
         self.depth_scale = depth_scale
@@ -62,6 +65,9 @@ class VoxelBlockGrid:
             intrinsic_matrix = self.camera.intrinsic_matrix
         self.intrinsic_matrix = np.asarray(intrinsic_matrix, dtype=np.float64)
         self.depth_intrinsic = o3d.core.Tensor(self.intrinsic_matrix, o3d.core.Dtype.Float64)
+        self.in_view_refresh_enabled = bool(in_view_refresh_enabled)
+        self.in_view_decay_factor = float(in_view_decay_factor)
+        self.in_view_refresh_max_distance = float(in_view_refresh_max_distance)
 
         # Initialize the VoxelBlockGrid
         self.vbg = o3d.t.geometry.VoxelBlockGrid(
@@ -73,8 +79,63 @@ class VoxelBlockGrid:
             block_count=50000,
             device=device)
 
+    def _apply_in_view_refresh(self, cam_pose, image_h, image_w):
+        """
+        Apply soft refresh to currently visible voxels by decaying their TSDF weight.
+        This allows visible regions to be updated aggressively while preserving out-of-view map memory.
+        """
+        if not self.in_view_refresh_enabled:
+            return
+
+        if self.in_view_decay_factor < 0.0 or self.in_view_decay_factor > 1.0:
+            return
+
+        voxel_coords, voxel_indices = self.vbg.voxel_coordinates_and_flattened_indices()
+        if voxel_coords.shape[0] == 0:
+            return
+
+        coords_np = voxel_coords.cpu().numpy()
+        if coords_np.shape[0] == 0:
+            return
+
+        # World -> camera transform
+        cam_T_world = np.linalg.inv(cam_pose)
+        homog = np.ones((coords_np.shape[0], 4), dtype=np.float64)
+        homog[:, 0:3] = coords_np
+        pts_cam = (cam_T_world @ homog.T).T[:, 0:3]
+
+        z = pts_cam[:, 2]
+        valid_z = z > 1e-3
+        if self.in_view_refresh_max_distance > 0:
+            valid_z = valid_z & (z <= self.in_view_refresh_max_distance)
+
+        if not np.any(valid_z):
+            return
+
+        fx, fy = self.intrinsic_matrix[0, 0], self.intrinsic_matrix[1, 1]
+        cx, cy = self.intrinsic_matrix[0, 2], self.intrinsic_matrix[1, 2]
+        u = fx * (pts_cam[:, 0] / z) + cx
+        v = fy * (pts_cam[:, 1] / z) + cy
+        in_image = (u >= 0) & (u < image_w) & (v >= 0) & (v < image_h)
+        visible_mask = valid_z & in_image
+
+        if not np.any(visible_mask):
+            return
+
+        # Decay only visible voxels. This is a soft reset: new integration immediately rebuilds confidence.
+        visible_voxel_indices_np = voxel_indices.cpu().numpy()[visible_mask]
+        if visible_voxel_indices_np.size == 0:
+            return
+
+        visible_idx = o3c.Tensor(visible_voxel_indices_np, dtype=o3c.int64, device=self.device)
+        weight = self.vbg.attribute("weight").reshape((-1))
+        curr_w = weight[visible_idx]
+        weight[visible_idx] = curr_w * self.in_view_decay_factor
+
     def integration_step(self, color, depth_numpy, cam_pose):
         # Integration Step (TSDF Fusion)
+        image_h, image_w = depth_numpy.shape[:2]
+        self._apply_in_view_refresh(cam_pose, image_h, image_w)
         depth_numpy = depth_numpy.astype(np.uint16)  # Convert to uint16
         depth = o3d.t.geometry.Image(depth_numpy).to(self.device)
         # Open3D frustum indexing expects camera tensors on CPU even when VBG lives on CUDA.
