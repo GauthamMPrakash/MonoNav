@@ -12,7 +12,7 @@ INPUT_SIZE: 224               # Multiple of 14. Scales the image by INPUT_SIZE/s
 DA2_CHECKPOINT: "DepthAnythingV2-metric/checkpoints/depth_anything_v2_metric_hypersim_vits.pth" # path to checkpoint for DepthAnythingV2, make sure it matches the encoder you choose
 
 enable_vbg : True             # Enable VoxelBlockGrid (TSDF fusion) - only for AP_ObstacleAvoidnace
-save_during_flight : True     # Whether to save images and reconstructions during flight (slows down the loop, but allows you to see the reconstruction quality on the actual flight data)
+save_during_flight : False     # Whether to save images and reconstructions during flight (slows down the loop, but allows you to see the reconstruction quality on the actual flight data)
 
 # Reconstruction settings
 filterYvals: True             # this helps filter out the ground / ceiling (for planar navigation)
@@ -24,6 +24,7 @@ VoxelBlockGrid:
   depth_max: 15.0             # max depth to include in the reconstruction
   trunc_voxel_multiplier: 8.0
   device: None                # "CUDA:0" (faster) or "CPU:0". None for auto-selection (Only selects the first CPU or GPU instance)
+
 vbg_in_view_refresh_enabled: True       # Soft-refresh voxels currently in camera view (decays old confidence before integrating new frame)
 vbg_in_view_decay_factor: 0.5           # 0..1, lower = stronger refresh of visible voxels
 vbg_in_view_refresh_max_distance: 5.0   # only refresh visible voxels closer than this distance (meters)

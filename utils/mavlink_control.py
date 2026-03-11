@@ -145,7 +145,7 @@ def send_local_ned_pos(x, y, z):
     Send position in LOCAL_NED frame (Relative to EKF-origin).
     Currently AP_ObstacleAvoidance only requires 2D position control.
     """
-    type_mask = 0b110111111000
+    type_mask = 0b110111111100
     # vx = speed if x > 0 else -speed if x < 0 else 0
     # vy = speed if y > 0 else -speed if y < 0 else 0 
     
