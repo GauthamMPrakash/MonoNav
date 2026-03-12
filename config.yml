@@ -5,6 +5,9 @@ camera_source: 'esp32-cam'                                   # used for naming f
 camera_calibration_path: 'utils/calibration/intrinsics.json' # camera calibration file (for undistortion)
 camera_ip: 'http://10.42.0.29:81/stream'                    # camera stream URL (otherwise enter integer for camera index)   
 #camera_ip: 'http://192.168.53.56:81/stream'
+# Whether to apply camera undistort/warp transform to raw frames.
+# Set to False to skip undistortion and use raw frames directly.
+apply_undistort_transform: True
 
 # Depth Model Settings
 num_pre_depth_frames: 3       # how many times to run the depth model before starting (the first few inferences are much slower)

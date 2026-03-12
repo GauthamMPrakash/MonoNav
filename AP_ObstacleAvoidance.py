@@ -125,6 +125,8 @@ camera_calibration_path = config['camera_calibration_path']
 mtx, dist, optimal_mtx, roi = get_calibration_values(camera_calibration_path) # for the robot's camera
 calib_width, calib_height = get_calibration_resolution(camera_calibration_path)
 fusion_intrinsics = get_cropped_intrinsics(optimal_mtx, roi)
+# Whether to apply the undistort/warp transform to incoming frames
+apply_undistort_transform = config.get('apply_undistort_transform', True)
 
 # Initialize VoxelBlockGrid
 depth_scale = config['VoxelBlockGrid']['depth_scale']
@@ -493,7 +495,10 @@ def main():
             vehicle_pitch_rad = pitch_rad
         camera_position = get_pose_matrix(pos_x, pos_y, pos_z, vehicle_yaw_rad, pitch_rad, vehicle_roll_rad)
 
-        transform_bgr = transform_image(bgr, mtx, dist, optimal_mtx, roi)
+        if apply_undistort_transform and mtx is not None and dist is not None and optimal_mtx is not None and roi is not None:
+            transform_bgr = transform_image(bgr, mtx, dist, optimal_mtx, roi)
+        else:
+            transform_bgr = bgr
         transform_rgb = cv2.cvtColor(transform_bgr, cv2.COLOR_BGR2RGB)
 
         depth_mat, depth_colormap = compute_depth(transform_bgr, depth_anything, INPUT_SIZE)
