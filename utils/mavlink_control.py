@@ -115,8 +115,8 @@ def takeoff(target_alt):
 
     # Wait until drone reaches target altitude
     while True:
-        msg = drone.recv_match(type="VFR_HUD", blocking=True)
-        if msg.alt > target_alt * 0.9:
+        msg = drone.recv_match(type="LOCAL_POSITION_NED", blocking=True)
+        if -msg.z > target_alt * 0.9:
             printd("Target altitude reached")
             break
         time.sleep(0.1)
