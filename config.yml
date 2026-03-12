@@ -43,7 +43,7 @@ planner_every_n_cycles: 2     # run planner every N control cycles (set 2-3 to r
 # Improved Navigation Settings
 # Exploration Grid: treats unexplored space as unsafe to prevent crashes
 use_exploration_grid: True  # Enable/Disable ExplorationGrid (unexplored-space penalty)
-unexplored_penalty_dist: 0.7 # Distance penalty for unexplored regions (m). Trajectories passing closer are rejected.
+unexplored_penalty_dist: 0.5 # Distance penalty for unexplored regions (m). Trajectories passing closer are rejected.
 exploration_update_every_n_frames: 2  # update exploration map every N frames (higher = faster)
 exploration_max_points: 3000          # cap sampled depth points/rays per exploration update
 
@@ -63,7 +63,7 @@ dstar_k_max_iterations: 3000  # Max iterations for D* Lite algorithm (higher = m
 IP: "udpout:10.42.0.110:14550" 
 #IP: "udpout:192.168.53.51:14550" 
 baud: 115200               # Set baud, only required for serial telemetry
-height: 1.4                # flight altitude, meters
+height: 1.3                # flight altitude, meters
 EKF_LAT: 8.4723591
 EKF_LON: 76.9295203
 forward_speed: 0.5         # forward speed in m/s, set to None to use speed defined in generate_primitives.py

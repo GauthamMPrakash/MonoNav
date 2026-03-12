@@ -1,4 +1,4 @@
-"""
+r"""
   __  __                   _   _             
  |  \/  | ___  _ __   ___ | \ | | __ ___   __
  | |\/| |/ _ \| '_ \ / _ \|  \| |/ _` \ \ / /
@@ -287,9 +287,6 @@ def main():
     global traj_max_none_count
     global autonomous_mode
 
-    traj_none_count = 0
-    traj_max_none_count = 3                      # how many times traj chooser can predict no safe traj before we force stop
-
     while True:
         # ARDUCOPTER CONTROL
         # Connect to the drone
@@ -333,9 +330,8 @@ def main():
 
     # Initialize lists and frame counter.
         frame_number = 0
-        start_flight_time = time.time()
-        hdg = mavc.heading_offset_init()
         mavc.en_pose_stream()                    # Commands AP to stream poses at a deafult value of 15 Hz
+        hdg = mavc.get_pose()[3]
         if FLY_VEHICLE==True:
             print("Arming Motors!", flush=True)
             mavc.set_mode('GUIDED')
@@ -343,20 +339,22 @@ def main():
             print("Taking off.", flush=True)
             mavc.takeoff(height)
             # mavc.set_speed(forward_speed)
+
         start_pose_thread()                      # Start background pose polling at 10 Hz (non-blocking)
+        start_flight_time = time.time()
+
         # Convert RDF goal to NED, then reorder to internal [E, D, N]
         # to match camera_position[0:-1, -1] from get_pose_matrix().
         if goal_position is not None:
             goal_position = np.array(
-                rdf_goal_to_ned(goal_position[0], goal_position[1], goal_position[2], mavc.heading_offset)
+                rdf_goal_to_ned(goal_position[0], goal_position[1], goal_position[2], hdg)
             )
             print(f"Goal position (NED): {goal_position}", flush=True)
-            goal_position = np.array([goal_position[1], goal_position[2], goal_position[0]], dtype=np.float64).reshape(1, 3)
-        mavc.printd(f"Heading offset : {mavc.heading_offset*180/np.pi}")
+            goal_position = np.array([goal_position[1], goal_position[2], goal_position[0]]).reshape(1, 3)
+        mavc.printd(f"Heading offset : {hdg*180/np.pi}")
     
         print("Starting control.", flush=True)
         traj_counter = 0         # how many trajectory iterations have we done?
-        no_safe_traj = False
         last_time = time.time()  # for FPS counter
         
         # Start trajectory execution thread
@@ -517,13 +515,8 @@ def main():
                     traj_index = None
                     if FLY_VEHICLE:
                         mavc.send_body_offset_ned_vel(0, 0, yaw_rate=0)
-                    traj_none_count += 1
-                    if traj_none_count >= traj_max_none_count:
-                        no_safe_traj = True
                     print("[INFO] No safe trajectory. Hovering and replanning.", flush=True)
                 else:
-                    no_safe_traj = False
-                    traj_none_count = 0
                     traj_index = max_traj_idx
                     trajectory_start_time = time.time()
                     print(f"[TRAJ] Selected traj: {max_traj_idx}/{len(traj_list)-1}", flush=True)

@@ -10,8 +10,7 @@ from pymavlink import mavutil
 import time
 
 FLTMODES = {'GUIDED': 4, 'LOITER':5, 'LAND':9, 'BRAKE':17, 'SmartRTL':21}
-time_boot, x, y, z, roll, pitch, yaw = 0, 0, 0, 0, 0, 0, 0
-heading_offset = None
+
 DEBUG = True                                                # Whether to print debug messages
 
 def printd(string):
@@ -37,6 +36,8 @@ def connect_drone(IP, baud=115200):
     """
     global drone
     drone = mavutil.mavlink_connection(IP, baud, autoreconnect=True)
+    while not drone:
+        pass
     printd("Connected")
     send_heartbeat()
     printd("Waiting for heartbeat...")
@@ -72,113 +73,6 @@ def set_mode(mode_name):
     )
     printd(f"Switching to {mode_name}...")
     time.sleep(0.1)
-
-def arm(arm_state=1):
-    """
-    Arm the drone
-    """
-    if arm_state:
-        printd("Arming motors...")
-
-    drone.mav.command_long_send(
-        drone.target_system,
-        drone.target_component,
-        mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
-        0,
-        arm_state,0,0,0,0,0,0
-    )
-
-    # Wait until armed
-    while arm_state:
-        msg = drone.recv_match(type='HEARTBEAT', blocking=True)
-        if msg.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED:
-            print("Vehicle armed")
-            break
-        time.sleep(0.1)
-    if not arm_state:
-        printd("Disarming motors...")
-
-def takeoff(target_alt):
-    """
-    Takeoff to target altitude (meters)
-    """
-    printd(f"Taking off to {target_alt} meters...")
-    drone.mav.command_long_send(
-        drone.target_system,
-        drone.target_component,
-        mavutil.mavlink.MAV_CMD_NAV_TAKEOFF,
-        0,
-        0,0,0,0,0,0,
-        target_alt
-    )
-
-    # Wait until drone reaches target altitude
-    while True:
-        msg = drone.recv_match(type="LOCAL_POSITION_NED", blocking=True)
-        if -msg.z > target_alt * 0.9:
-            printd("Target altitude reached")
-            break
-        time.sleep(0.1)
-
-def send_body_offset_ned_vel(vx, vy, vz=0, yaw_rate=0):
-    """
-    Send one BODY_NED velocity setpoint packet (non-blocking).
-    Useful for high-rate control loops that call this every iteration.
-    """
-
-    #printd(f"Sending BODY_NED vel x={vx}, y={vy}, z={vz}")
-    type_mask = 0b010111000111  # use velocity and yaw-rate only
-    drone.mav.set_position_target_local_ned_send(
-        0,
-        drone.target_system,
-        drone.target_component,
-        mavutil.mavlink.MAV_FRAME_BODY_OFFSET_NED,
-        type_mask,
-        0, 0, 0,                # pos ignored
-        vx, vy, vz,
-        0, 0, 0,                # acceleration ignored
-        0,                      # yaw ignored
-        yaw_rate
-    )
-
-def send_local_ned_pos(x, y, z):
-    """
-    Send position in LOCAL_NED frame (Relative to EKF-origin).
-    Currently AP_ObstacleAvoidance only requires 2D position control.
-    """
-    type_mask = 0b110111111000
-    # vx = speed if x > 0 else -speed if x < 0 else 0
-    # vy = speed if y > 0 else -speed if y < 0 else 0 
-    
-    printd(f"Sending BODY_NED pos x={x}, y={y}, z={z}")
-    drone.mav.set_position_target_local_ned_send(
-        0,
-        drone.target_system,
-        drone.target_component,
-        mavutil.mavlink.MAV_FRAME_LOCAL_NED,
-        type_mask,
-        x,y,z,     # pos
-        0,0,0,     # velocity
-        0,0,0,     # acceleration ignored
-        0,
-        0  
-    )
-
-def set_speed(speed):
-    """
-    Set the horizontal navigation [ground] speed in meters per second
-    """
-    printd(f"Setting speed to {speed} m/s")
-    drone.mav.command_long_send(
-        drone.target_system,
-        drone.target_component,
-        mavutil.mavlink.MAV_CMD_DO_CHANGE_SPEED,
-        0,
-        1,       # 0 = airspeed, 1 = groundspeed
-        speed,
-        0,
-        0,0,0,0  # Unused
-    )
 
 def en_pose_stream(freq=15):
     """
@@ -219,7 +113,7 @@ def get_pose(blocking=False):
     Return the position (Local NED) and attitude (in radians) of the drone
     Polls for both LOCAL_POSITION_NED and ATTITUDE messages until both are received
     """
-    
+
     # Keep polling until we get fresh messages (or timeout)
     got_position = False
     got_attitude = False
@@ -241,17 +135,123 @@ def get_pose(blocking=False):
                 
     return x, y, z, yaw, pitch, roll
 
-def heading_offset_init():
-    global heading_offset
+def arm(arm_state=1):
     """
-    Call once to get initial absolute heading.  Subsequently subtract
-    heading_offset from the absolute heading (ATTITUDE.yaw) to get
-    relative heading.
+    Arm the drone
     """
-    # get_pose returns (x, y, z, yaw, pitch, roll)
-    _, _, _, yaw, _, _ = get_pose()
-    heading_offset = yaw
-    return heading_offset
+    if arm_state:
+        printd("Arming motors...")
+
+    drone.mav.command_long_send(
+        drone.target_system,
+        drone.target_component,
+        mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
+        0,
+        arm_state,0,0,0,0,0,0
+    )
+
+    # Wait until armed
+    while arm_state:
+        msg = drone.recv_match(type='HEARTBEAT', blocking=True)
+        if msg.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED:
+            print("Vehicle armed")
+            break
+        time.sleep(0.1)
+    if not arm_state:
+        printd("Disarming motors...")
+
+def takeoff(target_alt):
+    """
+    Takeoff to target altitude (meters).
+
+    Blocks until the autopilot reports the vehicle has reached the requested
+    altitude (with `target_alt` positive up). The autopilot publishes
+    LOCAL_POSITION_NED messages where `z` is Down (positive down), so we
+    invert `z` to get altitude above the EKF origin.
+
+    """
+    printd(f"Taking off to {target_alt} meters...")
+    drone.mav.command_long_send(
+        drone.target_system,
+        drone.target_component,
+        mavutil.mavlink.MAV_CMD_NAV_TAKEOFF,
+        0,
+        0,0,0,0,0,0,
+        target_alt
+    )
+
+    while True:
+        # Read LOCAL_POSITION_NED messages only (faster and more robust for altitude)
+        alt = -get_pose()[2]    # convert Down (positive) -> altitude (positive up)
+        if alt is None:
+            time.sleep(0.1)
+            continue
+          
+        if alt >= target_alt - 0.1:
+            printd("Reached target altitude")
+            return True
+
+        time.sleep(0.1)
+
+def send_body_offset_ned_vel(vx, vy, vz=0, yaw_rate=0):
+    """
+    Send one BODY_NED velocity setpoint packet (non-blocking).
+    Useful for high-rate control loops that call this every iteration.
+    """
+
+    #printd(f"Sending BODY_NED vel x={vx}, y={vy}, z={vz}")
+    type_mask = 0b010111000111  # use velocity and yaw-rate only
+    drone.mav.set_position_target_local_ned_send(
+        0,
+        drone.target_system,
+        drone.target_component,
+        mavutil.mavlink.MAV_FRAME_BODY_OFFSET_NED,
+        type_mask,
+        0, 0, 0,                # pos ignored
+        vx, vy, vz,
+        0, 0, 0,                # acceleration ignored
+        0,                      # yaw ignored
+        yaw_rate
+    )
+
+def send_local_ned_pos(x, y, z):
+    """
+    Send position in LOCAL_NED frame (Relative to EKF-origin).
+    Currently AP_ObstacleAvoidance only requires 2D position control.
+    """
+    type_mask = 0b110111111000
+    # vx = speed if x > 0 else -speed if x < 0 else 0
+    # vy = speed if y > 0 else -speed if y < 0 else 0 
+    
+    printd(f"Sending LOCAL_NED pos North={x}, East={y}, Down={z}")
+    drone.mav.set_position_target_local_ned_send(
+        0,
+        drone.target_system,
+        drone.target_component,
+        mavutil.mavlink.MAV_FRAME_LOCAL_NED,
+        type_mask,
+        x,y,z,     # pos
+        0,0,0,     # velocity
+        0,0,0,     # acceleration ignored
+        0,
+        0  
+    )
+
+def set_speed(speed):
+    """
+    Set the horizontal navigation [ground] speed in meters per second
+    """
+    printd(f"Setting speed to {speed} m/s")
+    drone.mav.command_long_send(
+        drone.target_system,
+        drone.target_component,
+        mavutil.mavlink.MAV_CMD_DO_CHANGE_SPEED,
+        0,
+        1,       # 0 = airspeed, 1 = groundspeed
+        speed,
+        0,
+        0,0,0,0  # Unused
+    )
 
 def eSTOP():
     """
@@ -373,16 +373,13 @@ def test():
         set_ekf_origin(EKF_LAT, EKF_LON, 0)
         set_mode('GUIDED')
         print("Checking telemetry:")
-        for i in range(20):
+        for i in range(40):
             pose = get_pose()
             print(pose, flush=True)
-            time.sleep(0.1)
         print("AP time, offset:", timesync())
-        #arm()
-        takeoff(1.2)
+        arm()
+        takeoff(1)
         set_speed(0.3)
-        time.sleep(0.2)
-        #send_body_offset_ned_pos_vel(0.7, 0, pos_or_vel="pos", speed=0.3)
         """
         Move along a square
 
@@ -391,7 +388,6 @@ def test():
         tested that the drone will land with an acceptable heading' that gives it space for another round.
         """
         yaw_rate = 1
-        length = 0.7
         vel = 0.5
         def square_vel():
             send_body_offset_ned_vel(vel, 0, yaw_rate=yaw_rate)
@@ -403,9 +399,6 @@ def test():
             send_body_offset_ned_vel(0, -vel, yaw_rate=yaw_rate)
             time.sleep(2)
         #square_vel()
-        time.sleep(1)
-        send_local_ned_pos(1,1,-1.2)
-        time.sleep(5)
         print("Landing...")
         set_mode('LAND')
         
@@ -413,6 +406,7 @@ def test():
         set_mode('LAND')
         print("Emergency")
         print("Exception occurred:", e) 
- 
+    finally:
+        set_mode('LAND')
 if __name__ == '__main__':
     test()
