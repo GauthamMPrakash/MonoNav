@@ -315,7 +315,7 @@ def main():
                 rdf_goal_to_ned(goal_position[0], goal_position[1], goal_position[2], hdg)
             )
             print(f"Goal position (NED): {goal_position}", flush=True)
-            goal_position = np.array([goal_position[1], goal_position[2], goal_position[0]], dtype=np.float64).reshape(1, 3)
+            goal_position = np.array([goal_position[1], goal_position[2], goal_position[0]]).reshape(1, 3)
         mavc.printd(f"Heading offset : {hdg*180/np.pi}")
     
         print("Starting control.", flush=True)
