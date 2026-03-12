@@ -467,8 +467,6 @@ def main():
                     traj_none_count += 1
                     if traj_none_count > traj_max_none_count:
                         print("[INFO] No safe trajectory. Hovering in place.", flush=True)
-                    else:
-                        print("[TRAJ] No safe trajectory found. Hit count: {}".format(traj_none_count), flush=True)
                     time.sleep(1)
                 else:
                     traj_none_count = 0

@@ -182,12 +182,11 @@ def takeoff(target_alt):
 
     while True:
         # Read LOCAL_POSITION_NED messages only (faster and more robust for altitude)
-        msg = drone.recv_match(type='LOCAL_POSITION_NED', blocking=True, timeout=1.0)
-        if msg is None:
+        alt = -get_pose()[2]    # convert Down (positive) -> altitude (positive up)
+        if alt is None:
             time.sleep(0.1)
             continue
-
-        alt = -msg.z            # convert Down (positive) -> altitude (positive up)
+          
         if alt >= target_alt - 0.1:
             printd("Reached target altitude")
             return True
