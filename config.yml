@@ -54,9 +54,6 @@ dstar_grid_size: 20           # Physical size of planning grid (meters)
 dstar_cell_size: 0.3          # Size of each grid cell (meters) - smaller = finer planning but slower
 dstar_k_max_iterations: 3000  # Max iterations for D* Lite algorithm (higher = more thorough)
 
-# BendyRuler / Obstacle Avoidance Settings
-# min_obstacle_dist_m: 0.3     # companion-side emergency-stop threshold (m) — hover if nearest obstacle closer
-
 # Drone Settings
 # --------------
 # radio_uri: 'radio://0/4/2M/E7E7E7E7E7' # update the drone ID# to match your vehicle, check using cfclient
