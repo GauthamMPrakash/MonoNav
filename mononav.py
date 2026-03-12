@@ -334,7 +334,8 @@ def main():
     # Initialize lists and frame counter.
         frame_number = 0
         start_flight_time = time.time()
-        mavc.heading_offset_init()
+        hdg = mavc.heading_offset_init()
+        mavc.en_pose_stream()                    # Commands AP to stream poses at a deafult value of 15 Hz
         if FLY_VEHICLE==True:
             print("Arming Motors!", flush=True)
             mavc.set_mode('GUIDED')
@@ -342,16 +343,12 @@ def main():
             print("Taking off.", flush=True)
             mavc.takeoff(height)
             # mavc.set_speed(forward_speed)
-        
-        mavc.en_pose_stream()                    # Commands AP to stream poses at a deafult value of 15 Hz
         start_pose_thread()                      # Start background pose polling at 10 Hz (non-blocking)
-        
         # Convert RDF goal to NED, then reorder to internal [E, D, N]
         # to match camera_position[0:-1, -1] from get_pose_matrix().
         if goal_position is not None:
             goal_position = np.array(
-                rdf_goal_to_ned(goal_position[0], goal_position[1], goal_position[2], mavc.heading_offset),
-                dtype=np.float64,
+                rdf_goal_to_ned(goal_position[0], goal_position[1], goal_position[2], mavc.heading_offset)
             )
             print(f"Goal position (NED): {goal_position}", flush=True)
             goal_position = np.array([goal_position[1], goal_position[2], goal_position[0]], dtype=np.float64).reshape(1, 3)

@@ -114,8 +114,8 @@ def takeoff(target_alt):
 
     # Wait until drone reaches target altitude
     while True:
-        msg = drone.recv_match(type="VFR_HUD", blocking=True)
-        if msg.alt > target_alt * 0.9:
+        msg = drone.recv_match(type="LOCAL_POSITION_NED", blocking=True)
+        if -msg.z > target_alt * 0.9:
             printd("Target altitude reached")
             break
         time.sleep(0.1)
@@ -219,7 +219,6 @@ def get_pose(blocking=False):
     Return the position (Local NED) and attitude (in radians) of the drone
     Polls for both LOCAL_POSITION_NED and ATTITUDE messages until both are received
     """
-    global time_boot, x, y, z, roll, pitch, yaw
     
     # Keep polling until we get fresh messages (or timeout)
     got_position = False
@@ -367,19 +366,19 @@ def test():
         # Arbitrary location for EKF Origin
         EKF_LAT = 8.4723591
         EKF_LON = 76.9295203
-        IP = "udpout:10.42.0.110:14550"  # Drone IP
+        IP = "udpout:192.168.53.51:14550"  # Drone IP
         connect_drone(IP)
         en_pose_stream()
         reboot_if_EKF_origin()
         set_ekf_origin(EKF_LAT, EKF_LON, 0)
         set_mode('GUIDED')
         print("Checking telemetry:")
-        for i in range(40):
+        for i in range(20):
             pose = get_pose()
             print(pose, flush=True)
             time.sleep(0.1)
         print("AP time, offset:", timesync())
-        arm()
+        #arm()
         takeoff(1.2)
         set_speed(0.3)
         time.sleep(0.2)
