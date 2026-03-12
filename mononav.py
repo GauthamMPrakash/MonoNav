@@ -301,7 +301,7 @@ def main():
         if FLY_VEHICLE==True:
             print("Arming Motors!", flush=True)
             mavc.set_mode('GUIDED')
-            #mavc.arm()
+            mavc.arm()
             print("Taking off.", flush=True)
             mavc.takeoff(height)
             # mavc.set_speed(forward_speed)
