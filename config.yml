@@ -55,8 +55,8 @@ exploration_max_points: 3000          # cap sampled depth points/rays per explor
 # Optimal for monocular vision where map is discovered incrementally
 use_dstar_planner: True       # Enable D* Lite for global path planning
 dstar_grid_size: 20           # Physical size of planning grid (meters)
-dstar_cell_size: 0.3          # Size of each grid cell (meters) - smaller = finer planning but slower
-dstar_k_max_iterations: 3000  # Max iterations for D* Lite algorithm (higher = more thorough)
+dstar_cell_size: 0.25          # Size of each grid cell (meters) - smaller = finer planning but slower
+dstar_k_max_iterations: 2000  # Max iterations for D* Lite algorithm (higher = more thorough)
 
 # Drone Settings
 # --------------

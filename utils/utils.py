@@ -21,7 +21,6 @@ import os
 import open3d as o3d
 import open3d.core as o3c
 import math as m
-import copy
 import yaml, json
 import time
 
@@ -474,7 +473,8 @@ def choose_primitive(vbg, camera_position, traj_linesets, goal_position, dist_th
             
             elif goal_position is not None:
                 # Fallback: greedy goal-directed selection (no D* path available)
-                tmp_to_goal = distance.cdist(goal_position, pts, "sqeuclidean")
+                goal_pos_2d = np.asarray(goal_position, dtype=np.float64).reshape(1, -1)
+                tmp_to_goal = distance.cdist(goal_pos_2d, pts, "sqeuclidean")
                 dst_to_goal = np.sqrt(np.min(tmp_to_goal))
                 if dst_to_goal < min_goal_score:
                     # we have a trajectory that gets us closer to the goal
@@ -965,67 +965,74 @@ class DStarLitePlanner:
         self.h = self.grid_dim  # heuristic scale
         self.grid_origin = None
         
-        # Cost map: 0=free, 1=unexplored (treated as obstacle), 2=obstacle
-        self.cost_map = np.ones((self.grid_dim, self.grid_dim, self.grid_dim), dtype=np.float32)
+        # Cost map: 2D (x, z) - no vertical dimension
+        # 0=free, 1=unexplored (treated as obstacle), 2=obstacle
+        self.cost_map = np.ones((self.grid_dim, self.grid_dim), dtype=np.float32)
+        self.flight_height = None  # Fixed altitude during planning
         
         # D* Lite algorithm state
         self.g = {}  # Cost-to-come from goal
         self.rhs = {}  # Lookahead estimate
         self.open_list = []  # Priority queue (key, cell)
+        self.open_set = set()  # Fast membership check
         self.start = None
         self.goal = None
         self.last_start = None
         self.km = 0
         self.path = []
         self.replanned = False
+        self.map_reset = False
         
     def _heuristic(self, a, b):
-        """Euclidean heuristic in grid space."""
-        diff = np.array(a) - np.array(b)
-        return np.linalg.norm(diff) * self.cell_size
+        """2D Euclidean heuristic (horizontal plane only)."""
+        dx = (a[0] - b[0]) * self.cell_size
+        dz = (a[1] - b[1]) * self.cell_size
+        return np.sqrt(dx*dx + dz*dz)
     
     def _key(self, s):
-        """D* Lite key for cell s."""
+        """D* Lite key for cell s (from original paper).
+        k(s) = [min(g(s), rhs(s)) + h(s_start, s) + km; min(g(s), rhs(s))]
+        """
         if s == self.goal:
             return (self.g.get(s, np.inf), 0)
-        h_val = self._heuristic(s, self.goal) if self.goal is not None else 0
+        # Use h(s_start, s) for proper D* Lite semantics
+        h_val = self._heuristic(s, self.start) if self.start is not None else 0
         return (min(self.g.get(s, np.inf), self.rhs.get(s, np.inf)) + h_val + self.km, 
                 min(self.g.get(s, np.inf), self.rhs.get(s, np.inf)))
 
     def _world_to_cell(self, world_pos):
-        """Convert world position to hashable integer cell index tuple."""
-        if world_pos is None:
+        """Convert world position to 2D cell index (x, z only)."""
+        if world_pos is None or self.grid_origin is None:
             return None
         vec = np.asarray(world_pos, dtype=np.float64).reshape(-1)
         if vec.size < 3:
             return None
         vec = vec[:3]
         idx = ((vec - self.grid_origin) / self.cell_size).astype(np.int32)
-        return (int(idx[0]), int(idx[1]), int(idx[2]))
+        return (int(idx[0]), int(idx[2]))
     
     def _get_neighbors(self, cell):
-        """Get 6-connected neighbors in 3D grid (considering only horizontal movement)."""
-        x, y, z = cell
+        """Get 4-connected neighbors in 2D grid (horizontal plane)."""
+        x, z = cell
         neighbors = []
-        # 4-connected in horizontal plane (x,z), fixed y (height)
         for dx, dz in [(-1,0), (1,0), (0,-1), (0,1)]:
             nx, nz = x + dx, z + dz
             if 0 <= nx < self.grid_dim and 0 <= nz < self.grid_dim:
-                neighbors.append((nx, y, nz))
+                neighbors.append((nx, nz))
         return neighbors
     
     def _cost(self, from_cell, to_cell):
-        """Traversal cost between cells."""
+        """Traversal cost between cells (unit cost for free space)."""
         if self._is_occupied(to_cell):
-            return self.cost_obstacle
-        return self.cost_free * self._heuristic(from_cell, to_cell)
+            return np.inf  # Treat obstacles as impassable
+        return self.cost_free  # Unit cost for free space (more efficient)
     
     def _is_occupied(self, cell):
-        """Check if cell is occupied or unexplored."""
-        x, y, z = cell
-        if not (0 <= x < self.grid_dim and 0 <= y < self.grid_dim and 0 <= z < self.grid_dim):
-            return True  # Out of bounds is occupied
-        return self.cost_map[x, y, z] > 1.5  # > 1 means obstacle or unexplored
+        """Check if cell is occupied or unexplored (2D check)."""
+        x, z = cell
+        if not (0 <= x < self.grid_dim and 0 <= z < self.grid_dim):
+            return True
+        return self.cost_map[x, z] > 1.5
     
     def update_map(self, exploration_grid, voxel_coords, camera_position, weight_threshold):
         """
@@ -1037,6 +1044,7 @@ class DStarLitePlanner:
             camera_position: Current camera pose
             weight_threshold: Obstacle weight threshold
         """
+        self.map_reset = False
         if self.grid_origin is None:
             # Initialize grid origin
             cam_pos = camera_position[0:3, 3]
@@ -1044,31 +1052,36 @@ class DStarLitePlanner:
         
         # Update grid origin to follow camera (sliding window)
         cam_pos = camera_position[0:3, 3]
+        self.flight_height = cam_pos[1]  # Store current altitude
         new_origin = cam_pos - self.grid_size / 2.0
         if np.linalg.norm(new_origin - self.grid_origin) > self.cell_size * 2:
             self.grid_origin = new_origin
             self.cost_map = np.ones_like(self.cost_map)  # Reset map
+            self.map_reset = True
         
-        # Mark explored regions as free or unexplored
-        if exploration_grid is not None and exploration_grid.grid_origin is not None:
+        # Mark explored regions as free or unexplored (2D planning at flight height)
+        if exploration_grid is not None and exploration_grid.grid_origin is not None and self.flight_height is not None:
             for i in range(self.grid_dim):
-                for j in range(self.grid_dim):
-                    for k in range(self.grid_dim):
-                        world_pos = np.array([i, j, k]) * self.cell_size + self.grid_origin
-                        grid_idx = ((world_pos - exploration_grid.grid_origin) / exploration_grid.cell_size).astype(np.int32)
-                        
-                        if np.all(grid_idx >= 0) and np.all(grid_idx < exploration_grid.grid_dim):
-                            state = exploration_grid.exploration_grid[grid_idx[0], grid_idx[1], grid_idx[2]]
-                            if state == -1 or state == 1:  # Explored
-                                self.cost_map[i, j, k] = self.cost_free
-                            # state == 0 stays as 1 (unexplored/obstacle)
+                for k in range(self.grid_dim):
+                    world_pos = np.array([
+                        i * self.cell_size + self.grid_origin[0],
+                        self.flight_height,
+                        k * self.cell_size + self.grid_origin[2]
+                    ])
+                    grid_idx = ((world_pos - exploration_grid.grid_origin) / exploration_grid.cell_size).astype(np.int32)
+                    
+                    if np.all(grid_idx >= 0) and np.all(grid_idx < exploration_grid.grid_dim):
+                        state = exploration_grid.exploration_grid[grid_idx[0], grid_idx[1], grid_idx[2]]
+                        if state == -1 or state == 1:  # Explored
+                            self.cost_map[i, k] = self.cost_free
+                        # state == 0 stays as 1 (unexplored/obstacle)
         
-        # Mark known obstacles
+        # Mark known obstacles (as 2D projections)
         if voxel_coords is not None and voxel_coords.shape[0] > 0:
             for obs in voxel_coords:
                 cell_idx = ((obs - self.grid_origin) / self.cell_size).astype(np.int32)
-                if np.all(cell_idx >= 0) and np.all(cell_idx < self.grid_dim):
-                    self.cost_map[cell_idx[0], cell_idx[1], cell_idx[2]] = 2.0
+                if cell_idx[0] >= 0 and cell_idx[0] < self.grid_dim and cell_idx[2] >= 0 and cell_idx[2] < self.grid_dim:
+                    self.cost_map[cell_idx[0], cell_idx[2]] = 2.0
     
     def plan_to_goal(self, start_pos, goal_pos, exploration_grid=None, voxel_coords=None, 
                      camera_position=None, weight_threshold=4.0):
@@ -1086,36 +1099,41 @@ class DStarLitePlanner:
         Returns:
             Path as list of waypoints, or None if no path exists
         """
-        # Convert world coords to grid indices
+        # Ensure grid origin exists before map update
         if self.grid_origin is None and camera_position is not None:
             self.grid_origin = camera_position[0:3, 3] - self.grid_size / 2.0
-        
+
         if self.grid_origin is None:
             return None
-        
+
+        # Update map first (may slide origin / reset map)
+        self.update_map(exploration_grid, voxel_coords, camera_position, weight_threshold)
+
+        # Convert world coords to grid indices AFTER potential origin shift
         start_cell = self._world_to_cell(start_pos)
         goal_cell = self._world_to_cell(goal_pos)
 
         if start_cell is None or goal_cell is None:
             return None
-        
-        # Update map with new obstacle information
-        self.update_map(exploration_grid, voxel_coords, camera_position, weight_threshold)
-        
-        # Initial planning or replan if goal changed
-        if self.start != start_cell or self.goal != goal_cell or self.last_start != start_cell:
+
+        # Handle goal changes or map reset with full re-init
+        goal_changed = (self.goal != goal_cell)
+        if goal_changed or self.map_reset or self.goal is None:
             self.goal = goal_cell
             self.start = start_cell
-            
-            # Compute/recompute k_m and costs
-            if self.last_start is not None:
-                self.km += self._heuristic(self.last_start, self.start)
-            
-            self.last_start = self.start
+            self.last_start = start_cell
+            if goal_changed or self.map_reset:
+                self.km = 0
             self._initialize_d_star_lite()
-            
-            # Run D* Lite algorithm
-            self._compute_shortest_path()
+        else:
+            # Incremental update: start moved
+            if self.last_start is not None:
+                self.km += self._heuristic(self.last_start, start_cell)
+            self.start = start_cell
+            self.last_start = start_cell
+
+        # Always repair path after updates
+        self._compute_shortest_path()
         
         # Extract path from start to goal
         if self.start in self.g and np.isfinite(self.g[self.start]):
@@ -1129,64 +1147,74 @@ class DStarLitePlanner:
         self.g = {}
         self.rhs = {self.goal: 0}  # rhs(goal) = 0
         self.open_list = [(self._key(self.goal), self.goal)]
+        self.open_set = {self.goal}
+
+    def _remove_from_open(self, cell):
+        """Remove all queued entries for a cell from the open list."""
+        self.open_list = [(k, c) for (k, c) in self.open_list if c != cell]
+        self.open_set.discard(cell)
+
+    def _update_vertex(self, u):
+        """Update rhs/open-list state of one vertex per D* Lite."""
+        if u != self.goal:
+            min_rhs = np.inf
+            for s in self._get_neighbors(u):
+                min_rhs = min(min_rhs, self._cost(u, s) + self.g.get(s, np.inf))
+            self.rhs[u] = min_rhs
+
+        self._remove_from_open(u)
+        if self.g.get(u, np.inf) != self.rhs.get(u, np.inf):
+            self.open_list.append((self._key(u), u))
+            self.open_set.add(u)
     
     def _compute_shortest_path(self):
-        """Main D* Lite search loop."""
+        """Main D* Lite search loop (goal-to-start, original D* Lite semantics)."""
         iterations = 0
-        while iterations < self.k_max_iterations:
-            if not self.open_list:
+        while iterations < self.k_max_iterations and self.open_list:
+            # Get cell with minimum key
+            self.open_list.sort(key=lambda x: x[0])  # Maintain heap property
+            key_min = self.open_list[0][0]
+            key_start = self._key(self.start)
+            
+            # Termination condition from D* Lite paper:
+            # Stop when min_key >= key(s_start) AND s_start is consistent
+            if key_min >= key_start and self.rhs.get(self.start, np.inf) == self.g.get(self.start, np.inf):
                 break
             
-            # Get cell with minimum key
-            self.open_list.sort()
-            _, u = self.open_list.pop(0)
+            k_old, u = self.open_list.pop(0)
+            self.open_set.discard(u)
             
-            k_old = self._key(u)
+            if k_old < self._key(u):
+                # Key increase: cell has stale key on open list, re-insert with current key
+                self.open_list.append((self._key(u), u))
+                self.open_set.add(u)
             
-            if k_old[0] != float('inf') and self.rhs.get(u, np.inf) > self.g.get(u, np.inf):
-                # Over-consistent: g(u) < rhs(u)
+            elif self.g.get(u, np.inf) > self.rhs.get(u, np.inf):
+                # Over-consistent: g(u) > rhs(u)
                 self.g[u] = self.rhs.get(u, np.inf)
-                
-                # Update neighbors
+
+                # Update predecessors in backward search
                 for neighbor in self._get_neighbors(u):
-                    if neighbor != self.goal:
-                        cost = self._cost(neighbor, u)
-                        self.rhs[neighbor] = min(self.rhs.get(neighbor, np.inf), 
-                                               self.g.get(u, np.inf) + cost)
-                    
-                    key = self._key(neighbor)
-                    if neighbor in [cell for _, cell in self.open_list]:
-                        self.open_list.remove((self._key(neighbor), neighbor))
-                    
-                    if self.g.get(neighbor, np.inf) != self.rhs.get(neighbor, np.inf):
-                        self.open_list.append((key, neighbor))
+                    self._update_vertex(neighbor)
             
-            elif self.rhs.get(u, np.inf) < self.g.get(u, np.inf):
-                # Under-consistent: rhs(u) < g(u)
+            else:
+                # Under-consistent: g(u) <= rhs(u)
+                g_old = self.g.get(u, np.inf)
                 self.g[u] = np.inf
-                
-                # Update u and neighbors
-                for neighbor in self._get_neighbors(u) + [u]:
-                    if neighbor != self.goal:
-                        cost = self._cost(neighbor, u)
-                        self.rhs[neighbor] = min(self.rhs.get(neighbor, np.inf), 
-                                               self.g.get(u, np.inf) + cost)
-                    
-                    key = self._key(neighbor)
-                    if neighbor in [cell for _, cell in self.open_list]:
-                        self.open_list.remove((self._key(neighbor), neighbor))
-                    
-                    if self.g.get(neighbor, np.inf) != self.rhs.get(neighbor, np.inf):
-                        self.open_list.append((key, neighbor))
+
+                # Update u itself and all predecessors
+                self._update_vertex(u)
+                for neighbor in self._get_neighbors(u):
+                    self._update_vertex(neighbor)
             
             iterations += 1
     
     def _extract_path(self):
-        """Extract path from start toward goal by greedy descent."""
+        """Extract path from start to goal by greedy descent following rhs values (from D* Lite paper)."""
         path = [self.start]
         current = self.start
         
-        for _ in range(self.grid_dim * 3):  # Limit path length
+        for _ in range(self.grid_dim * 3):  # Limit path length to prevent infinite loops
             if current == self.goal:
                 break
             
@@ -1194,14 +1222,16 @@ class DStarLitePlanner:
             if not neighbors:
                 break
             
-            # Greedy descent: choose neighbor with minimum g + cost
+            # Greedy descent: choose neighbor that gives minimum rhs(neighbor)
+            # This follows the optimal path by moving toward decreasing costs
             best_neighbor = None
             best_cost = np.inf
             
             for neighbor in neighbors:
-                cost = self.g.get(neighbor, np.inf) + self._cost(current, neighbor)
-                if cost < best_cost:
-                    best_cost = cost
+                # Cost through this neighbor: traversal cost + rhs of neighbor
+                neighbor_rhs = self.rhs.get(neighbor, np.inf)
+                if neighbor_rhs < best_cost:
+                    best_cost = neighbor_rhs
                     best_neighbor = neighbor
             
             if best_neighbor is None or best_cost == np.inf:
@@ -1210,7 +1240,15 @@ class DStarLitePlanner:
             path.append(best_neighbor)
             current = best_neighbor
         
-        # Convert grid indices to world coordinates
-        world_path = [np.array(cell) * self.cell_size + self.grid_origin for cell in path]
+        # Convert 2D grid indices to 3D world coordinates (maintain flight height)
+        world_path = []
+        if self.flight_height is None:
+            self.flight_height = self.grid_origin[1]
+        for x, z in path:
+            world_pos = np.array([
+                x * self.cell_size + self.grid_origin[0],
+                self.flight_height,
+                z * self.cell_size + self.grid_origin[2]
+            ])
+            world_path.append(world_pos)
         return world_path
-        return elapsed >= self.period

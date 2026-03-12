@@ -35,9 +35,9 @@ print("\n[TEST 2] Initializing D* Lite Planner...")
 try:
     dstar = DStarLitePlanner(grid_size=20.0, cell_size=0.2, k_max_iterations=100)
     print(f"  ✓ Planner initialized")
-    print(f"    - Grid size: 20m x 20m x 20m")
+    print(f"    - Grid size (2D): 20m x 20m")
     print(f"    - Cell size: 0.2m")
-    print(f"    - Grid dimensions: {dstar.grid_dim}x{dstar.grid_dim}x{dstar.grid_dim}")
+    print(f"    - Grid dimensions: {dstar.grid_dim} x {dstar.grid_dim} (2D)")
 except Exception as e:
     print(f"  ✗ Initialization failed: {e}")
     sys.exit(1)
@@ -49,7 +49,7 @@ try:
     print(f"  ✓ Exploration grid initialized")
     print(f"    - Grid size: 20m x 20m x 20m")
     print(f"    - Cell size: 0.1m")
-    print(f"    - Grid dimensions: {exp_grid.grid_dim}x{exp_grid.grid_dim}x{exp_grid.grid_dim}")
+    print(f"    - Grid dimensions: {exp_grid.grid_dim} x {exp_grid.grid_dim} x {exp_grid.grid_dim}")
 except Exception as e:
     print(f"  ✗ Initialization failed: {e}")
     sys.exit(1)
