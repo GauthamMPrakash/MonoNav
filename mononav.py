@@ -533,7 +533,7 @@ def main():
         print("[INFO] Current distance to goal (m): ", np.linalg.norm(camera_position[0:-1, -1]-goal_position) if goal_position is not None else "N/A", flush=True)
         camera_position = [camera_position[0:-1, -1][2], camera_position[0:-1, -1][0], camera_position[0:-1, -1][1]] # print in NED order for readability
         print("[INFO] Current NED coords:" , camera_position, flush=True)
-        print("[INFO] Current RDF coords:", ned_to_rdf(camera_position[0], camera_position[1], camera_position[2], mavc.heading_offset), flush=True)
+        print("[INFO] Current RDF coords:", ned_to_rdf(camera_position[0], camera_position[1], camera_position[2], hdg), flush=True)
 
         # save and view vbg
         print("Saving to {}...".format(npz_save_filename), flush=True)

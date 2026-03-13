@@ -3,8 +3,8 @@ save_dir_prefix: 'data/mononav-'
 # Camera Settings
 camera_source: 'esp32-cam'                                   # used for naming files
 camera_calibration_path: 'utils/calibration/intrinsics.json' # camera calibration file (for undistortion)
-camera_ip: 'http://10.42.0.29:81/stream'                    # camera stream URL (otherwise enter integer for camera index)   
-#camera_ip: 'http://192.168.53.56:81/stream'
+# camera_ip: 'http://10.42.0.29:81/stream'                    # camera stream URL (otherwise enter integer for camera index)   
+camera_ip: 'http://192.168.53.56:81/stream'
 
 # Whether to apply camera undistort/warp transform to raw frames.
 # Set to False to skip undistortion and use raw frames directly.
@@ -35,9 +35,9 @@ trajlib_dir: "utils/trajlib/" # where to save & retrieve the trajectory library 
 # Goal position in RDF frame (metres). 
 # Comment out for undirected exploration.
 goal_position_rdf: # from EKF origin
-  - -2.0 # Right
+  - 3.0 # Right
   - -1.2   # Down
-  - 8.0   # Forward
+  - 12.0   # Forward
 
 min_dist2obs: 1.0             # minimum acceptable distance from obstacles, meters (for primitive selection)
 min_dist2goal: 1.0            # termination condition for reaching the goal, meters
@@ -46,9 +46,9 @@ planner_every_n_cycles: 2     # run planner every N control cycles (set 2-3 to r
 
 # Improved Navigation Settings
 # Exploration Grid: treats unexplored space as unsafe to prevent crashes
-use_exploration_grid: True  # Enable/Disable ExplorationGrid (unexplored-space penalty)
+use_exploration_grid: False  # Enable/Disable ExplorationGrid (unexplored-space penalty)
 unexplored_penalty_dist: 0.5 # Distance penalty for unexplored regions (m). Trajectories passing closer are rejected.
-exploration_update_every_n_frames: 2  # update exploration map every N frames (higher = faster)
+exploration_update_every_n_frames: 3  # update exploration map every N frames (higher = faster)
 exploration_max_points: 3000          # cap sampled depth points/rays per exploration update
 
 # D* Lite Path Planning: Incremental replanning for goal-directed navigation with partial maps
@@ -56,7 +56,7 @@ exploration_max_points: 3000          # cap sampled depth points/rays per explor
 use_dstar_planner: True       # Enable D* Lite for global path planning
 dstar_grid_size: 20           # Physical size of planning grid (meters)
 dstar_cell_size: 0.25          # Size of each grid cell (meters) - smaller = finer planning but slower
-dstar_k_max_iterations: 2000  # Max iterations for D* Lite algorithm (higher = more thorough)
+dstar_k_max_iterations: 1500  # Max iterations for D* Lite algorithm (higher = more thorough)
 
 # Drone Settings
 # --------------
@@ -64,15 +64,15 @@ dstar_k_max_iterations: 2000  # Max iterations for D* Lite algorithm (higher = m
 
 # IP and port of the telemetry module on the drone. Set appropriate connection strings.
 # Replace with serial port name (ex: 'COM9') if using serial telemetry on the PC
-IP: "udpout:10.42.0.110:14550" 
-#IP: "udpout:192.168.53.51:14550" 
+# IP: "udpout:10.42.0.110:14550" 
+IP: "udpout:192.168.53.51:14550" 
 baud: 115200               # Set baud, only required for serial telemetry
 height: 1.3                # flight altitude, meters
 EKF_LAT: 8.4723591
 EKF_LON: 76.9295203
 forward_speed: 0.5         # forward speed in m/s, set to None to use speed defined in generate_primitives.py
 # Control gain settings (YOU MAY NEED TO TUNE THIS YOURSELF)
-yvel_gain: 0.0             # yvel =  -yawrate*yvel_gain  <- for providing sideways velocity so that turns can be made sharper. Increase for faster turns.
-yawrate_gain: 1.25         # yawrate = yawrate*yawrate_gain
+yvel_gain: 0.0             # yvel =  yawrate*yvel_gain  <- for providing sideways velocity so that turns can be made sharper. Increase for faster turns.
+yawrate_gain: 1.00         # yawrate = yawrate*yawrate_gain
 
 FLY_VEHICLE: True        # whether to actually fly the drone
