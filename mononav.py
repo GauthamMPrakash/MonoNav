@@ -39,6 +39,12 @@ metric_depth_path = os.path.join(repo_root, 'DepthAnythingV2-metric')
 sys.path.insert(0, metric_depth_path)
 from depth_anything_v2.dpt import DepthAnythingV2
 
+
+def resolve_repo_path(path_value):
+    if path_value is None or os.path.isabs(path_value):
+        return path_value
+    return os.path.join(repo_root, path_value)
+
 import utils.mavlink_control as mavc   # import the mavlink helper script          
 
 # Helper functions. Core MonoNav algorithms are implemented in utils.py
@@ -46,15 +52,15 @@ from utils.utils import *
 from pynput import keyboard            # Keyboard control
 
 # LOAD VALUES FROM CONFIG FILE
-config = load_config('config.yml')
+config = load_config(os.path.join(repo_root, 'config.yml'))
 
 # model parameters read from configuration
 INPUT_SIZE = config['INPUT_SIZE']      # image scale parameter passed to compute_depth
-CHECKPOINT = config['DA2_CHECKPOINT']  # path to checkpoint for DepthAnythingV2
+CHECKPOINT = resolve_repo_path(config['DA2_CHECKPOINT'])  # path to checkpoint for DepthAnythingV2
 # The encoder is now explicitly set in the config; fall back to parsing the
 # checkpoint filename if the field is missing for backwards compatibility.
-ENCODER = CHECKPOINT[-8:-4]  # crude parse: expects filenames like "..._vits.pth", "..._vitb.pth", etc.
-if ENCODER is None:
+ENCODER = config.get('DA2_ENCODER')
+if not ENCODER:
     ENCODER = CHECKPOINT.split('_')[-1].split('.')[0]  # crude parse: last part before extension
     print(f"[warning] DA2_ENCODER not set in config, parsed '{ENCODER}' from checkpoint name")
 MAX_DEPTH = 20
@@ -80,6 +86,9 @@ model_configs = {
     'vitl': {'encoder': 'vitl', 'features': 256, 'out_channels': [256, 512, 1024, 1024]},
     # 'vitg': {'encoder': 'vitg', 'features': 384, 'out_channels': [1536, 1536, 1536, 1536]}
 }
+
+if ENCODER not in model_configs:
+    raise ValueError(f"Unsupported DepthAnythingV2 encoder '{ENCODER}'. Expected one of: {sorted(model_configs)}")
 
 # Initialize the DepthAnythingV2 model and load the checkpoint
 depth_anything = DepthAnythingV2(**{**model_configs[ENCODER], 'max_depth': MAX_DEPTH})
@@ -129,7 +138,7 @@ autonomous_mode = False
 
 # Intrinsics for undistortio
 # n
-camera_calibration_path = config['camera_calibration_path']
+camera_calibration_path = resolve_repo_path(config['camera_calibration_path'])
 mtx, dist, optimal_mtx, roi = get_calibration_values(camera_calibration_path) # for the robot's camera
 calib_width, calib_height = get_calibration_resolution(camera_calibration_path)
 fusion_intrinsics = get_cropped_intrinsics(optimal_mtx, roi)
@@ -169,7 +178,7 @@ if use_dstar_planner:
     print(f"D* Lite planner initialized: grid_size={dstar_grid_size}m, cell_size={dstar_cell_size}m", flush=True)
 
 # Initialize Trajectory Library (Motion Primitives)
-trajlib_dir = config['trajlib_dir']
+trajlib_dir = resolve_repo_path(config['trajlib_dir'])
 traj_list = get_trajlist(trajlib_dir)
 traj_linesets, period, forward_speed, amplitudes = get_traj_linesets(traj_list)
 if config['forward_speed'] is not None:
@@ -198,7 +207,7 @@ print(f"Trajectory index convention: 0=sharp left, {len(traj_list)//2}=straight,
 
 # Make directories for data
 time_string = time.strftime('%Y-%m-%d-%H-%M-%S')
-save_dir = config['save_dir_prefix'] + time_string
+save_dir = resolve_repo_path(config['save_dir_prefix']) + time_string
 print("Saving files to: " + save_dir, flush=True)
 npz_save_filename = save_dir + '/vbg.npz'
 
@@ -286,8 +295,11 @@ def main():
     global optimal_mtx
     global roi
     global goal_position
-    global traj_max_none_count
     global autonomous_mode
+
+    cap = None
+    camera_position = None
+    hdg = None
 
     while True:
         # ARDUCOPTER CONTROL
@@ -305,6 +317,8 @@ def main():
     # Run the depth model a few times (the first inference is slow), and skip the first few frames
     cap = VideoCapture(STREAM_URL)
     first_bgr = cap.read()
+    if first_bgr is None:
+        raise RuntimeError(f"No frame received from camera source: {STREAM_URL}")
     frame_height, frame_width = first_bgr.shape[:2]
 
     if calib_width is not None and calib_height is not None:
@@ -530,10 +544,15 @@ def main():
         # print("shouldStop: ", shouldStop)
         # print(f"[INFO] {end_message}")
         print("[INFO] End control.", flush=True)
-        print("[INFO] Current distance to goal (m): ", np.linalg.norm(camera_position[0:-1, -1]-goal_position) if goal_position is not None else "N/A", flush=True)
-        camera_position = [camera_position[0:-1, -1][2], camera_position[0:-1, -1][0], camera_position[0:-1, -1][1]] # print in NED order for readability
-        print("[INFO] Current NED coords:" , camera_position, flush=True)
-        print("[INFO] Current RDF coords:", ned_to_rdf(camera_position[0], camera_position[1], camera_position[2], hdg), flush=True)
+        if camera_position is not None:
+            print(
+                "[INFO] Current distance to goal (m): ",
+                np.linalg.norm(camera_position[0:-1, -1] - goal_position[0]) if goal_position is not None else "N/A",
+                flush=True,
+            )
+            camera_position = [camera_position[0:-1, -1][2], camera_position[0:-1, -1][0], camera_position[0:-1, -1][1]] # print in NED order for readability
+            print("[INFO] Current NED coords:" , camera_position, flush=True)
+            print("[INFO] Current RDF coords:", ned_to_rdf(camera_position[0], camera_position[1], camera_position[2], hdg), flush=True)
 
         # save and view vbg
         print("Saving to {}...".format(npz_save_filename), flush=True)
@@ -557,9 +576,12 @@ def main():
         trajectory_execution_stop_event.set()
         if 'traj_thread' in locals():
             traj_thread.join(timeout=2.0)
+        stop_pose_thread()
+        listener.stop()
         
         print("Releasing camera capture.")
-        cap.cap.release()
+        if cap is not None and hasattr(cap, 'cap'):
+            cap.cap.release()
         cv2.destroyAllWindows()
 
 if __name__ == "__main__":

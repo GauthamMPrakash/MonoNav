@@ -600,6 +600,24 @@ Helper function to extract the image frame number from the filename string.
 def split_filename(filename):
     return int(filename.split("-")[-1].split(".")[0])
 
+
+def normalize_depth_to_meters(depth_numpy, max_depth_meters=None):
+    depth_array = np.asarray(depth_numpy)
+    if depth_array.size == 0:
+        return depth_array.astype(np.float32)
+
+    depth_m = depth_array.astype(np.float32)
+    positive_depth = depth_m[depth_m > 0]
+    if positive_depth.size == 0:
+        return depth_m
+
+    max_positive_depth = float(np.max(positive_depth))
+    if max_positive_depth > 100.0:
+        return depth_m / 1000.0
+    if max_depth_meters is not None and max_positive_depth > max_depth_meters * 1.5:
+        return depth_m / 1000.0
+    return depth_m
+
 def visualize_pointcloud(pcd_legacy, window_name="Reconstruction"):
     """Visualize a legacy Open3D point cloud, matching mononav.py's Visualizer approach."""
     try:
@@ -697,7 +715,7 @@ class ExplorationGrid:
         Marks observed regions as explored.
         
         Args:
-            depth_numpy: Depth image (H, W) in meters
+            depth_numpy: Depth image (H, W) in meters or millimetres
             camera_position: 4x4 camera pose matrix in RDF frame
             intrinsics: 3x3 camera intrinsic matrix
             max_depth_pixels: Optional cap on number of depth points/rays used per update.
@@ -720,13 +738,15 @@ class ExplorationGrid:
         uu, vv = np.meshgrid(u, v)
         
         # Convert to camera coordinates (in meters)
-        depth_m = depth_numpy.astype(np.float32) / 1000.0  # Convert mm to meters
+        depth_m = normalize_depth_to_meters(depth_numpy, max_depth_meters=self.max_depth)
         x_cam = (uu - cx) * depth_m / fx
         y_cam = (vv - cy) * depth_m / fy
         z_cam = depth_m
         
         # Only consider valid depth values
         valid_mask = (depth_m > 0) & (depth_m < self.max_depth)
+        if not np.any(valid_mask):
+            return
         
         # Transform points to world frame (RDF)
         rotation = camera_position[0:3, 0:3]
@@ -781,8 +801,10 @@ class ExplorationGrid:
         
         if region_bounds is not None:
             # Filter by region
-            idx_lower = ((np.array(region_bounds[0:2:2]) - self.grid_origin) / self.cell_size).astype(np.int32)
-            idx_upper = ((np.array(region_bounds[1:2:2]) - self.grid_origin) / self.cell_size).astype(np.int32)
+            if len(region_bounds) != 6:
+                raise ValueError("region_bounds must be [min_x, max_x, min_y, max_y, min_z, max_z]")
+            idx_lower = ((np.array(region_bounds[0::2]) - self.grid_origin) / self.cell_size).astype(np.int32)
+            idx_upper = ((np.array(region_bounds[1::2]) - self.grid_origin) / self.cell_size).astype(np.int32)
             idx_lower = np.maximum(idx_lower, 0)
             idx_upper = np.minimum(idx_upper, self.grid_dim)
             unexplored_mask[0:idx_lower[0], :, :] = False
