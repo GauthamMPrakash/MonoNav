@@ -333,6 +333,7 @@ def main():
         # Connect to the drone
         mavc.connect_drone(IP, baud=baud)
         mavc.set_ekf_origin(EKF_LAT, EKF_LON, 0) # Ignored if already close to the previous origin, if set
+        mavc.en_pose_stream(15)                    # Commands AP to stream poses at a deafult value of 15 Hz
         reboot = mavc.reboot_if_EKF_origin(0.5)  # Call this function after enabling pose_stream
         if reboot:
             mavc.printd("Rebooted drone to set EKF origin. Waiting for reconnection...")
@@ -375,7 +376,6 @@ def main():
     # Initialize lists and frame counter.
         frame_number = 0
         start_flight_time = time.time()
-        mavc.en_pose_stream(15)                    # Commands AP to stream poses at a deafult value of 15 Hz
         hdg = mavc.get_pose()[3] # get initial yaw
         initial_heading = hdg
         if FLY_VEHICLE==True:
@@ -491,22 +491,41 @@ def main():
             traj_executing = True
 
             while True:
+                # Keep UI responsive and capture any key presses while executing a primitive.
+                update_key_from_cv(1)
+
+                # Allow any key press or a stop signal to immediately interrupt
+                # primitive execution so the outer loop can handle it without delay.
+                if shouldStop or last_key_pressed is not None:
+                    break
+
                 elapsed = time.time() - traj_start
                 if traj_index is None:
                     if elapsed >= period:
                         break
                 else:
                     current_yaw_abs = get_latest_pose()[3]
-                    if trajectory_target_reached(current_yaw_abs):
-                        break
-                    if elapsed >= (period * TRAJ_EXEC_TIMEOUT_MULT):
-                        print(f"[warning] primitive timeout after {elapsed:.2f}s; continuing", flush=True)
-                        break
+                    if abs(trajectory_target_delta_yaw) < YAW_COMPLETION_TOL:
+                        # Straight / near-zero yaw primitive: yaw will already be at
+                        # target on the first check, so use time-based completion instead.
+                        if elapsed >= period:
+                            break
+                    else:
+                        if trajectory_target_reached(current_yaw_abs):
+                            break
+                        if elapsed >= (period * TRAJ_EXEC_TIMEOUT_MULT):
+                            #print(f"[warning] primitive timeout after {elapsed:.2f}s; continuing", flush=True)
+                            break
 
                 bgr = cap.read()
             # get_latest_pose returns (x, y, z, yaw, pitch, roll) - non-blocking from thread
                 pose = get_latest_pose()
                 camera_position = get_pose_matrix(*pose)
+
+                # Keep planned_traj_ts fresh so the background execution thread
+                # continues to send commands for the full duration of the primitive.
+                if autonomous_mode:
+                    planned_traj_ts = time.time()
 
                 if goal_position is not None:
                     dist_to_goal = np.linalg.norm(camera_position[0:-1, -1]-goal_position[0])
