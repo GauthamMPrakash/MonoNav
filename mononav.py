@@ -100,10 +100,11 @@ traj_index = None
 trajectory_start_time = None  # when the current trajectory started
 autonomous_mode = False
 trajectory_start_yaw_abs = None      # absolute yaw at primitive start (NED)
-trajectory_start_yaw_rel = None      # yaw at primitive start relative to initial heading
+trajectory_target_yaw_abs = None     # absolute yaw target (NED) for current primitive
 trajectory_target_delta_yaw = 0.0    # target relative yaw change for current primitive
 initial_heading = None               # initial absolute heading (NED) captured at startup
 last_depth_compute_ts = 0.0          # timestamp of most recent successful depth inference
+traj_executing = False               # True while executing a primitive; prevents planning overlap
 
 # Safety: trajectory freshness
 # In autonomous mode the execution thread will only send commands if the planner
@@ -120,24 +121,24 @@ YAW_COMPLETION_TOL = 5 * np.pi / 180  # radians
 # Safety timeout multiplier to avoid infinite primitive execution if yaw cannot converge.
 TRAJ_EXEC_TIMEOUT_MULT = 2 # multiplier on the nominal primitive period to determine when to timeout and re-plan
 
-def trajectory_target_reached(current_yaw_rel):
+def trajectory_target_reached(current_yaw_abs):
     """True when current primitive target yaw has been reached within tolerance."""
-    achieved_delta = np.arctan2(
-        np.sin(current_yaw_rel - trajectory_start_yaw_rel),
-        np.cos(current_yaw_rel - trajectory_start_yaw_rel),
+    target_err = np.arctan2(
+        np.sin(trajectory_target_yaw_abs - current_yaw_abs),
+        np.cos(trajectory_target_yaw_abs - current_yaw_abs),
     )
-    return abs(trajectory_target_delta_yaw - achieved_delta) <= YAW_COMPLETION_TOL
+    return abs(target_err) <= YAW_COMPLETION_TOL
 
 
-def get_progress_yawrate(traj_idx, current_yaw_rel):
+def get_progress_yawrate(traj_idx, current_yaw_abs):
     """Interpolate primitive yawrate from achieved yaw progress (not wall-clock time)."""
     target_delta = float(trajectory_target_delta_yaw)
     if abs(target_delta) < 1e-6:
         return 0.0
 
     achieved_delta = np.arctan2(
-        np.sin(current_yaw_rel - trajectory_start_yaw_rel),
-        np.cos(current_yaw_rel - trajectory_start_yaw_rel),
+        np.sin(current_yaw_abs - trajectory_start_yaw_abs),
+        np.cos(current_yaw_abs - trajectory_start_yaw_abs),
     )
     traj = traj_list[traj_idx]
     yawvals = np.asarray(traj['yawvals'], dtype=float)
@@ -157,20 +158,18 @@ def start_new_trajectory_segment(traj_idx):
     """Initialize yaw-relative tracking state for the currently selected primitive."""
     global trajectory_start_time
     global trajectory_start_yaw_abs
-    global trajectory_start_yaw_rel
+    global trajectory_target_yaw_abs
     global trajectory_target_delta_yaw
 
     trajectory_start_time = time.time()
     trajectory_start_yaw_abs = get_latest_pose()[3]
-    trajectory_start_yaw_rel = np.arctan2(
-        np.sin(trajectory_start_yaw_abs - initial_heading),
-        np.cos(trajectory_start_yaw_abs - initial_heading),
-    )
 
     if traj_idx is not None:
         trajectory_target_delta_yaw = float(traj_list[traj_idx]['yawvals'][-1])
+        trajectory_target_yaw_abs = trajectory_start_yaw_abs + trajectory_target_delta_yaw
     else:
         trajectory_target_delta_yaw = 0.0
+        trajectory_target_yaw_abs = trajectory_start_yaw_abs
 
 # Intrinsics for undistort (optional)
 camera_calibration_path = config.get('camera_calibration_path')
@@ -289,16 +288,12 @@ def trajectory_execution_loop(command_hz=20):
             # In autonomous mode only execute if the planner result is still fresh.  If it has expired, skip sending so the autopilot hovers.
             plan_stale = autonomous_mode and (time.time() - planned_traj_ts) > TRAJ_TTL
             depth_stale = (time.time() - last_depth_compute_ts) > DEPTH_TTL
-            if plan_stale or depth_stale:
+            if plan_stale or depth_stale or not traj_executing:
                 pass  # hover
             else:
                 current_yaw_abs = get_latest_pose()[3]
-                current_yaw_rel = np.arctan2(
-                    np.sin(current_yaw_abs - initial_heading),
-                    np.cos(current_yaw_abs - initial_heading),
-                )
-                if not trajectory_target_reached(current_yaw_rel):
-                    yawrate = get_progress_yawrate(traj_index, current_yaw_rel)
+                if not trajectory_target_reached(current_yaw_abs):
+                    yawrate = get_progress_yawrate(traj_index, current_yaw_abs)
                     yvel = yawrate * yvel_gain
                     yawrate = yawrate * yawrate_gain
                     if FLY_VEHICLE:
@@ -328,6 +323,7 @@ def main():
     global planned_traj_ts
     global initial_heading
     global last_depth_compute_ts
+    global traj_executing
 
     traj_none_count = 0
     traj_max_none_count = 2                      # how many times traj chooser can predict no safe traj before we force stop
@@ -492,6 +488,7 @@ def main():
         # Main thread now focuses on frame processing and TSDF integration.
             start_new_trajectory_segment(traj_index)
             traj_start = trajectory_start_time
+            traj_executing = True
 
             while True:
                 elapsed = time.time() - traj_start
@@ -500,11 +497,7 @@ def main():
                         break
                 else:
                     current_yaw_abs = get_latest_pose()[3]
-                    current_yaw_rel = np.arctan2(
-                        np.sin(current_yaw_abs - initial_heading),
-                        np.cos(current_yaw_abs - initial_heading),
-                    )
-                    if trajectory_target_reached(current_yaw_rel):
+                    if trajectory_target_reached(current_yaw_abs):
                         break
                     if elapsed >= (period * TRAJ_EXEC_TIMEOUT_MULT):
                         print(f"[warning] primitive timeout after {elapsed:.2f}s; continuing", flush=True)
@@ -564,6 +557,7 @@ def main():
                     np.savetxt(pose_dir + '/frame-%06d.pose.txt'%(frame_number), camera_position)
 
                 frame_number += 1
+            traj_executing = False
             traj_counter += 1
 
         # In autonomous GO mode, update selected trajectory from planner.
