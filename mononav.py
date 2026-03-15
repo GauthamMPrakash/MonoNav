@@ -99,14 +99,78 @@ trajectory_execution_stop_event = threading.Event()
 traj_index = None
 trajectory_start_time = None  # when the current trajectory started
 autonomous_mode = False
+trajectory_start_yaw_abs = None      # absolute yaw at primitive start (NED)
+trajectory_start_yaw_rel = None      # yaw at primitive start relative to initial heading
+trajectory_target_delta_yaw = 0.0    # target relative yaw change for current primitive
+initial_heading = None               # initial absolute heading (NED) captured at startup
+last_depth_compute_ts = 0.0          # timestamp of most recent successful depth inference
 
 # Safety: trajectory freshness
 # In autonomous mode the execution thread will only send commands if the planner
 # has produced a trajectory within the last TRAJ_TTL seconds.  If the planner
 # misses (depth stale, choose_primitive returns None, etc.) the thread simply
 # omits velocity commands so the vehicle hovers under ArduPilot's position hold.
-TRAJ_TTL = 1.0        # seconds — max age of a planner result before hovering
+TRAJ_TTL = 0.5        # seconds — max age of a planner result before hovering
 planned_traj_ts = 0.0 # monotonic timestamp of last successful choose_primitive call
+# Commands are only allowed if depth was computed recently.
+DEPTH_TTL = float(config.get('depth_ttl', 0.5))
+
+# Completion tolerance for primitive yaw targets.
+YAW_COMPLETION_TOL = 5 * np.pi / 180  # radians
+# Safety timeout multiplier to avoid infinite primitive execution if yaw cannot converge.
+TRAJ_EXEC_TIMEOUT_MULT = 2 # multiplier on the nominal primitive period to determine when to timeout and re-plan
+
+def trajectory_target_reached(current_yaw_rel):
+    """True when current primitive target yaw has been reached within tolerance."""
+    achieved_delta = np.arctan2(
+        np.sin(current_yaw_rel - trajectory_start_yaw_rel),
+        np.cos(current_yaw_rel - trajectory_start_yaw_rel),
+    )
+    return abs(trajectory_target_delta_yaw - achieved_delta) <= YAW_COMPLETION_TOL
+
+
+def get_progress_yawrate(traj_idx, current_yaw_rel):
+    """Interpolate primitive yawrate from achieved yaw progress (not wall-clock time)."""
+    target_delta = float(trajectory_target_delta_yaw)
+    if abs(target_delta) < 1e-6:
+        return 0.0
+
+    achieved_delta = np.arctan2(
+        np.sin(current_yaw_rel - trajectory_start_yaw_rel),
+        np.cos(current_yaw_rel - trajectory_start_yaw_rel),
+    )
+    traj = traj_list[traj_idx]
+    yawvals = np.asarray(traj['yawvals'], dtype=float)
+    yawrates = np.asarray(traj['yawrates'], dtype=float)
+
+    if target_delta > 0:
+        yaw_progress = np.clip(achieved_delta, float(yawvals[0]), float(yawvals[-1]))
+        return float(np.interp(yaw_progress, yawvals, yawrates))
+
+    yawvals_rev = yawvals[::-1]
+    yawrates_rev = yawrates[::-1]
+    yaw_progress = np.clip(achieved_delta, float(yawvals_rev[0]), float(yawvals_rev[-1]))
+    return float(np.interp(yaw_progress, yawvals_rev, yawrates_rev))
+
+
+def start_new_trajectory_segment(traj_idx):
+    """Initialize yaw-relative tracking state for the currently selected primitive."""
+    global trajectory_start_time
+    global trajectory_start_yaw_abs
+    global trajectory_start_yaw_rel
+    global trajectory_target_delta_yaw
+
+    trajectory_start_time = time.time()
+    trajectory_start_yaw_abs = get_latest_pose()[3]
+    trajectory_start_yaw_rel = np.arctan2(
+        np.sin(trajectory_start_yaw_abs - initial_heading),
+        np.cos(trajectory_start_yaw_abs - initial_heading),
+    )
+
+    if traj_idx is not None:
+        trajectory_target_delta_yaw = float(traj_list[traj_idx]['yawvals'][-1])
+    else:
+        trajectory_target_delta_yaw = 0.0
 
 # Intrinsics for undistort (optional)
 camera_calibration_path = config.get('camera_calibration_path')
@@ -224,14 +288,17 @@ def trajectory_execution_loop(command_hz=20):
         if traj_index is not None and trajectory_start_time is not None:
             # In autonomous mode only execute if the planner result is still fresh.  If it has expired, skip sending so the autopilot hovers.
             plan_stale = autonomous_mode and (time.time() - planned_traj_ts) > TRAJ_TTL
-            if plan_stale:
+            depth_stale = (time.time() - last_depth_compute_ts) > DEPTH_TTL
+            if plan_stale or depth_stale:
                 pass  # hover
             else:
-                elapsed = time.time() - trajectory_start_time
-                # Check if we've exceeded the trajectory period
-                if elapsed < period:
-                    # Compute smooth yaw rate for this instant
-                    yawrate = amplitudes[traj_index] * np.sin(np.pi / period * elapsed)  # rad/s
+                current_yaw_abs = get_latest_pose()[3]
+                current_yaw_rel = np.arctan2(
+                    np.sin(current_yaw_abs - initial_heading),
+                    np.cos(current_yaw_abs - initial_heading),
+                )
+                if not trajectory_target_reached(current_yaw_rel):
+                    yawrate = get_progress_yawrate(traj_index, current_yaw_rel)
                     yvel = yawrate * yvel_gain
                     yawrate = yawrate * yawrate_gain
                     if FLY_VEHICLE:
@@ -259,6 +326,8 @@ def main():
     global traj_max_none_count
     global autonomous_mode
     global planned_traj_ts
+    global initial_heading
+    global last_depth_compute_ts
 
     traj_none_count = 0
     traj_max_none_count = 2                      # how many times traj chooser can predict no safe traj before we force stop
@@ -301,6 +370,7 @@ def main():
             start_time_test = time.time()
             # depth_numpy, depth_colormap = compute_depth_fast(bgr, INPUT_SIZE)
             depth_numpy, depth_colormap = compute_depth(bgr, depth_anything, INPUT_SIZE)
+            last_depth_compute_ts = time.time()
             print("TIME TO COMPUTE DEPTH:", time.time() - start_time_test)
             cv2.imshow("test", bgr)
             update_key_from_cv()
@@ -311,6 +381,7 @@ def main():
         start_flight_time = time.time()
         mavc.en_pose_stream(15)                    # Commands AP to stream poses at a deafult value of 15 Hz
         hdg = mavc.get_pose()[3] # get initial yaw
+        initial_heading = hdg
         if FLY_VEHICLE==True:
             print("Arming Motors!", flush=True)
             mavc.set_mode('GUIDED')
@@ -419,10 +490,26 @@ def main():
 
         # Execute the selected trajectory in background thread.
         # Main thread now focuses on frame processing and TSDF integration.
-            trajectory_start_time = time.time()
+            start_new_trajectory_segment(traj_index)
             traj_start = trajectory_start_time
-            
-            while time.time() - traj_start < period:
+
+            while True:
+                elapsed = time.time() - traj_start
+                if traj_index is None:
+                    if elapsed >= period:
+                        break
+                else:
+                    current_yaw_abs = get_latest_pose()[3]
+                    current_yaw_rel = np.arctan2(
+                        np.sin(current_yaw_abs - initial_heading),
+                        np.cos(current_yaw_abs - initial_heading),
+                    )
+                    if trajectory_target_reached(current_yaw_rel):
+                        break
+                    if elapsed >= (period * TRAJ_EXEC_TIMEOUT_MULT):
+                        print(f"[warning] primitive timeout after {elapsed:.2f}s; continuing", flush=True)
+                        break
+
                 bgr = cap.read()
             # get_latest_pose returns (x, y, z, yaw, pitch, roll) - non-blocking from thread
                 pose = get_latest_pose()
@@ -446,6 +533,7 @@ def main():
 
                 # compute depth
                 depth_numpy, depth_colormap = compute_depth(transform_bgr, depth_anything, INPUT_SIZE, make_colormap=True)
+                last_depth_compute_ts = time.time()
 
                 if depth_colormap is not None:
                     # Add FPS counter to depth display
