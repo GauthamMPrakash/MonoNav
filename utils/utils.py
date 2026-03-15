@@ -575,16 +575,12 @@ def _pose_thread_worker():
     
     sleep_time = 1.0 / _pose_thread_hz
     while not _pose_thread_stop:
-        try:
-            x, y, z, yaw, pitch, roll = mavc.get_pose()
-            with _pose_lock:
-                _pose_latest = {'x': x, 'y': y, 'z': z, 'yaw': yaw, 'pitch': pitch, 'roll': roll}
-            time.sleep(sleep_time)
-        except Exception as e:
-            mavc.printd(f"Error in pose thread: {e}")
-            time.sleep(sleep_time)
+        x, y, z, yaw, pitch, roll = mavc.get_pose()
+        with _pose_lock:
+            _pose_latest = {'x': x, 'y': y, 'z': z, 'yaw': yaw, 'pitch': pitch, 'roll': roll}
+        time.sleep(sleep_time)
 
-def start_pose_thread(frequency_hz=15):
+def start_pose_thread(frequency_hz=20):
     """Start the background pose thread at specified frequency.
     
     Args:

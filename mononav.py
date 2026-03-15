@@ -66,6 +66,7 @@ EKF_LAT = config['EKF_LAT']
 EKF_LON = config['EKF_LON']
 STREAM_URL = config['camera_ip']       # ESP32 HTTP MJPEG stream
 save_during_flight = config['save_during_flight']
+enable_undistort = config.get('enable_undistort', True)
 
 yawrate_gain = config['yawrate_gain']       # gain for yaw rate control (tuning parameter for your robot)
 yvel_gain = config['yvel_gain']             # gain for lateral velocity to prevent sideslip during high velocity turns (probably not required for ArduPilot)
@@ -98,6 +99,14 @@ trajectory_execution_stop_event = threading.Event()
 traj_index = None
 trajectory_start_time = None  # when the current trajectory started
 autonomous_mode = False
+
+# Safety: trajectory freshness
+# In autonomous mode the execution thread will only send commands if the planner
+# has produced a trajectory within the last TRAJ_TTL seconds.  If the planner
+# misses (depth stale, choose_primitive returns None, etc.) the thread simply
+# omits velocity commands so the vehicle hovers under ArduPilot's position hold.
+TRAJ_TTL = 1.0        # seconds — max age of a planner result before hovering
+planned_traj_ts = 0.0 # monotonic timestamp of last successful choose_primitive call
 
 # Intrinsics for undistort (optional)
 camera_calibration_path = config.get('camera_calibration_path')
@@ -135,7 +144,7 @@ traj_linesets, period, forward_speed, amplitudes = get_traj_linesets(traj_list)
 if config['forward_speed'] is not None:
     forward_speed = config['forward_speed']
 max_traj_idx = None  # Start with no trajectory; only set when user presses 'g' for MonoNav mode
-print(f"Trajectory library loaded: {len(traj_list)} trajectories", flush=True)
+print(f"\nTrajectory library loaded: {len(traj_list)} trajectories", flush=True)
 print(f"Trajectory amplitudes: left(idx 0)={amplitudes[0]:.3f}, right(idx {len(amplitudes)-1})={amplitudes[-1]:.3f}", flush=True)
 print("Press 'g' to enable MonoNav autonomous mode, or 'a'/'w'/'d' for manual left/straight/right", flush=True)
 
@@ -152,7 +161,6 @@ else:
 print("Goal position (RDF): ", goal_position, flush=True)
 min_dist2obs = config['min_dist2obs']
 min_dist2goal = config['min_dist2goal']
-print(f"Trajectory index convention: 0=sharp left, {len(traj_list)//2}=straight, {len(traj_list)-1}=sharp right", flush=True)
 
 # Make directories for data
 time_string = time.strftime('%Y-%m-%d-%H-%M-%S')
@@ -204,7 +212,7 @@ listener = keyboard.Listener(on_press=on_press)
 listener.start()
 
 # Trajectory execution thread: sends motion commands at fixed rate
-def trajectory_execution_loop(command_hz=10):
+def trajectory_execution_loop(command_hz=20):
     """Background thread: execute trajectory with smooth velocity commands at fixed rate."""
     global traj_index, trajectory_start_time
     period_s = 1.0 / max(command_hz, 1)
@@ -214,16 +222,20 @@ def trajectory_execution_loop(command_hz=10):
     while not trajectory_execution_stop_event.is_set():
         # (traj_index may be None until a trajectory is selected)
         if traj_index is not None and trajectory_start_time is not None:
-            elapsed = time.time() - trajectory_start_time
-            
-            # Check if we've exceeded the trajectory period
-            if elapsed < period:
-                # Compute smooth yaw rate for this instant
-                yawrate = amplitudes[traj_index] * np.sin(np.pi / period * elapsed)  # rad/s
-                yvel = yawrate * yvel_gain
-                yawrate = yawrate * yawrate_gain
-                if FLY_VEHICLE:
-                    mavc.send_body_offset_ned_vel(forward_speed, yvel, yaw_rate=yawrate)
+            # In autonomous mode only execute if the planner result is still fresh.  If it has expired, skip sending so the autopilot hovers.
+            plan_stale = autonomous_mode and (time.time() - planned_traj_ts) > TRAJ_TTL
+            if plan_stale:
+                pass  # hover
+            else:
+                elapsed = time.time() - trajectory_start_time
+                # Check if we've exceeded the trajectory period
+                if elapsed < period:
+                    # Compute smooth yaw rate for this instant
+                    yawrate = amplitudes[traj_index] * np.sin(np.pi / period * elapsed)  # rad/s
+                    yvel = yawrate * yvel_gain
+                    yawrate = yawrate * yawrate_gain
+                    if FLY_VEHICLE:
+                        mavc.send_body_offset_ned_vel(forward_speed, yvel, yaw_rate=yawrate)
         
         next_command += period_s
         sleep_time = next_command - time.monotonic()
@@ -246,6 +258,7 @@ def main():
     global goal_position
     global traj_max_none_count
     global autonomous_mode
+    global planned_traj_ts
 
     traj_none_count = 0
     traj_max_none_count = 2                      # how many times traj chooser can predict no safe traj before we force stop
@@ -262,12 +275,12 @@ def main():
             mavc.printd("Reconnecting...")
             continue         # Restart connection loop
         break
-
+    
     # Run the depth model a few times (the first inference is slow), and skip the first few frames
     cap = VideoCapture(STREAM_URL)
     first_bgr = cap.read()
     frame_height, frame_width = first_bgr.shape[:2]
-
+    
     if calib_width is not None and calib_height is not None:
         mtx, dist, optimal_mtx, roi = adjust_intrinsics_to_frame_size(
             mtx, dist, optimal_mtx, roi, frame_width, frame_height, calib_width, calib_height
@@ -296,7 +309,7 @@ def main():
     # Initialize lists and frame counter.
         frame_number = 0
         start_flight_time = time.time()
-        mavc.en_pose_stream()                    # Commands AP to stream poses at a deafult value of 15 Hz
+        mavc.en_pose_stream(15)                    # Commands AP to stream poses at a deafult value of 15 Hz
         hdg = mavc.get_pose()[3] # get initial yaw
         if FLY_VEHICLE==True:
             print("Arming Motors!", flush=True)
@@ -311,14 +324,11 @@ def main():
         # Convert RDF goal to NED, then reorder to internal [E, D, N]
         # to match camera_position[0:-1, -1] from get_pose_matrix().
         if goal_position is not None:
-            goal_position = np.array(
-                rdf_goal_to_ned(goal_position[0], goal_position[1], goal_position[2], hdg)
-            )
+            goal_position = np.array(rdf_goal_to_ned(goal_position[0], goal_position[1], goal_position[2], hdg))
             print(f"Goal position (NED): {goal_position}", flush=True)
             goal_position = np.array([goal_position[1], goal_position[2], goal_position[0]]).reshape(1, 3)
-        mavc.printd(f"Heading offset : {hdg*180/np.pi}")
+        mavc.printd(f"Heading offset: {hdg*180/np.pi}")
     
-        print("Starting control.", flush=True)
         traj_counter = 0         # how many trajectory iterations have we done?
         last_time = time.time()  # for FPS counter
         
@@ -331,19 +341,25 @@ def main():
         )
         traj_thread.start()
     #   start_time = time.time() # seconds
+        print("Starting control.", flush=True)
 
         while not shouldStop:
             update_key_from_cv(1)
             
             # Check for stop keys first (these exit the control loop)
-            if last_key_pressed == 'q':
+            if last_key_pressed == 'p':
+                """
+                DO NOT USE FOR NORMAL FLYING. WILL STOP MOTORS IMMEDIATELY CAUSING A CRASH. Only use in emergency situations when you need to stop the drone immediately.
+                """
                 autonomous_mode = False
-                mavc.eSTOP()
-                print("Pressed q. EMERGENCY STOP.", flush=True)
+                mavc.set_mode('BRAKE')
+                mavc.arm(0)
+                print("Pressed p. EMERGENCY STOP.", flush=True)
                 shouldStop = True
                 break
             elif last_key_pressed == 'c':
                 autonomous_mode = False
+                mavc.set_mode('BRAKE')
                 mavc.set_mode('LAND')
                 print("Pressed c. Ending control.", flush=True)
                 shouldStop = True
@@ -387,9 +403,10 @@ def main():
             elif last_key_pressed == 'g':
                 autonomous_mode = True
                 print("Pressed g. Using MonoNav.", flush=True)
-                    # Keep GO mode active, but execute a hover-only cycle and re-plan.
+                # Keep GO mode active, but execute a hover-only cycle and re-plan.
                 if max_traj_idx is not None:
                     traj_index = max_traj_idx
+                    planned_traj_ts = time.time()  # treat initial assignment as fresh
                     print(f"[main] set traj_index={traj_index} (from max_traj_idx on g)", flush=True)
                 last_key_pressed = None
         
@@ -408,7 +425,7 @@ def main():
             while time.time() - traj_start < period:
                 bgr = cap.read()
             # get_latest_pose returns (x, y, z, yaw, pitch, roll) - non-blocking from thread
-                pose = mavc.get_pose()
+                pose = get_latest_pose()
                 camera_position = get_pose_matrix(*pose)
 
                 if goal_position is not None:
@@ -419,7 +436,7 @@ def main():
                         break
 
                 # Optionally transform camera image (undistort + crop) based on config
-                if config.get("enable_undistort", True):
+                if enable_undistort:
                     transform_bgr = transform_image(bgr, mtx, dist, optimal_mtx, roi)
                     transform_rgb = cv2.cvtColor(transform_bgr, cv2.COLOR_BGR2RGB)
                 else:
@@ -466,17 +483,17 @@ def main():
                 # In 'g' mode: run trajectory planning
                 max_traj_idx = choose_primitive(vbg.vbg, camera_position, traj_linesets, goal_position, min_dist2obs, filterYvals, filterWeights, filterTSDF, weight_threshold)
                 if max_traj_idx is None:
-                    if FLY_VEHICLE:
-                        mavc.send_body_offset_ned_vel(0, 0, yaw_rate=0)
-                        time.sleep(0.2)
+                    # No safe trajectory: clear traj_index so the execution thread
+                    # stops sending commands and the vehicle hovers in place.
+                    traj_index = None
                     traj_none_count += 1
                     if traj_none_count > traj_max_none_count:
-                        print("[INFO] No safe trajectory. Hovering in place.", flush=True)
-                    time.sleep(1)
+                        print("[INFO] No safe trajectory found. Hovering in place.", flush=True)
                 else:
                     traj_none_count = 0
                     print(f"[TRAJ] Selected traj: {max_traj_idx}/{len(traj_list)-1}", flush=True)
                     traj_index = max_traj_idx
+                    planned_traj_ts = time.time()  # stamp freshness
 
     # Exited while(!shouldStop); end control!
         # print("shouldStop: ", shouldStop)

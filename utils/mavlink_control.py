@@ -340,9 +340,7 @@ def reboot_if_EKF_origin(pos_tolerance=0.2):
     Returns True if reboot command was sent, False otherwise.
     """
 
-    for i in range(3):                  # Call multiple times to ensure we get a valid message after enabling the stream
-        x, y, _, _, _, _ = get_pose()
-        time.sleep(0.05)
+    x, y, _, _, _, _ = get_pose()
     printd(f"reboot check – x={x:.3f}, y={y:.3f}")
     if abs(x) > pos_tolerance or abs(y) > pos_tolerance:
         printd(f"pos deviation exceeds {pos_tolerance}, rebooting")
