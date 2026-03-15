@@ -215,6 +215,21 @@ print("Press 'g' to enable MonoNav autonomous mode, or 'a'/'w'/'d' for manual le
 filterYvals = config['filterYvals']
 filterWeights = config['filterWeights']
 filterTSDF = config['filterTSDF']
+planner_type = str(config.get('planner_type', 'mononav')).lower()
+bendyruler_lookahead_m = float(config.get('bendyruler_lookahead_m', 5.0))
+bendyruler_clearance_weight = float(config.get('bendyruler_clearance_weight', 2.0))
+bendyruler_goal_weight = float(config.get('bendyruler_goal_weight', 1.0))
+bendyruler_turn_weight = float(config.get('bendyruler_turn_weight', 0.2))
+
+print(f"Planner type: {planner_type}", flush=True)
+if planner_type == 'bendyruler':
+    print(
+        f"BendyRuler params: lookahead={bendyruler_lookahead_m:.2f}m, "
+        f"clearance_w={bendyruler_clearance_weight:.2f}, "
+        f"goal_w={bendyruler_goal_weight:.2f}, turn_w={bendyruler_turn_weight:.2f}",
+        flush=True,
+    )
+
 if 'goal_position_rdf' in config:
     # Goal is in RDF meters: [right, down, forward]
     goal_position = np.array(config['goal_position_rdf'])
@@ -582,7 +597,34 @@ def main():
         # In autonomous GO mode, update selected trajectory from planner.
             if autonomous_mode:
                 # In 'g' mode: run trajectory planning
-                max_traj_idx = choose_primitive(vbg.vbg, camera_position, traj_linesets, goal_position, min_dist2obs, filterYvals, filterWeights, filterTSDF, weight_threshold)
+                if planner_type == 'bendyruler':
+                    max_traj_idx = choose_primitive_bendyruler(
+                        vbg.vbg,
+                        camera_position,
+                        traj_linesets,
+                        goal_position,
+                        min_dist2obs,
+                        filterYvals,
+                        filterWeights,
+                        filterTSDF,
+                        weight_threshold,
+                        lookahead_m=bendyruler_lookahead_m,
+                        clearance_weight=bendyruler_clearance_weight,
+                        goal_weight=bendyruler_goal_weight,
+                        turn_weight=bendyruler_turn_weight,
+                    )
+                else:
+                    max_traj_idx = choose_primitive(
+                        vbg.vbg,
+                        camera_position,
+                        traj_linesets,
+                        goal_position,
+                        min_dist2obs,
+                        filterYvals,
+                        filterWeights,
+                        filterTSDF,
+                        weight_threshold,
+                    )
                 if max_traj_idx is None:
                     # No safe trajectory: clear traj_index so the execution thread
                     # stops sending commands and the vehicle hovers in place.

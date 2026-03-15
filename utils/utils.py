@@ -424,6 +424,121 @@ def choose_primitive(vbg, camera_position, traj_linesets, goal_position, dist_th
     return max_traj_idx
 
 
+def _extract_obstacle_voxels_numpy(vbg, filterYvals, filterWeights, filterTSDF, weight_threshold):
+    """Return filtered obstacle voxel coordinates as a CPU numpy array."""
+    weights = vbg.attribute("weight").reshape((-1))
+    tsdf = vbg.attribute("tsdf").reshape((-1))
+    voxel_coords, voxel_indices = vbg.voxel_coordinates_and_flattened_indices()
+
+    # Align attributes with voxel coordinate ordering.
+    weights = weights[voxel_indices]
+    tsdf = tsdf[voxel_indices]
+
+    if filterYvals:
+        mask = voxel_coords[:, 1] < -0.3
+        voxel_coords = voxel_coords[mask]
+        weights = weights[mask]
+        tsdf = tsdf[mask]
+
+    if filterWeights:
+        mask = weights > weight_threshold
+        voxel_coords = voxel_coords[mask, :]
+        tsdf = tsdf[mask]
+
+    if filterTSDF:
+        mask = tsdf < 0.0
+        voxel_coords = voxel_coords[mask, :]
+
+    return voxel_coords.cpu().numpy()
+
+
+def _lookahead_points(pts, lookahead_m):
+    """Return the initial segment of trajectory points up to lookahead distance."""
+    if pts.shape[0] <= 1:
+        return pts
+    if lookahead_m is None or lookahead_m <= 0:
+        return pts
+
+    seg_lengths = np.linalg.norm(np.diff(pts, axis=0), axis=1)
+    cumulative = np.concatenate(([0.0], np.cumsum(seg_lengths)))
+    keep = cumulative <= float(lookahead_m)
+    if not np.any(keep):
+        return pts[:1]
+    last_idx = int(np.where(keep)[0][-1])
+    return pts[:max(last_idx + 1, 2)]
+
+
+def choose_primitive_bendyruler(
+    vbg,
+    camera_position,
+    traj_linesets,
+    goal_position,
+    dist_threshold,
+    filterYvals,
+    filterWeights,
+    filterTSDF,
+    weight_threshold,
+    lookahead_m=5.0,
+    clearance_weight=2.0,
+    goal_weight=1.0,
+    turn_weight=0.2,
+):
+    """
+    BendyRuler-style local planner over existing primitive trajectories.
+
+    This planner evaluates each primitive by:
+    1) rejecting trajectories that violate minimum clearance,
+    2) preferring higher clearance inside a lookahead window,
+    3) preferring endpoints that progress toward goal,
+    4) softly penalizing large turns from the center primitive.
+    """
+    voxel_coords_numpy = _extract_obstacle_voxels_numpy(
+        vbg, filterYvals, filterWeights, filterTSDF, weight_threshold
+    )
+    center_idx = len(traj_linesets) // 2
+
+    best_idx = None
+    best_score = -np.inf
+
+    for traj_idx, traj_lineset in enumerate(traj_linesets):
+        traj_lineset_copy = copy.deepcopy(traj_lineset)
+        traj_lineset_copy.transform(camera_position)
+        pts = np.asarray(traj_lineset_copy.points)
+        if pts.shape[0] == 0:
+            continue
+
+        la_pts = _lookahead_points(pts, lookahead_m)
+
+        if voxel_coords_numpy.size > 0:
+            d2 = distance.cdist(voxel_coords_numpy, la_pts, "sqeuclidean")
+            nearest_clearance = float(np.sqrt(np.min(d2)))
+        else:
+            nearest_clearance = np.inf
+
+        if nearest_clearance <= dist_threshold:
+            continue
+
+        score = 0.0
+        if np.isfinite(nearest_clearance):
+            score += float(clearance_weight) * nearest_clearance
+        else:
+            score += float(clearance_weight) * (dist_threshold + 2.0)
+
+        if goal_position is not None:
+            goal_np = np.asarray(goal_position).reshape(-1, 3)
+            d2_goal = distance.cdist(goal_np, la_pts, "sqeuclidean")
+            min_goal_dist = float(np.sqrt(np.min(d2_goal)))
+            score -= float(goal_weight) * min_goal_dist
+
+        score -= float(turn_weight) * abs(traj_idx - center_idx)
+
+        if score > best_score:
+            best_score = score
+            best_idx = traj_idx
+
+    return best_idx
+
+
 """
 Load config.yml file
 """
