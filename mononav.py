@@ -30,6 +30,7 @@ import time
 import os
 import open3d as o3d
 import sys
+import threading
 
 # Add DepthAnythingV2-metric path
 repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '.'))
@@ -93,6 +94,7 @@ if model_device.type != 'cuda' and torch.cuda.is_available():
 # GLOBAL VARIABLES
 last_key_pressed = None  # store the last key pressed
 shouldStop = False
+trajectory_execution_stop_event = threading.Event()
 traj_index = None
 trajectory_start_time = None  # when the current trajectory started
 autonomous_mode = False
@@ -134,7 +136,7 @@ if config['forward_speed'] is not None:
     forward_speed = config['forward_speed']
 max_traj_idx = None  # Start with no trajectory; only set when user presses 'g' for MonoNav mode
 print(f"Trajectory library loaded: {len(traj_list)} trajectories", flush=True)
-print(f"Trajectory amplitudes: left(idx 0)={float(amplitudes[0]):.3f}, right(idx {len(amplitudes)-1})={float(amplitudes[-1]):.3f}", flush=True)
+print(f"Trajectory amplitudes: left(idx 0)={amplitudes[0]:.3f}, right(idx {len(amplitudes)-1})={amplitudes[-1]:.3f}", flush=True)
 print("Press 'g' to enable MonoNav autonomous mode, or 'a'/'w'/'d' for manual left/straight/right", flush=True)
 
 # Planning presets
@@ -201,52 +203,34 @@ def update_key_from_cv(wait_ms=1):
 listener = keyboard.Listener(on_press=on_press)
 listener.start()
 
-def execute_trajectory_blocking(selected_traj_idx, command_hz=10):
-    """Execute one trajectory in the main thread at a fixed command rate."""
-    global shouldStop
-    global autonomous_mode
-
+# Trajectory execution thread: sends motion commands at fixed rate
+def trajectory_execution_loop(command_hz=10):
+    """Background thread: execute trajectory with smooth velocity commands at fixed rate."""
+    global traj_index, trajectory_start_time
     period_s = 1.0 / max(command_hz, 1)
-    start_t = time.monotonic()
-    next_command_t = start_t
-
-    while (time.monotonic() - start_t) < period:
-        update_key_from_cv(1)
-
-        # Keep safety exits responsive even during trajectory execution.
-        if last_key_pressed == 'q':
-            autonomous_mode = False
-            mavc.eSTOP()
-            print("Pressed q. EMERGENCY STOP.", flush=True)
-            shouldStop = True
-            break
-        if last_key_pressed == 'c':
-            autonomous_mode = False
-            mavc.set_mode('LAND')
-            print("Pressed c. Ending control.", flush=True)
-            shouldStop = True
-            break
-        if last_key_pressed == 'r':
-            autonomous_mode = False
-            print("\nPressed r. Switching to SmartRTL.\n", flush=True)
-            if FLY_VEHICLE:
-                mavc.set_mode('SmartRTL')
-            shouldStop = True
-            break
-
-        elapsed = time.monotonic() - start_t
-        yawrate = amplitudes[selected_traj_idx] * np.sin(np.pi / period * elapsed)  # rad/s
-        yvel = yawrate * yvel_gain
-        yawrate = yawrate * yawrate_gain
-        if FLY_VEHICLE:
-            mavc.send_body_offset_ned_vel(forward_speed, yvel, yaw_rate=yawrate)
-
-        next_command_t += period_s
-        sleep_time = next_command_t - time.monotonic()
+    next_command = time.monotonic()
+    
+    # log whenever the execution loop begins iteration (for debugging thread activity)
+    while not trajectory_execution_stop_event.is_set():
+        # (traj_index may be None until a trajectory is selected)
+        if traj_index is not None and trajectory_start_time is not None:
+            elapsed = time.time() - trajectory_start_time
+            
+            # Check if we've exceeded the trajectory period
+            if elapsed < period:
+                # Compute smooth yaw rate for this instant
+                yawrate = amplitudes[traj_index] * np.sin(np.pi / period * elapsed)  # rad/s
+                yvel = yawrate * yvel_gain
+                yawrate = yawrate * yawrate_gain
+                if FLY_VEHICLE:
+                    mavc.send_body_offset_ned_vel(forward_speed, yvel, yaw_rate=yawrate)
+        
+        next_command += period_s
+        sleep_time = next_command - time.monotonic()
         if sleep_time > 0:
-            time.sleep(sleep_time)
+            trajectory_execution_stop_event.wait(sleep_time)
         else:
-            next_command_t = time.monotonic()
+            next_command = time.monotonic()
 
 # MAIN MONONAV CONTROL LOOP
 def main():
@@ -293,7 +277,7 @@ def main():
     if optimal_mtx is not None and roi is not None:
         vbg_intrinsics = get_cropped_intrinsics(optimal_mtx, roi)
         vbg.intrinsic_matrix = vbg_intrinsics
-        vbg.depth_intrinsic = o3d.core.Tensor(vbg_intrinsics, o3d.core.Dtype.Float64)
+        vbg.depth_intrinsic = o3d.core.Tensor(vbg_intrinsics)
 
     # Scale mtx, dist to match current camera resolution
     # Read one frame to get actual resolution
@@ -337,17 +321,24 @@ def main():
         print("Starting control.", flush=True)
         traj_counter = 0         # how many trajectory iterations have we done?
         last_time = time.time()  # for FPS counter
+        
+        # Start trajectory execution thread
+        trajectory_execution_stop_event.clear()
+        traj_thread = threading.Thread(
+            target=trajectory_execution_loop,
+            args=(10,),  # 10 Hz command rate
+            daemon=True,
+        )
+        traj_thread.start()
+    #   start_time = time.time() # seconds
 
         while not shouldStop:
             update_key_from_cv(1)
             
             # Check for stop keys first (these exit the control loop)
-            if last_key_pressed == 'l':
-                """
-                Emergency Motor stop. DISARMS immediately and causes a hard landing. DO NOT USE unless absolutely necessary.
-                """
+            if last_key_pressed == 'q':
                 autonomous_mode = False
-                mavc.arm(0, force_disarm=True) # disarm even if safety checks fails (eg, while flying)
+                mavc.eSTOP()
                 print("Pressed q. EMERGENCY STOP.", flush=True)
                 shouldStop = True
                 break
@@ -379,16 +370,19 @@ def main():
                 autonomous_mode = False
                 print("Pressed a. Going left.", flush=True)
                 traj_index = 0 # left
+                print(f"[main] set traj_index={traj_index} (manual)", flush=True)
                 last_key_pressed = None
             elif last_key_pressed == 'w':
                 autonomous_mode = False
                 print("Pressed w. Going straight.", flush=True)
                 traj_index = len(traj_list)//2 # straight
+                print(f"[main] set traj_index={traj_index} (manual)", flush=True)
                 last_key_pressed = None
             elif last_key_pressed == 'd':
                 autonomous_mode = False
                 print("Pressed d. Going right.", flush=True)
                 traj_index = len(traj_list)-1 # right
+                print(f"[main] set traj_index={traj_index} (manual)", flush=True)
                 last_key_pressed = None
             elif last_key_pressed == 'g':
                 autonomous_mode = True
@@ -396,6 +390,7 @@ def main():
                     # Keep GO mode active, but execute a hover-only cycle and re-plan.
                 if max_traj_idx is not None:
                     traj_index = max_traj_idx
+                    print(f"[main] set traj_index={traj_index} (from max_traj_idx on g)", flush=True)
                 last_key_pressed = None
         
         # Save trajectory information
@@ -405,53 +400,66 @@ def main():
                 with open(save_dir + '/trajectories.csv', 'a') as file:
                     np.savetxt(file, row.reshape(1, -1), delimiter=',', fmt='%s')
 
-            # Process one sensing + depth + fusion cycle before planning.
-            bgr = cap.read()
-            pose = get_latest_pose()
-            camera_position = get_pose_matrix(*pose)
+        # Execute the selected trajectory in background thread.
+        # Main thread now focuses on frame processing and TSDF integration.
+            trajectory_start_time = time.time()
+            traj_start = trajectory_start_time
+            
+            while time.time() - traj_start < period:
+                bgr = cap.read()
+            # get_latest_pose returns (x, y, z, yaw, pitch, roll) - non-blocking from thread
+                pose = mavc.get_pose()
+                camera_position = get_pose_matrix(*pose)
 
-            if goal_position is not None:
-                dist_to_goal = np.linalg.norm(camera_position[0:-1, -1]-goal_position[0])
-                if dist_to_goal <= min_dist2goal:
-                    print("Reached goal!")
-                    break
+                if goal_position is not None:
+                    dist_to_goal = np.linalg.norm(camera_position[0:-1, -1]-goal_position[0])
+                    if dist_to_goal <= min_dist2goal:
+                        print("Reached goal!")
+                        autonomous_mode = False
+                        break
 
-            if config.get("enable_undistort", True):
-                transform_bgr = transform_image(bgr, mtx, dist, optimal_mtx, roi)
-                transform_rgb = cv2.cvtColor(transform_bgr, cv2.COLOR_BGR2RGB)
-            else:
-                transform_bgr = bgr
-                transform_rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+                # Optionally transform camera image (undistort + crop) based on config
+                if config.get("enable_undistort", True):
+                    transform_bgr = transform_image(bgr, mtx, dist, optimal_mtx, roi)
+                    transform_rgb = cv2.cvtColor(transform_bgr, cv2.COLOR_BGR2RGB)
+                else:
+                    transform_bgr = bgr
+                    transform_rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+                #transform_rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
 
-            depth_numpy, depth_colormap = compute_depth(transform_bgr, depth_anything, INPUT_SIZE)
+                # compute depth
+                depth_numpy, depth_colormap = compute_depth(transform_bgr, depth_anything, INPUT_SIZE, make_colormap=True)
 
-            if depth_colormap is not None:
-                processing_speed = 1 / (time.time() - last_time)
-                fps_text = ("%0.2f" % (processing_speed,)) + ' fps'
-                textsize = cv2.getTextSize(fps_text, cv2.FONT_HERSHEY_SIMPLEX, 1, 2)[0]
-                cv2.putText(
-                    depth_colormap,
-                    fps_text,
-                    org=(int((depth_colormap.shape[1] - textsize[0] / 2)), int((textsize[1]) / 2)),
-                    fontFace=cv2.FONT_HERSHEY_SIMPLEX,
-                    fontScale=0.5,
-                    thickness=1,
-                    color=(255, 255, 255),
-                )
-                last_time = time.time()
-                cv2.imshow("Depth", depth_colormap)
-                update_key_from_cv(1)
+                if depth_colormap is not None:
+                    # Add FPS counter to depth display
+                    processing_speed = 1 / (time.time() - last_time)
+                    fps_text = ("%0.2f" % (processing_speed,)) + ' fps'
+                    textsize = cv2.getTextSize(fps_text, cv2.FONT_HERSHEY_SIMPLEX, 1, 2)[0]
+                    cv2.putText(
+                        depth_colormap,
+                        fps_text,
+                        org=(int((depth_colormap.shape[1] - textsize[0] / 2)), int((textsize[1]) / 2)),
+                        fontFace=cv2.FONT_HERSHEY_SIMPLEX,
+                        fontScale=0.5,
+                        thickness=1,
+                        color=(255, 255, 255),
+                    )
+                    last_time = time.time()
+                    cv2.imshow("Depth", depth_colormap)
+                    update_key_from_cv(1)
 
-            vbg.integration_step(transform_rgb, depth_numpy, camera_position)
+            # integrate the vbg (prefers rgb)
+                vbg.integration_step(transform_rgb, depth_numpy, camera_position)
 
-            if save_during_flight:
-                cv2.imwrite(img_dir + '/frame-%06d.rgb.jpg'%(frame_number), bgr)
-                cv2.imwrite(transform_img_dir + '/transform_frame-%06d.rgb.jpg'%(frame_number), transform_bgr)
-                cv2.imwrite(transform_depth_dir + '/' + 'transform_frame-%06d.depth.jpg'%(frame_number), depth_colormap)
-                np.save(transform_depth_dir + '/' + 'transform_frame-%06d.depth.npy'%(frame_number), depth_numpy) # saved in meters
-                np.savetxt(pose_dir + '/frame-%06d.pose.txt'%(frame_number), camera_position)
+                if save_during_flight:
+                    cv2.imwrite(img_dir + '/frame-%06d.rgb.jpg'%(frame_number), bgr)
+                    cv2.imwrite(transform_img_dir + '/transform_frame-%06d.rgb.jpg'%(frame_number), transform_bgr)
+                    cv2.imwrite(transform_depth_dir + '/' + 'transform_frame-%06d.depth.jpg'%(frame_number), depth_colormap)
+                    np.save(transform_depth_dir + '/' + 'transform_frame-%06d.depth.npy'%(frame_number), depth_numpy) # saved in meters
+                    np.savetxt(pose_dir + '/frame-%06d.pose.txt'%(frame_number), camera_position)
 
-            frame_number += 1
+                frame_number += 1
+            traj_counter += 1
 
         # In autonomous GO mode, update selected trajectory from planner.
             if autonomous_mode:
@@ -468,15 +476,7 @@ def main():
                 else:
                     traj_none_count = 0
                     print(f"[TRAJ] Selected traj: {max_traj_idx}/{len(traj_list)-1}", flush=True)
-
-            # Fly the selected trajectory in the main thread at 10 Hz.
-            if max_traj_idx is not None and autonomous_mode:
-                traj_index = max_traj_idx
-
-            if traj_index is not None and not shouldStop:
-                trajectory_start_time = time.time()
-                execute_trajectory_blocking(traj_index, command_hz=10)
-                traj_counter += 1
+                    traj_index = max_traj_idx
 
     # Exited while(!shouldStop); end control!
         # print("shouldStop: ", shouldStop)
@@ -484,8 +484,8 @@ def main():
         print("[INFO] End control.", flush=True)
         print("[INFO] Current distance to goal (m): ", np.linalg.norm(camera_position[0:-1, -1]-goal_position) if goal_position is not None else "N/A", flush=True)
         camera_position = [camera_position[0:-1, -1][2], camera_position[0:-1, -1][0], camera_position[0:-1, -1][1]] # print in NED order for readability
-        print("[INFO] Current NED coords:" , camera_position, flush=True)
-        print("[INFO] Current RDF coords:", ned_to_rdf(camera_position[0], camera_position[1], camera_position[2], hdg), flush=True)
+        print("[INFO] Current NED coords:" , *camera_position, flush=True)
+        print("[INFO] Current RDF coords:", *ned_to_rdf(camera_position[0], camera_position[1], camera_position[2], hdg), flush=True)
 
         # save and view vbg (robust to missing save dir; always attempt visualization)
         try:
@@ -520,6 +520,11 @@ def main():
         print("\n[INTERRUPT] Ctrl+C detected. Sent land command.", flush=True)
             
     finally:
+        # Stop trajectory execution thread
+        trajectory_execution_stop_event.set()
+        if 'traj_thread' in locals():
+            traj_thread.join(timeout=2.0)
+        
         print("Releasing camera capture.")
         cap.cap.release()
         cv2.destroyAllWindows()

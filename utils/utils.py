@@ -60,8 +60,8 @@ class VoxelBlockGrid:
                 o3d.camera.PinholeCameraIntrinsicParameters.PrimeSenseDefault
             )  # Kinect Intrinsics (default)
             intrinsic_matrix = self.camera.intrinsic_matrix
-        self.intrinsic_matrix = np.asarray(intrinsic_matrix, dtype=np.float64)
-        self.depth_intrinsic = o3d.core.Tensor(self.intrinsic_matrix, o3d.core.Dtype.Float64)
+        self.intrinsic_matrix = np.asarray(intrinsic_matrix)
+        self.depth_intrinsic = o3d.core.Tensor(self.intrinsic_matrix)
 
         # Initialize the VoxelBlockGrid
         self.vbg = o3d.t.geometry.VoxelBlockGrid(
@@ -79,11 +79,11 @@ class VoxelBlockGrid:
         depth = o3d.t.geometry.Image(depth_numpy).to(self.device)
         # Open3D frustum indexing expects camera tensors on CPU even when VBG lives on CUDA.
         depth_intrinsic_cpu = self.depth_intrinsic.to(o3d.core.Device("CPU:0"))
-        extrinsic_cpu = o3d.core.Tensor(np.linalg.inv(cam_pose), o3d.core.Dtype.Float64)
+        extrinsic_cpu = o3d.core.Tensor(np.linalg.inv(cam_pose))
         frustum_block_coords = self.vbg.compute_unique_block_coordinates(
             depth, depth_intrinsic_cpu, extrinsic_cpu, self.depth_scale, self.depth_max, self.trunc_voxel_multiplier)
         color = o3d.t.geometry.Image(np.asarray(color)).to(self.device)
-        color_intrinsic_cpu = o3d.core.Tensor(self.intrinsic_matrix, o3d.core.Dtype.Float64)
+        color_intrinsic_cpu = o3d.core.Tensor(self.intrinsic_matrix)
         self.vbg.integrate(frustum_block_coords, depth, color, depth_intrinsic_cpu,
                        color_intrinsic_cpu, extrinsic_cpu, self.depth_scale, self.depth_max, self.trunc_voxel_multiplier)
 
@@ -133,7 +133,7 @@ Returns depth_numpy (uint16 in mm), depth_colormap (for visualization)
 # cmap = colormaps.get_cmap('Spectral')
 def compute_depth(frame, depth_anything, size, make_colormap=True):
 
-    depth = depth_anything.infer_image(frame, size)  # as np ndarray, in meters (float32)
+    depth = depth_anything.infer_image(frame, size)    # as np ndarray, in meters (float32)
     depth = (1000*depth).astype(np.uint16)             # Convert to mm and uint16 for Open3D integration (depth in mm is more standard for TSDF fusion)
     # the above line works as long as depth is ensured to be under 65.535 meters. 
     # In case KITTI is used and you for some reason want to integrate VBG more than this limit (depth_max in config.yml), beware
@@ -233,7 +233,7 @@ def get_pose_matrix(pos_x, pos_y, pos_z, vehicle_yaw_rad, vehicle_pitch_rad, veh
 
     # Build homogeneous transform directly in RDF frame.
     # NED->RDF corresponds to index permutation [1, 2, 0] for rows and cols.
-    pose = np.eye(4, dtype=np.float64)
+    pose = np.eye(4)
     pose[0, 0] = r11
     pose[0, 1] = r12
     pose[0, 2] = r10
@@ -456,7 +456,7 @@ def get_calibration_resolution(camera_calibration_path):
 
 
 def scale_intrinsics(intrinsic_matrix, scale_x, scale_y):
-    scaled_intrinsic = np.array(intrinsic_matrix, dtype=np.float64, copy=True)
+    scaled_intrinsic = np.array(intrinsic_matrix, copy=True)
     scaled_intrinsic[0, 0] *= scale_x
     scaled_intrinsic[1, 1] *= scale_y
     scaled_intrinsic[0, 2] *= scale_x
@@ -505,7 +505,7 @@ def adjust_intrinsics_to_frame_size(mtx, dist, optimal_mtx, roi, frame_width, fr
 
 
 def get_cropped_intrinsics(intrinsic_matrix, roi):
-    cropped_intrinsic = np.array(intrinsic_matrix, dtype=np.float64, copy=True)
+    cropped_intrinsic = np.array(intrinsic_matrix, copy=True)
     x, y, _, _ = [int(v) for v in roi]
     cropped_intrinsic[0, 2] -= x
     cropped_intrinsic[1, 2] -= y
@@ -584,11 +584,11 @@ def _pose_thread_worker():
             mavc.printd(f"Error in pose thread: {e}")
             time.sleep(sleep_time)
 
-def start_pose_thread(frequency_hz=10.0):
+def start_pose_thread(frequency_hz=15):
     """Start the background pose thread at specified frequency.
     
     Args:
-        frequency_hz: Update frequency in Hz (default: 10.0)
+        frequency_hz: Update frequency in Hz (default: 20.0)
     """
     global _pose_thread, _pose_thread_stop, _pose_thread_hz
     

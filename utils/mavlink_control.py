@@ -35,13 +35,14 @@ def connect_drone(IP, baud=115200):
     ex: "udpout:192.168.199.51:14550" -> Similar functionality as UDPCl in Mission Planner if you first send out a heartbeat.
     """
     global drone
-    drone = mavutil.mavlink_connection(IP, baud, autoreconnect=True)
+    drone = None
     while not drone:
-        pass
+        drone = mavutil.mavlink_connection(IP, baud, autoreconnect=True)
+        time.sleep(0.05)
     printd("Connected")
-    send_heartbeat()
     printd("Waiting for heartbeat...")
-    drone.wait_heartbeat()
+    while not drone.wait_heartbeat(timeout=1):
+        send_heartbeat()
     printd(f"Heartbeat received from system {drone.target_system} component {drone.target_component}")
     return drone
 
@@ -74,7 +75,7 @@ def set_mode(mode_name):
     printd(f"Switching to {mode_name}...")
     time.sleep(0.1)
 
-def en_pose_stream(freq=15):
+def en_pose_stream(freq=20):
     """
     Enable both LOCAL_NED and heading messages to be sent from the autopilot at freqency 'freq'.
     Call once initially to enable the stream. Set frequency to 0 to disable.
@@ -92,7 +93,6 @@ def en_pose_stream(freq=15):
         0,0,0,0,
         0
     )
-    # time.sleep(0.1)
 
     # ATTITUDE (30)
     drone.mav.command_long_send(
@@ -108,31 +108,68 @@ def en_pose_stream(freq=15):
 
     printd(f"Enabled pose stream at {freq} Hz")
 
-def get_pose(blocking=False):
+# Keep last-seen pose so callers can request a quick non-blocking sample
+x_last = None
+y_last = None
+z_last = None
+yaw_last = None
+pitch_last = None
+roll_last = None
+
+def get_pose(blocking=False, timeout_s=None):
     """
-    Return the position (Local NED) and attitude (in radians) of the drone
-    Polls for both LOCAL_POSITION_NED and ATTITUDE messages until both are received
+    Return the position (Local NED) and attitude (in radians) of the drone.
+
+    If `timeout_s` is None and `blocking` is as before: the function will
+    block until both LOCAL_POSITION_NED and ATTITUDE messages have been
+    received (legacy behaviour).
+
+    If `timeout_s` is set (float seconds), the function will poll until the
+    timeout and then return the last values seen (or Nones if nothing seen).
+    This allows callers to perform a quick, non-blocking pose query.
     """
 
-    # Keep polling until we get fresh messages (or timeout)
+    global x_last, y_last, z_last, yaw_last, pitch_last, roll_last
+
     got_position = False
     got_attitude = False
-    
+    x = x_last
+    y = y_last
+    z = z_last
+    yaw = yaw_last
+    pitch = pitch_last
+    roll = roll_last
+
+    start_time = time.time()
+    deadline = start_time + timeout_s if timeout_s is not None else None
+
     while True:
+        # Use the provided blocking flag and a small internal timeout so we can
+        # respect the overall deadline when one is provided.
         msg = drone.recv_match(type=["LOCAL_POSITION_NED", "ATTITUDE"], blocking=blocking, timeout=0.1)
-        
+
         if not msg or msg.get_type() == "BAD_DATA":
             if got_position and got_attitude:
+                break
+            if deadline is not None and time.time() >= deadline:
                 break
             continue
 
         if msg.get_type() == "LOCAL_POSITION_NED":
             x, y, z = msg.x, msg.y, msg.z
             got_position = True
+            x_last, y_last, z_last = x, y, z
         elif msg.get_type() == "ATTITUDE":
             roll, pitch, yaw = msg.roll, msg.pitch, msg.yaw
             got_attitude = True
-                
+            roll_last, pitch_last, yaw_last = roll, pitch, yaw
+
+        if got_position and got_attitude:
+            break
+
+        if deadline is not None and time.time() >= deadline:
+            break
+
     return x, y, z, yaw, pitch, roll
 
 def arm(arm_state=1, force_disarm=False):
@@ -195,14 +232,12 @@ def takeoff(target_alt):
         # Read LOCAL_POSITION_NED messages only (faster and more robust for altitude)
         alt = -get_pose()[2]    # convert Down (positive) -> altitude (positive up)
         if alt is None:
-            time.sleep(0.1)
+            time.sleep(0.05)
             continue
           
         if alt >= target_alt - 0.1:
             printd("Reached target altitude")
             return True
-
-        time.sleep(0.1)
 
 def send_body_offset_ned_vel(vx, vy, vz=0, yaw_rate=0):
     """
