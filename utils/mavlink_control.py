@@ -135,30 +135,41 @@ def get_pose(blocking=False):
                 
     return x, y, z, yaw, pitch, roll
 
-def arm(arm_state=1):
+def arm(arm_state=1, force_disarm=False):
     """
     Arm the drone
     """
     if arm_state:
         printd("Arming motors...")
 
-    drone.mav.command_long_send(
-        drone.target_system,
-        drone.target_component,
-        mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
-        0,
-        arm_state,0,0,0,0,0,0
-    )
-
+        drone.mav.command_long_send(
+            drone.target_system,
+            drone.target_component,
+            mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
+            0,
+            arm_state,0,0,0,0,0,0
+        )
     # Wait until armed
-    while arm_state:
-        msg = drone.recv_match(type='HEARTBEAT', blocking=True)
-        if msg.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED:
-            print("Vehicle armed")
-            break
-        time.sleep(0.1)
+        while True:
+            msg = drone.recv_match(type='HEARTBEAT', blocking=True)
+            if msg.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED:
+                print("Vehicle armed")
+                break
+            time.sleep(0.1)
+
     if not arm_state:
+        if force_disarm:
+            force = 21196
+        else:
+            force = 0
         printd("Disarming motors...")
+        drone.mav.command_long_send(
+            drone.target_system,
+            drone.target_component,
+            mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
+            0,
+            arm_state,force,0,0,0,0,0
+        )
 
 def takeoff(target_alt):
     """
@@ -252,13 +263,6 @@ def set_speed(speed):
         0,
         0,0,0,0  # Unused
     )
-
-def eSTOP():
-    """
-    Emergency Motor stop. DISARMS immediately and causes a hard landing. DO NOT USE unless absolutely necessary.
-    """
-    # set_mode('BRAKE')
-    arm(0)
 
 def timesync(timeout_s=0.5):
     """
