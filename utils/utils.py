@@ -215,39 +215,19 @@ This function assumes the drone was pointing North at initialization. But since 
 This doesn't matter in exploration mode. But in goal-directed navigation, this allows us to specify the goal in RDF coordinates relative to the drone's initial heading, and have it correctly transformed to NED for ArduPilot.
 """
 def get_pose_matrix(pos_x, pos_y, pos_z, vehicle_yaw_rad, vehicle_pitch_rad, vehicle_roll_rad):
-    # Trig terms for roll/pitch/yaw (radians)
+    # Precompute trigonometric terms for roll, pitch, and yaw
     sr, cr = m.sin(vehicle_roll_rad), m.cos(vehicle_roll_rad)
     sp, cp = m.sin(vehicle_pitch_rad), m.cos(vehicle_pitch_rad)
     sy, cy = m.sin(vehicle_yaw_rad), m.cos(vehicle_yaw_rad)
 
-    # Rotation in NED for extrinsic xyz(roll, pitch, yaw)
-    r00 = cy * cp
-    r01 = cy * sp * sr - sy * cr
-    r02 = cy * sp * cr + sy * sr
-    r10 = sy * cp
-    r11 = sy * sp * sr + cy * cr
-    r12 = sy * sp * cr - cy * sr
-    r20 = -sp
-    r21 = cp * sr
-    r22 = cp * cr
+    # Construct the rotation matrix directly using NumPy for efficiency
+    pose = np.array([
+        [cy * cp, cy * sp * sr - sy * cr, cy * sp * cr + sy * sr, pos_y],  # Row 0
+        [sy * cp, sy * sp * sr + cy * cr, sy * sp * cr - cy * sr, pos_z],  # Row 1
+        [-sp,     cp * sr,               cp * cr,                 pos_x],  # Row 2
+        [0,       0,                     0,                           1]   # Homogeneous row
+    ])
 
-    # Build homogeneous transform directly in RDF frame.
-    # NED->RDF corresponds to index permutation [1, 2, 0] for rows and cols.
-    pose = np.eye(4)
-    pose[0, 0] = r11
-    pose[0, 1] = r12
-    pose[0, 2] = r10
-    pose[1, 0] = r21
-    pose[1, 1] = r22
-    pose[1, 2] = r20
-    pose[2, 0] = r01
-    pose[2, 1] = r02
-    pose[2, 2] = r00
-
-    # Position: AP NED (north, east, down) -> RDF (right, down, front)
-    pose[0, 3] = pos_y
-    pose[1, 3] = pos_z
-    pose[2, 3] = pos_x
     return pose
     
 """
@@ -678,7 +658,7 @@ def visualize_pointcloud(pcd_legacy, window_name="Reconstruction"):
         ctr.set_lookat(center)
         ctr.set_up([0, 0, 1])       # Z up
         ctr.set_front([0, -1, 0])   # Look along -Y (forward)
-        ctr.set_zoom(0.7)
+        ctr.set_zoom(1)
         vis.run()
         vis.destroy_window()
     except Exception as e:

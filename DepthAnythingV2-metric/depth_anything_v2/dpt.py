@@ -3,6 +3,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torchvision.transforms import Compose
+from contextlib import nullcontext
 
 from .dinov2 import DINOv2
 from .util.blocks import FeatureFusionBlock, _make_scratch
@@ -174,6 +175,14 @@ class DepthAnythingV2(nn.Module):
         self.pretrained = DINOv2(model_name=encoder)
         
         self.depth_head = DPTHead(self.pretrained.embed_dim, features, use_bn, out_channels=out_channels, use_clstoken=use_clstoken)
+
+        # Runtime knobs for high-throughput inference.
+        self._transform_cache = {}
+        self._autocast_enabled = False
+        self._autocast_dtype = torch.float16
+        self._channels_last_enabled = False
+        self._model_in_half = False
+        self._resize_interpolation = cv2.INTER_LINEAR
     
     def forward(self, x):
         patch_h, patch_w = x.shape[-2] // 14, x.shape[-1] // 14
@@ -187,36 +196,106 @@ class DepthAnythingV2(nn.Module):
     @torch.no_grad()
     def infer_image(self, raw_image, input_size):
         image, (h, w) = self.image2tensor(raw_image, input_size)
-        
-        depth = self.forward(image)
+
+        device_type = image.device.type
+        amp_ctx = (
+            torch.autocast(device_type=device_type, enabled=True, dtype=self._autocast_dtype)
+            if self._autocast_enabled and device_type in ("cuda", "cpu")
+            else nullcontext()
+        )
+
+        with amp_ctx:
+            depth = self.forward(image)
         
         depth = F.interpolate(depth[:, None], (h, w), mode="bilinear", align_corners=True)[0, 0]
         
-        return depth.cpu().numpy()
+        return depth.float().cpu().numpy()
+
+    def configure_runtime(
+        self,
+        use_autocast=None,
+        autocast_dtype="float16",
+        use_channels_last=True,
+        use_half_precision_model=False,
+        fast_resize=True,
+    ):
+        # Must be called after moving model to target device.
+        device = next(self.parameters()).device
+
+        if use_autocast is None:
+            use_autocast = device.type == "cuda"
+
+        autocast_dtype = str(autocast_dtype).lower()
+        if autocast_dtype in ("bf16", "bfloat16"):
+            self._autocast_dtype = torch.bfloat16
+        else:
+            self._autocast_dtype = torch.float16
+
+        if device.type == "cuda":
+            self._autocast_enabled = bool(use_autocast)
+        elif device.type == "cpu":
+            # CPU autocast is practical only with bfloat16.
+            self._autocast_enabled = bool(use_autocast and self._autocast_dtype == torch.bfloat16)
+        else:
+            self._autocast_enabled = False
+
+        self._resize_interpolation = cv2.INTER_LINEAR if fast_resize else cv2.INTER_CUBIC
+
+        if device.type == "cuda" and use_channels_last:
+            self.to(memory_format=torch.channels_last)
+            self._channels_last_enabled = True
+        else:
+            self._channels_last_enabled = False
+
+        # Optional full model FP16. Autocast alone is usually safer.
+        if device.type == "cuda" and use_half_precision_model:
+            self.half()
+            self._model_in_half = True
+        else:
+            self._model_in_half = False
+
+        return {
+            "device": str(device),
+            "autocast": self._autocast_enabled,
+            "autocast_dtype": "bfloat16" if self._autocast_dtype == torch.bfloat16 else "float16",
+            "channels_last": self._channels_last_enabled,
+            "model_half": self._model_in_half,
+            "fast_resize": fast_resize,
+        }
+
+    def _get_transform(self, input_size):
+        key = int(input_size)
+        if key not in self._transform_cache:
+            self._transform_cache[key] = Compose([
+                Resize(
+                    width=input_size,
+                    height=input_size,
+                    resize_target=False,
+                    keep_aspect_ratio=True,
+                    ensure_multiple_of=14,
+                    resize_method='lower_bound',
+                    image_interpolation_method=self._resize_interpolation,
+                ),
+                NormalizeImage(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+                PrepareForNet(),
+            ])
+        return self._transform_cache[key]
     
-    def image2tensor(self, raw_image, input_size=518):        
-        transform = Compose([
-            Resize(
-                width=input_size,
-                height=input_size,
-                resize_target=False,
-                keep_aspect_ratio=True,
-                ensure_multiple_of=14,
-                resize_method='lower_bound',
-                image_interpolation_method=cv2.INTER_CUBIC,
-            ),
-            NormalizeImage(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-            PrepareForNet(),
-        ])
-        
+    def image2tensor(self, raw_image, input_size=518):
+        transform = self._get_transform(input_size)
+
         h, w = raw_image.shape[:2]
         
         image = cv2.cvtColor(raw_image, cv2.COLOR_BGR2RGB) / 255.0
         
         image = transform({'image': image})['image']
         image = torch.from_numpy(image).unsqueeze(0)
-        
-        DEVICE = 'cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu'
-        image = image.to(DEVICE)
+
+        device = next(self.parameters()).device
+        if self._model_in_half:
+            image = image.half()
+        if self._channels_last_enabled:
+            image = image.contiguous(memory_format=torch.channels_last)
+        image = image.to(device, non_blocking=True)
         
         return image, (h, w)

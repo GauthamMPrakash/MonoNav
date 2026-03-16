@@ -30,7 +30,6 @@ import time
 import os
 import open3d as o3d
 import sys
-import threading
 
 # Add DepthAnythingV2-metric path
 repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '.'))
@@ -58,6 +57,12 @@ if ENCODER is None:
     print(f"[warning] DA2_ENCODER not set in config, parsed '{ENCODER}' from checkpoint name")
 MAX_DEPTH = 20
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
+DA2_ENABLE_AUTOCAST = bool(config.get('DA2_ENABLE_AUTOCAST', True))
+DA2_AUTOCAST_DTYPE = str(config.get('DA2_AUTOCAST_DTYPE', 'float16'))
+DA2_USE_HALF_MODEL = bool(config.get('DA2_USE_HALF_MODEL', False))
+DA2_CHANNELS_LAST = bool(config.get('DA2_CHANNELS_LAST', True))
+DA2_FAST_RESIZE = bool(config.get('DA2_FAST_RESIZE', True))
+
 IP = config['IP']
 baud = config['baud']
 height = config['height']
@@ -83,10 +88,24 @@ model_configs = {
 depth_anything = DepthAnythingV2(**{**model_configs[ENCODER], 'max_depth': MAX_DEPTH})
 depth_anything.load_state_dict(torch.load(CHECKPOINT, map_location=DEVICE))
 depth_anything = depth_anything.to(DEVICE).eval()
+
+if DEVICE == 'cuda':
+    torch.backends.cudnn.benchmark = True
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
+
+runtime_cfg = depth_anything.configure_runtime(
+    use_autocast=DA2_ENABLE_AUTOCAST,
+    autocast_dtype=DA2_AUTOCAST_DTYPE,
+    use_channels_last=DA2_CHANNELS_LAST,
+    use_half_precision_model=DA2_USE_HALF_MODEL,
+    fast_resize=DA2_FAST_RESIZE,
+)
 model_device = next(depth_anything.parameters()).device
 
 print(f"[device] torch.cuda.is_available()={torch.cuda.is_available()}", flush=True)
 print(f"[device] selected DEVICE={DEVICE}, model_device={model_device}", flush=True)
+print(f"[device] runtime_cfg={runtime_cfg}", flush=True)
 if torch.cuda.is_available():
     print(f"[device] cuda_name={torch.cuda.get_device_name(torch.cuda.current_device())}", flush=True)
 if model_device.type != 'cuda' and torch.cuda.is_available():
@@ -95,81 +114,11 @@ if model_device.type != 'cuda' and torch.cuda.is_available():
 # GLOBAL VARIABLES
 last_key_pressed = None  # store the last key pressed
 shouldStop = False
-trajectory_execution_stop_event = threading.Event()
 traj_index = None
 trajectory_start_time = None  # when the current trajectory started
 autonomous_mode = False
-trajectory_start_yaw_abs = None      # absolute yaw at primitive start (NED)
-trajectory_target_yaw_abs = None     # absolute yaw target (NED) for current primitive
-trajectory_target_delta_yaw = 0.0    # target relative yaw change for current primitive
 initial_heading = None               # initial absolute heading (NED) captured at startup
 last_depth_compute_ts = 0.0          # timestamp of most recent successful depth inference
-traj_executing = False               # True while executing a primitive; prevents planning overlap
-
-# Safety: trajectory freshness
-# In autonomous mode the execution thread will only send commands if the planner
-# has produced a trajectory within the last TRAJ_TTL seconds.  If the planner
-# misses (depth stale, choose_primitive returns None, etc.) the thread simply
-# omits velocity commands so the vehicle hovers under ArduPilot's position hold.
-TRAJ_TTL = 0.5        # seconds — max age of a planner result before hovering
-planned_traj_ts = 0.0 # monotonic timestamp of last successful choose_primitive call
-# Commands are only allowed if depth was computed recently.
-DEPTH_TTL = float(config.get('depth_ttl', 0.5))
-
-# Completion tolerance for primitive yaw targets.
-YAW_COMPLETION_TOL = 5 * np.pi / 180  # radians
-# Safety timeout multiplier to avoid infinite primitive execution if yaw cannot converge.
-TRAJ_EXEC_TIMEOUT_MULT = 2 # multiplier on the nominal primitive period to determine when to timeout and re-plan
-
-def trajectory_target_reached(current_yaw_abs):
-    """True when current primitive target yaw has been reached within tolerance."""
-    target_err = np.arctan2(
-        np.sin(trajectory_target_yaw_abs - current_yaw_abs),
-        np.cos(trajectory_target_yaw_abs - current_yaw_abs),
-    )
-    return abs(target_err) <= YAW_COMPLETION_TOL
-
-
-def get_progress_yawrate(traj_idx, current_yaw_abs):
-    """Interpolate primitive yawrate from achieved yaw progress (not wall-clock time)."""
-    target_delta = float(trajectory_target_delta_yaw)
-    if abs(target_delta) < 1e-6:
-        return 0.0
-
-    achieved_delta = np.arctan2(
-        np.sin(current_yaw_abs - trajectory_start_yaw_abs),
-        np.cos(current_yaw_abs - trajectory_start_yaw_abs),
-    )
-    traj = traj_list[traj_idx]
-    yawvals = np.asarray(traj['yawvals'], dtype=float)
-    yawrates = np.asarray(traj['yawrates'], dtype=float)
-
-    if target_delta > 0:
-        yaw_progress = np.clip(achieved_delta, float(yawvals[0]), float(yawvals[-1]))
-        return float(np.interp(yaw_progress, yawvals, yawrates))
-
-    yawvals_rev = yawvals[::-1]
-    yawrates_rev = yawrates[::-1]
-    yaw_progress = np.clip(achieved_delta, float(yawvals_rev[0]), float(yawvals_rev[-1]))
-    return float(np.interp(yaw_progress, yawvals_rev, yawrates_rev))
-
-
-def start_new_trajectory_segment(traj_idx):
-    """Initialize yaw-relative tracking state for the currently selected primitive."""
-    global trajectory_start_time
-    global trajectory_start_yaw_abs
-    global trajectory_target_yaw_abs
-    global trajectory_target_delta_yaw
-
-    trajectory_start_time = time.time()
-    trajectory_start_yaw_abs = get_latest_pose()[3]
-
-    if traj_idx is not None:
-        trajectory_target_delta_yaw = float(traj_list[traj_idx]['yawvals'][-1])
-        trajectory_target_yaw_abs = trajectory_start_yaw_abs + trajectory_target_delta_yaw
-    else:
-        trajectory_target_delta_yaw = 0.0
-        trajectory_target_yaw_abs = trajectory_start_yaw_abs
 
 # Intrinsics for undistort (optional)
 camera_calibration_path = config.get('camera_calibration_path')
@@ -289,38 +238,6 @@ def update_key_from_cv(wait_ms=1):
 listener = keyboard.Listener(on_press=on_press)
 listener.start()
 
-# Trajectory execution thread: sends motion commands at fixed rate
-def trajectory_execution_loop(command_hz=20):
-    """Background thread: execute trajectory with smooth velocity commands at fixed rate."""
-    global traj_index, trajectory_start_time
-    period_s = 1.0 / max(command_hz, 1)
-    next_command = time.monotonic()
-    
-    # log whenever the execution loop begins iteration (for debugging thread activity)
-    while not trajectory_execution_stop_event.is_set():
-        # (traj_index may be None until a trajectory is selected)
-        if traj_index is not None and trajectory_start_time is not None:
-            # In autonomous mode only execute if the planner result is still fresh.  If it has expired, skip sending so the autopilot hovers.
-            plan_stale = autonomous_mode and (time.time() - planned_traj_ts) > TRAJ_TTL
-            depth_stale = (time.time() - last_depth_compute_ts) > DEPTH_TTL
-            if plan_stale or depth_stale or not traj_executing:
-                pass  # hover
-            else:
-                current_yaw_abs = get_latest_pose()[3]
-                if not trajectory_target_reached(current_yaw_abs):
-                    yawrate = get_progress_yawrate(traj_index, current_yaw_abs)
-                    yvel = yawrate * yvel_gain
-                    yawrate = yawrate * yawrate_gain
-                    if FLY_VEHICLE:
-                        mavc.send_body_offset_ned_vel(forward_speed, yvel, yaw_rate=yawrate)
-        
-        next_command += period_s
-        sleep_time = next_command - time.monotonic()
-        if sleep_time > 0:
-            trajectory_execution_stop_event.wait(sleep_time)
-        else:
-            next_command = time.monotonic()
-
 # MAIN MONONAV CONTROL LOOP
 def main():
     global shouldStop
@@ -335,10 +252,9 @@ def main():
     global goal_position
     global traj_max_none_count
     global autonomous_mode
-    global planned_traj_ts
     global initial_heading
     global last_depth_compute_ts
-    global traj_executing
+    global trajectory_start_time
 
     traj_none_count = 0
     traj_max_none_count = 2                      # how many times traj chooser can predict no safe traj before we force stop
@@ -357,7 +273,6 @@ def main():
             continue         # Restart connection loop
         break
     
-    # Run the depth model a few times (the first inference is slow), and skip the first few frames
     cap = VideoCapture(STREAM_URL)
     first_bgr = cap.read()
     frame_height, frame_width = first_bgr.shape[:2]
@@ -376,6 +291,7 @@ def main():
     # Scale mtx, dist to match current camera resolution
     # Read one frame to get actual resolution
     try:
+        # Run the depth model a few times (the first inference is slow), and skip the first few frames
         for i in range(0, config['num_pre_depth_frames']):
             bgr = cap.read()
             # COMPUTE DEPTH
@@ -414,15 +330,7 @@ def main():
         traj_counter = 0         # how many trajectory iterations have we done?
         last_time = time.time()  # for FPS counter
         
-        # Start trajectory execution thread
-        trajectory_execution_stop_event.clear()
-        traj_thread = threading.Thread(
-            target=trajectory_execution_loop,
-            args=(10,),  # 10 Hz command rate
-            daemon=True,
-        )
-        traj_thread.start()
-    #   start_time = time.time() # seconds
+        # start_time = time.time() # seconds
         print("Starting control.", flush=True)
 
         while not shouldStop:
@@ -488,7 +396,6 @@ def main():
                 # Keep GO mode active, but execute a hover-only cycle and re-plan.
                 if max_traj_idx is not None:
                     traj_index = max_traj_idx
-                    planned_traj_ts = time.time()  # treat initial assignment as fresh
                     print(f"[main] set traj_index={traj_index} (from max_traj_idx on g)", flush=True)
                 last_key_pressed = None
         
@@ -499,14 +406,11 @@ def main():
                 with open(save_dir + '/trajectories.csv', 'a') as file:
                     np.savetxt(file, row.reshape(1, -1), delimiter=',', fmt='%s')
 
-        # Execute the selected trajectory in background thread.
-        # Main thread now focuses on frame processing and TSDF integration.
-            start_new_trajectory_segment(traj_index)
+        # Execute the selected trajectory inline.
+            trajectory_start_time = time.time()
             traj_start = trajectory_start_time
-            traj_executing = True
 
-            while True:
-                # Keep UI responsive and capture any key presses while executing a primitive.
+            while time.time() - traj_start < period:
                 update_key_from_cv(1)
 
                 # Allow any key press or a stop signal to immediately interrupt
@@ -514,39 +418,17 @@ def main():
                 if shouldStop or last_key_pressed is not None:
                     break
 
-                elapsed = time.time() - traj_start
-                if traj_index is None:
-                    if elapsed >= period:
-                        break
-                else:
-                    current_yaw_abs = get_latest_pose()[3]
-                    if abs(trajectory_target_delta_yaw) < YAW_COMPLETION_TOL:
-                        # Straight / near-zero yaw primitive: yaw will already be at
-                        # target on the first check, so use time-based completion instead.
-                        if elapsed >= period:
-                            break
-                    else:
-                        if trajectory_target_reached(current_yaw_abs):
-                            break
-                        if elapsed >= (period * TRAJ_EXEC_TIMEOUT_MULT):
-                            #print(f"[warning] primitive timeout after {elapsed:.2f}s; continuing", flush=True)
-                            break
-
                 bgr = cap.read()
             # get_latest_pose returns (x, y, z, yaw, pitch, roll) - non-blocking from thread
                 pose = get_latest_pose()
                 camera_position = get_pose_matrix(*pose)
-
-                # Keep planned_traj_ts fresh so the background execution thread
-                # continues to send commands for the full duration of the primitive.
-                if autonomous_mode:
-                    planned_traj_ts = time.time()
 
                 if goal_position is not None:
                     dist_to_goal = np.linalg.norm(camera_position[0:-1, -1]-goal_position[0])
                     if dist_to_goal <= min_dist2goal:
                         print("Reached goal!")
                         autonomous_mode = False
+                        shouldStop = True
                         break
 
                 # Optionally transform camera image (undistort + crop) based on config
@@ -561,6 +443,15 @@ def main():
                 # compute depth
                 depth_numpy, depth_colormap = compute_depth(transform_bgr, depth_anything, INPUT_SIZE, make_colormap=True)
                 last_depth_compute_ts = time.time()
+
+                elapsed = time.time() - traj_start
+                if traj_index is not None:
+                    yawrate = amplitudes[traj_index] * np.sin(np.pi / period * elapsed)  # rad/s
+                    yvel = yawrate * yvel_gain
+                    yawrate = yawrate * yawrate_gain
+                    print(yawrate)
+                    if FLY_VEHICLE:
+                        mavc.send_body_offset_ned_vel(forward_speed, yvel, yaw_rate=yawrate)
 
                 if depth_colormap is not None:
                     # Add FPS counter to depth display
@@ -591,7 +482,6 @@ def main():
                     np.savetxt(pose_dir + '/frame-%06d.pose.txt'%(frame_number), camera_position)
 
                 frame_number += 1
-            traj_executing = False
             traj_counter += 1
 
         # In autonomous GO mode, update selected trajectory from planner.
@@ -626,8 +516,10 @@ def main():
                         weight_threshold,
                     )
                 if max_traj_idx is None:
-                    # No safe trajectory: clear traj_index so the execution thread
-                    # stops sending commands and the vehicle hovers in place.
+                    mavc.set_mode('BRAKE') # hover in place if no trajectory is safe
+                    time.sleep(0.1) # allow some time for the brake command to take effect
+                    mavc.set_mode('GUIDED') # switch back to guided so we can send new commands when a trajectory becomes available again
+                    # No safe trajectory: clear traj_index so command sending pauses and the vehicle hovers.
                     traj_index = None
                     traj_none_count += 1
                     if traj_none_count > traj_max_none_count:
@@ -636,7 +528,6 @@ def main():
                     traj_none_count = 0
                     print(f"[TRAJ] Selected traj: {max_traj_idx}/{len(traj_list)-1}", flush=True)
                     traj_index = max_traj_idx
-                    planned_traj_ts = time.time()  # stamp freshness
 
     # Exited while(!shouldStop); end control!
         # print("shouldStop: ", shouldStop)
@@ -680,11 +571,6 @@ def main():
         print("\n[INTERRUPT] Ctrl+C detected. Sent land command.", flush=True)
             
     finally:
-        # Stop trajectory execution thread
-        trajectory_execution_stop_event.set()
-        if 'traj_thread' in locals():
-            traj_thread.join(timeout=2.0)
-        
         print("Releasing camera capture.")
         cap.cap.release()
         cv2.destroyAllWindows()

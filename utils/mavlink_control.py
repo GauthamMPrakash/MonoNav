@@ -232,10 +232,10 @@ def takeoff(target_alt):
         # Read LOCAL_POSITION_NED messages only (faster and more robust for altitude)
         alt = -get_pose()[2]    # convert Down (positive) -> altitude (positive up)
         if alt is None:
-            time.sleep(0.05)
+            time.sleep(0.1)
             continue
-          
-        if alt >= target_alt - 0.1:
+
+        if alt >= target_alt * 0.95:
             printd("Reached target altitude")
             return True
 

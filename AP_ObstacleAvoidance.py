@@ -61,6 +61,12 @@ if ENCODER is None:
     ENCODER = CHECKPOINT.split('_')[-1].split('.')[0]
     print(f"[warning] DA2_ENCODER not set in config, parsed '{ENCODER}' from checkpoint name")
 DEVICE = 'cuda:0' if torch.cuda.is_available() else 'cpu'
+DA2_ENABLE_AUTOCAST = bool(config.get('DA2_ENABLE_AUTOCAST', True))
+DA2_AUTOCAST_DTYPE = str(config.get('DA2_AUTOCAST_DTYPE', 'float16'))
+DA2_USE_HALF_MODEL = bool(config.get('DA2_USE_HALF_MODEL', False))
+DA2_CHANNELS_LAST = bool(config.get('DA2_CHANNELS_LAST', True))
+DA2_FAST_RESIZE = bool(config.get('DA2_FAST_RESIZE', True))
+DA2_CPU_THREADS = config.get('DA2_CPU_THREADS', None)
 
 IP = config['IP']                      # dronebridge IP
 height = config['height']
@@ -89,10 +95,26 @@ model_configs = {
 depth_anything = DepthAnythingV2(**{**model_configs[ENCODER], 'max_depth': DEPTH_RANGE_M[1]})
 depth_anything.load_state_dict(torch.load(CHECKPOINT, map_location=DEVICE))
 depth_anything = depth_anything.to(DEVICE).eval()
+
+if torch.cuda.is_available():
+    torch.backends.cudnn.benchmark = True
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
+elif DA2_CPU_THREADS is not None:
+    torch.set_num_threads(int(DA2_CPU_THREADS))
+
+runtime_cfg = depth_anything.configure_runtime(
+    use_autocast=DA2_ENABLE_AUTOCAST,
+    autocast_dtype=DA2_AUTOCAST_DTYPE,
+    use_channels_last=DA2_CHANNELS_LAST,
+    use_half_precision_model=DA2_USE_HALF_MODEL,
+    fast_resize=DA2_FAST_RESIZE,
+)
 model_device = next(depth_anything.parameters()).device
 
 print(f"[device] torch.cuda.is_available()={torch.cuda.is_available()}")
 print(f"[device] selected DEVICE={DEVICE}, model_device={model_device}")
+print(f"[device] runtime_cfg={runtime_cfg}")
 if torch.cuda.is_available():
     print(f"[device] cuda_name={torch.cuda.get_device_name(torch.cuda.current_device())}")
 if model_device.type != 'cuda' and torch.cuda.is_available():
