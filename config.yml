@@ -25,7 +25,7 @@ save_during_flight : False     # Whether to save images and reconstructions duri
 filterYvals: True             # this helps filter out the ground / ceiling (for planar navigation)
 filterWeights: True           # this helps filter out low-weight voxels
 filterTSDF: True
-weight_threshold: 4.0         # determine the weight threshold for filtering (higher threshold -> fewer points)
+weight_threshold: 4           # determine the weight threshold for filtering (higher threshold -> fewer points)
 VoxelBlockGrid:
   depth_scale: 1000.0         # 1000.0 is default (mm to m), scale factor for depth values during integration
   depth_max: 7.0             # max depth to include in the reconstruction
@@ -35,10 +35,25 @@ VoxelBlockGrid:
 # Planning Settings
 trajlib_dir: "utils/trajlib/" # where to save & retrieve the trajectory library (motion primitives)
 planner_type: "mononav"   # "mononav" or "bendyruler"
-bendyruler_lookahead_m: 5.0   # evaluate primitive safety/progress over this forward distance
-bendyruler_clearance_weight: 2.0
-bendyruler_goal_weight: 1.0
-bendyruler_turn_weight: 0.2    # penalty for large steering changes (higher => smoother)
+
+# Direct depth-image BendyRuler settings
+depth_bendy_lookahead_m: 2.0      # tuned from min_dist2obs=0.7 -> ~3x clearance horizon
+depth_bendy_safety_margin_m: 0.9  # slightly above min_dist2obs to account for depth noise
+depth_bendy_bearing_inc_deg: 5.0
+depth_bendy_max_bearing_deg: 60.0 # closer to AP default behavior, avoids extreme side turns
+depth_bendy_row_frac_lo: 0.25     # ignore more of the ceiling / upper clutter
+depth_bendy_row_frac_hi: 0.75     # ignore more of the floor for planar flight
+depth_bendy_bendy_ratio: 1.5
+depth_bendy_bendy_angle: 60.0
+depth_bendy_clearance_percentile: 15
+
+# Short-lived obstacle memory for depth_bendyruler.
+# Keeps recent depth obstacles for a short time after they leave the image.
+depth_bendy_memory_enable: True
+depth_bendy_memory_timeout_s: 1  # short persistence at forward_speed=0.5 m/s
+depth_bendy_memory_stride_px: 12   # denser obstacle sampling without being too heavy
+depth_bendy_memory_max_points: 1200
+depth_bendy_memory_max_depth_m: 3.0
 
 # Goal position in RDF frame (metres). 
 # Comment out for undirected exploration.

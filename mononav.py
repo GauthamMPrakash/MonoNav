@@ -117,8 +117,8 @@ shouldStop = False
 traj_index = None
 trajectory_start_time = None  # when the current trajectory started
 autonomous_mode = False
-initial_heading = None               # initial absolute heading (NED) captured at startup
-last_depth_compute_ts = 0.0          # timestamp of most recent successful depth inference
+_depth_bendy_prev_bearing = None  # hysteresis bearing for depth-based BendyRuler
+_depth_bendy_db = None
 
 # Intrinsics for undistort (optional)
 camera_calibration_path = config.get('camera_calibration_path')
@@ -165,19 +165,25 @@ filterYvals = config['filterYvals']
 filterWeights = config['filterWeights']
 filterTSDF = config['filterTSDF']
 planner_type = str(config.get('planner_type', 'mononav')).lower()
-bendyruler_lookahead_m = float(config.get('bendyruler_lookahead_m', 5.0))
-bendyruler_clearance_weight = float(config.get('bendyruler_clearance_weight', 2.0))
-bendyruler_goal_weight = float(config.get('bendyruler_goal_weight', 1.0))
-bendyruler_turn_weight = float(config.get('bendyruler_turn_weight', 0.2))
+
+# Depth-image BendyRuler planner parameters (used when planner_type == 'depth_bendyruler').
+# These operate on raw DepthAnythingV2 output — no VBG or trajectory library required.
+depth_bendy_lookahead_m          = float(config.get('depth_bendy_lookahead_m', 3.0))
+depth_bendy_safety_margin_m      = float(config.get('depth_bendy_safety_margin_m', 1.5))
+depth_bendy_bearing_inc_deg      = float(config.get('depth_bendy_bearing_inc_deg', 5.0))
+depth_bendy_max_bearing_deg      = float(config.get('depth_bendy_max_bearing_deg', 85.0))
+depth_bendy_row_frac_lo          = float(config.get('depth_bendy_row_frac_lo', 0.2))
+depth_bendy_row_frac_hi          = float(config.get('depth_bendy_row_frac_hi', 0.8))
+depth_bendy_bendy_ratio          = float(config.get('depth_bendy_bendy_ratio', 1.5))
+depth_bendy_bendy_angle          = float(config.get('depth_bendy_bendy_angle', 75.0))
+depth_bendy_clearance_percentile = int(config.get('depth_bendy_clearance_percentile', 10))
+depth_bendy_memory_enable        = bool(config.get('depth_bendy_memory_enable', True))
+depth_bendy_memory_timeout_s     = float(config.get('depth_bendy_memory_timeout_s', 1.0))
+depth_bendy_memory_stride_px     = int(config.get('depth_bendy_memory_stride_px', 16))
+depth_bendy_memory_max_points    = int(config.get('depth_bendy_memory_max_points', 1200))
+depth_bendy_memory_max_depth_m   = float(config.get('depth_bendy_memory_max_depth_m', 4.0))
 
 print(f"Planner type: {planner_type}", flush=True)
-if planner_type == 'bendyruler':
-    print(
-        f"BendyRuler params: lookahead={bendyruler_lookahead_m:.2f}m, "
-        f"clearance_w={bendyruler_clearance_weight:.2f}, "
-        f"goal_w={bendyruler_goal_weight:.2f}, turn_w={bendyruler_turn_weight:.2f}",
-        flush=True,
-    )
 
 if 'goal_position_rdf' in config:
     # Goal is in RDF meters: [right, down, forward]
@@ -195,24 +201,23 @@ save_dir = config['save_dir_prefix'] + time_string
 print("Saving files to: " + save_dir, flush=True)
 npz_save_filename = save_dir + '/vbg.npz'
 
-img_dir = os.path.join(save_dir, 'rgb-images')
-pose_dir = os.path.join(save_dir, 'poses')
-transform_img_dir = os.path.join(save_dir, 'transform-rgb-images')
-transform_depth_dir = os.path.join(save_dir, 'transform-depth-images')
-
-# Ensure the base save directory exists so file writes succeed
-os.makedirs(save_dir, exist_ok=True)
-
 if save_during_flight:
+    img_dir = os.path.join(save_dir, 'rgb-images')
+    pose_dir = os.path.join(save_dir, 'poses')
+    transform_img_dir = os.path.join(save_dir, 'transform-rgb-images')
+    transform_depth_dir = os.path.join(save_dir, 'transform-depth-images')
+
+    # Ensure the base save directory exists so file writes succeed
+    os.makedirs(save_dir, exist_ok=True)
     os.makedirs(img_dir, exist_ok=True)
     os.makedirs(pose_dir, exist_ok=True)
     os.makedirs(transform_img_dir, exist_ok=True)
     os.makedirs(transform_depth_dir, exist_ok=True)
 
-# Save the run information to a csv
-header = ['frame_number', 'chosen_traj_idx', 'time_elapsed']
-with open(save_dir + '/trajectories.csv', 'w') as file:
-    file.write(','.join(header) + '\n')
+    # Save the run information to a csv
+    header = ['frame_number', 'chosen_traj_idx', 'time_elapsed']
+    with open(save_dir + '/trajectories.csv', 'w') as file:
+        file.write(','.join(header) + '\n')
 
 # key press callback function (for manual control)
 def on_press(key):
@@ -252,9 +257,9 @@ def main():
     global goal_position
     global traj_max_none_count
     global autonomous_mode
-    global initial_heading
-    global last_depth_compute_ts
-    global trajectory_start_time
+    global _depth_bendy_prev_bearing
+    global _depth_bendy_db
+    
 
     traj_none_count = 0
     traj_max_none_count = 2                      # how many times traj chooser can predict no safe traj before we force stop
@@ -264,7 +269,7 @@ def main():
         # Connect to the drone
         mavc.connect_drone(IP, baud=baud)
         mavc.set_ekf_origin(EKF_LAT, EKF_LON, 0) # Ignored if already close to the previous origin, if set
-        mavc.en_pose_stream(15)                    # Commands AP to stream poses at a deafult value of 15 Hz
+        mavc.en_pose_stream(20)                  # Commands AP to stream poses at a deafult value of 15 Hz
         reboot = mavc.reboot_if_EKF_origin(0.5)  # Call this function after enabling pose_stream
         if reboot:
             mavc.printd("Rebooted drone to set EKF origin. Waiting for reconnection...")
@@ -288,6 +293,30 @@ def main():
         vbg.intrinsic_matrix = vbg_intrinsics
         vbg.depth_intrinsic = o3d.core.Tensor(vbg_intrinsics)
 
+    # Horizontal intrinsics for the depth-based BendyRuler planner.
+    # Uses calibration-derived fx/cx when available so bearing angles are
+    # accurate; falls back to a FOV-estimated value otherwise.
+    if optimal_mtx is not None:
+        _db_intrinsics = vbg.intrinsic_matrix  # already updated above (or default)
+        db_fx = float(_db_intrinsics[0, 0])
+        db_fy = float(_db_intrinsics[1, 1])
+        db_cx = float(_db_intrinsics[0, 2])
+        db_cy = float(_db_intrinsics[1, 2])
+    else:
+        # Estimate from a typical ~70° horizontal FOV.
+        db_fx = float(frame_width) / (2.0 * np.tan(np.radians(35.0)))
+        db_fy = db_fx
+        db_cx = float(frame_width) / 2.0
+        db_cy = float(frame_height) / 2.0
+
+    if planner_type == 'depth_bendyruler' and depth_bendy_memory_enable:
+        _depth_bendy_db = TimedObstacleDatabase(
+            timeout_s=depth_bendy_memory_timeout_s,
+            max_points=depth_bendy_memory_max_points,
+        )
+    else:
+        _depth_bendy_db = None
+
     # Scale mtx, dist to match current camera resolution
     # Read one frame to get actual resolution
     try:
@@ -298,7 +327,6 @@ def main():
             start_time_test = time.time()
             # depth_numpy, depth_colormap = compute_depth_fast(bgr, INPUT_SIZE)
             depth_numpy, depth_colormap = compute_depth(bgr, depth_anything, INPUT_SIZE)
-            last_depth_compute_ts = time.time()
             print("TIME TO COMPUTE DEPTH:", time.time() - start_time_test)
             cv2.imshow("test", bgr)
             update_key_from_cv()
@@ -308,7 +336,6 @@ def main():
         frame_number = 0
         start_flight_time = time.time()
         hdg = mavc.get_pose()[3] # get initial yaw
-        initial_heading = hdg
         if FLY_VEHICLE==True:
             print("Arming Motors!", flush=True)
             mavc.set_mode('GUIDED')
@@ -329,7 +356,8 @@ def main():
     
         traj_counter = 0         # how many trajectory iterations have we done?
         last_time = time.time()  # for FPS counter
-        
+        _depth_bendy_prev_bearing = None  # reset bearing hysteresis each flight
+
         # start_time = time.time() # seconds
         print("Starting control.", flush=True)
 
@@ -407,10 +435,10 @@ def main():
                     np.savetxt(file, row.reshape(1, -1), delimiter=',', fmt='%s')
 
         # Execute the selected trajectory inline.
-            trajectory_start_time = time.time()
-            traj_start = trajectory_start_time
+            traj_start = time.time()
+            realtime_depth_bendy = planner_type == 'depth_bendyruler' and autonomous_mode
 
-            while time.time() - traj_start < period:
+            while True:
                 update_key_from_cv(1)
 
                 # Allow any key press or a stop signal to immediately interrupt
@@ -442,10 +470,51 @@ def main():
 
                 # compute depth
                 depth_numpy, depth_colormap = compute_depth(transform_bgr, depth_anything, INPUT_SIZE, make_colormap=True)
-                last_depth_compute_ts = time.time()
+                depth_m_float = depth_numpy.astype(np.float32) / 1000.0
 
                 elapsed = time.time() - traj_start
-                if traj_index is not None:
+                if planner_type == 'depth_bendyruler' and autonomous_mode:
+                    # ── Depth-image BendyRuler: compute and send commands every frame ──
+                    db_points_cam = None
+                    if _depth_bendy_db is not None:
+                        db_points_cam = _depth_bendy_db.get_points_camera(
+                            camera_position,
+                            now_s=time.time(),
+                            max_distance_m=depth_bendy_memory_max_depth_m,
+                        )
+                    gb_deg = goal_bearing_cam_deg(
+                        camera_position,
+                        goal_position[0] if goal_position is not None else None,
+                    )
+                    (fwd_spd, lv, yr,
+                     _depth_bendy_prev_bearing,
+                     _db_active, _db_margin) = depth_bendyruler_commands(
+                        depth_m_float, db_fx, db_cx,
+                        goal_bearing_deg=gb_deg,
+                        forward_speed=forward_speed,
+                        yaw_rate_gain=yawrate_gain,
+                        lateral_gain=yvel_gain,
+                        lookahead_m=depth_bendy_lookahead_m,
+                        safety_margin_m=depth_bendy_safety_margin_m,
+                        bearing_inc_deg=depth_bendy_bearing_inc_deg,
+                        max_bearing_deg=depth_bendy_max_bearing_deg,
+                        row_frac_lo=depth_bendy_row_frac_lo,
+                        row_frac_hi=depth_bendy_row_frac_hi,
+                        prev_bearing=_depth_bendy_prev_bearing,
+                        bendy_ratio=depth_bendy_bendy_ratio,
+                        bendy_angle=depth_bendy_bendy_angle,
+                        clearance_percentile=depth_bendy_clearance_percentile,
+                        memory_points_cam=db_points_cam,
+                    )
+                    print(
+                        f"[DBR] bearing={_depth_bendy_prev_bearing:.1f}\u00b0  "
+                        f"margin={_db_margin:.2f}m  active={_db_active}  "
+                        f"goal_bearing={gb_deg:.1f}\u00b0",
+                        flush=True,
+                    )
+                    if FLY_VEHICLE:
+                        mavc.send_body_offset_ned_vel(fwd_spd, lv, yaw_rate=yr)
+                elif traj_index is not None:
                     yawrate = amplitudes[traj_index] * np.sin(np.pi / period * elapsed)  # rad/s
                     yvel = yawrate * yvel_gain
                     yawrate = yawrate * yawrate_gain
@@ -474,6 +543,25 @@ def main():
             # integrate the vbg (prefers rgb)
                 vbg.integration_step(transform_rgb, depth_numpy, camera_position)
 
+                if _depth_bendy_db is not None:
+                    db_frame_points = project_depth_obstacles_to_camera_points(
+                        depth_m_float,
+                        db_fx,
+                        db_fy,
+                        db_cx,
+                        db_cy,
+                        row_frac_lo=depth_bendy_row_frac_lo,
+                        row_frac_hi=depth_bendy_row_frac_hi,
+                        max_depth_m=depth_bendy_memory_max_depth_m,
+                        stride_px=depth_bendy_memory_stride_px,
+                        max_points=max(1, depth_bendy_memory_max_points // 4),
+                    )
+                    _depth_bendy_db.update_from_camera_points(
+                        db_frame_points,
+                        camera_position,
+                        now_s=time.time(),
+                    )
+
                 if save_during_flight:
                     cv2.imwrite(img_dir + '/frame-%06d.rgb.jpg'%(frame_number), bgr)
                     cv2.imwrite(transform_img_dir + '/transform_frame-%06d.rgb.jpg'%(frame_number), transform_bgr)
@@ -482,27 +570,21 @@ def main():
                     np.savetxt(pose_dir + '/frame-%06d.pose.txt'%(frame_number), camera_position)
 
                 frame_number += 1
+
+                if realtime_depth_bendy:
+                    break
+                if time.time() - traj_start >= period:
+                    break
             traj_counter += 1
 
         # In autonomous GO mode, update selected trajectory from planner.
             if autonomous_mode:
                 # In 'g' mode: run trajectory planning
                 if planner_type == 'bendyruler':
-                    max_traj_idx = choose_primitive_bendyruler(
-                        vbg.vbg,
-                        camera_position,
-                        traj_linesets,
-                        goal_position,
-                        min_dist2obs,
-                        filterYvals,
-                        filterWeights,
-                        filterTSDF,
-                        weight_threshold,
-                        lookahead_m=bendyruler_lookahead_m,
-                        clearance_weight=bendyruler_clearance_weight,
-                        goal_weight=bendyruler_goal_weight,
-                        turn_weight=bendyruler_turn_weight,
-                    )
+                    # Commands are sent per-frame in the inner loop above.
+                    # Keep traj_index=None so the trajectory-based path is inactive.
+                    traj_index = None
+                    traj_none_count = 0
                 else:
                     max_traj_idx = choose_primitive(
                         vbg.vbg,
@@ -515,19 +597,19 @@ def main():
                         filterTSDF,
                         weight_threshold,
                     )
-                if max_traj_idx is None:
-                    mavc.set_mode('BRAKE') # hover in place if no trajectory is safe
-                    time.sleep(0.1) # allow some time for the brake command to take effect
-                    mavc.set_mode('GUIDED') # switch back to guided so we can send new commands when a trajectory becomes available again
-                    # No safe trajectory: clear traj_index so command sending pauses and the vehicle hovers.
-                    traj_index = None
-                    traj_none_count += 1
-                    if traj_none_count > traj_max_none_count:
-                        print("[INFO] No safe trajectory found. Hovering in place.", flush=True)
-                else:
-                    traj_none_count = 0
-                    print(f"[TRAJ] Selected traj: {max_traj_idx}/{len(traj_list)-1}", flush=True)
-                    traj_index = max_traj_idx
+                    if max_traj_idx is None:
+                        mavc.set_mode('BRAKE') # hover in place if no trajectory is safe
+                        time.sleep(0.1) # allow some time for the brake command to take effect
+                        mavc.set_mode('GUIDED') # switch back to guided so we can send new commands when a trajectory becomes available again
+                        # No safe trajectory: clear traj_index so command sending pauses and the vehicle hovers.
+                        traj_index = None
+                        traj_none_count += 1
+                        if traj_none_count > traj_max_none_count:
+                            print("[INFO] No safe trajectory found. Hovering in place.", flush=True)
+                    else:
+                        traj_none_count = 0
+                        print(f"[TRAJ] Selected traj: {max_traj_idx}/{len(traj_list)-1}", flush=True)
+                        traj_index = max_traj_idx
 
     # Exited while(!shouldStop); end control!
         # print("shouldStop: ", shouldStop)
