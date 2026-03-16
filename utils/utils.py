@@ -670,7 +670,10 @@ def depth_bendyruler_plan(
             memory_clearance = _memory_sector_clearance(memory_points_cam, bearing_test, half_inc)
             clearance = min(depth_clearance, memory_clearance)
 
-            if clearance > best_margin:
+            if (clearance > best_margin or
+                    (np.isclose(clearance, best_margin) and
+                     abs(_wrap_180(bearing_test - goal_bearing_deg)) <
+                     abs(_wrap_180(best_margin_bearing - goal_bearing_deg)))):
                 best_margin = clearance
                 best_margin_bearing = bearing_test
 
@@ -680,7 +683,7 @@ def depth_bendyruler_plan(
             # ── Step 2: check three sub-bearings at the lookahead distance ──
             # Mirrors BendyRuler's second-stage {0°, +45°, -45°} fan check.
             step2_ok = False
-            for delta2 in (0.0, 15.0, -15.0):
+            for delta2 in (0.0, 45.0, -45.0):
                 b2 = bearing_test + delta2
                 c2_lo, c2_hi = _bearing_col_range(b2, half_inc, fx, cx, W)
                 depth_c2 = _depth_sector_clearance(
@@ -700,6 +703,7 @@ def depth_bendyruler_plan(
 
             # ── Bearing-change resistance (mirrors resist_bearing_change()) ──
             final_bearing = bearing_test
+            final_clearance = clearance
             if (active_candidate and prev_bearing is not None and
                     abs(_wrap_180(prev_bearing - bearing_test)) > bendy_angle and
                     bendy_ratio > 0):
@@ -715,13 +719,17 @@ def depth_bendyruler_plan(
                     # New direction doesn't offer sufficient improvement —
                     # resist the change and keep the previous bearing.
                     final_bearing = prev_bearing
+                    final_clearance = prev_clearance
 
             # Prefer the candidate closest to the goal bearing.
+            final_goal_error = abs(_wrap_180(final_bearing - goal_bearing_deg))
+            best_goal_error = np.inf if best_bearing is None else abs(_wrap_180(best_bearing - goal_bearing_deg))
             if (best_bearing is None or
-                    abs(_wrap_180(final_bearing - goal_bearing_deg)) <
-                    abs(_wrap_180(best_bearing - goal_bearing_deg))):
+                    final_goal_error < best_goal_error or
+                    (np.isclose(final_goal_error, best_goal_error) and
+                     final_clearance > best_bearing_clearance)):
                 best_bearing = final_bearing
-                best_bearing_clearance = clearance
+                best_bearing_clearance = final_clearance
 
     # ── Determine output ─────────────────────────────────────────────────────
     if best_bearing is not None:

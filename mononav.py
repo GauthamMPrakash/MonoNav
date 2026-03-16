@@ -166,7 +166,7 @@ filterWeights = config['filterWeights']
 filterTSDF = config['filterTSDF']
 planner_type = str(config.get('planner_type', 'mononav')).lower()
 
-# Depth-image BendyRuler planner parameters (used when planner_type == 'depth_bendyruler').
+# Depth-image BendyRuler planner parameters (used when planner_type == 'bendyrule').
 # These operate on raw DepthAnythingV2 output — no VBG or trajectory library required.
 depth_bendy_lookahead_m          = float(config.get('depth_bendy_lookahead_m', 3.0))
 depth_bendy_safety_margin_m      = float(config.get('depth_bendy_safety_margin_m', 1.5))
@@ -309,7 +309,7 @@ def main():
         db_cx = float(frame_width) / 2.0
         db_cy = float(frame_height) / 2.0
 
-    if planner_type == 'depth_bendyruler' and depth_bendy_memory_enable:
+    if planner_type == 'bendyruler' and depth_bendy_memory_enable:
         _depth_bendy_db = TimedObstacleDatabase(
             timeout_s=depth_bendy_memory_timeout_s,
             max_points=depth_bendy_memory_max_points,
@@ -436,7 +436,7 @@ def main():
 
         # Execute the selected trajectory inline.
             traj_start = time.time()
-            realtime_depth_bendy = planner_type == 'depth_bendyruler' and autonomous_mode
+            realtime_depth_bendy = planner_type == 'bendyruler' and autonomous_mode
 
             while True:
                 update_key_from_cv(1)
@@ -473,7 +473,7 @@ def main():
                 depth_m_float = depth_numpy.astype(np.float32) / 1000.0
 
                 elapsed = time.time() - traj_start
-                if planner_type == 'depth_bendyruler' and autonomous_mode:
+                if planner_type == 'bendyruler' and autonomous_mode:
                     # ── Depth-image BendyRuler: compute and send commands every frame ──
                     db_points_cam = None
                     if _depth_bendy_db is not None:
