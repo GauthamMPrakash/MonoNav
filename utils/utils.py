@@ -1026,11 +1026,19 @@ def _pose_thread_worker():
             _pose_latest = {'x': x, 'y': y, 'z': z, 'yaw': yaw, 'pitch': pitch, 'roll': roll}
         time.sleep(sleep_time)
 
+<<<<<<< HEAD
 def start_pose_thread(frequency_hz=15):
     """Start the background pose thread at specified frequency.
     
     Args:
         frequency_hz: Update frequency in Hz (default: 15.0)
+=======
+def start_pose_thread(frequency_hz):
+    """Start the background pose thread at specified frequency.
+    
+    Args:
+        frequency_hz: Update frequency in Hz
+>>>>>>> 5b0ee56 (Original-like)
     """
     global _pose_thread, _pose_thread_stop, _pose_thread_hz
     

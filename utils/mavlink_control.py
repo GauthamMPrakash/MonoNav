@@ -18,7 +18,7 @@ def printd(string):
     Print debug messages. Use f strings for multiple variables.
     """
     if DEBUG:
-        print(string, flush=True)
+        print(f"[mav] {string}", flush=True)
 
 def send_heartbeat():
     """
@@ -172,7 +172,7 @@ def get_pose(blocking=False, timeout_s=None):
 
     return x, y, z, yaw, pitch, roll
 
-def arm(arm_state=1, force_disarm=False):
+def arm(arm_state=1, force_disarm=True):
     """
     Arm the drone
     """
@@ -235,7 +235,7 @@ def takeoff(target_alt):
             time.sleep(0.1)
             continue
 
-        if alt >= target_alt * 0.95:
+        if alt >= target_alt * 0.9:
             printd("Reached target altitude")
             return True
 

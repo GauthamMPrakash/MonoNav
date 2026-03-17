@@ -264,24 +264,8 @@ def main():
         frame_number = 0
         start_flight_time = time.time()
         while not shouldStop:
-            bgr = cap.read()
-            poll_keyboard() # required for OpenCV window update + keypress capture
-            # get_latest_pose returns (x, y, z, yaw, pitch, roll) - non-blocking from thread
-            pose = get_latest_pose()
-            camera_position = get_pose_matrix(*pose)
-
-            # Optionally transform camera image (undistort + crop) based on config
-            if enable_undistort:
-                transform_bgr = transform_image(bgr, mtx, dist, optimal_mtx, roi)
-                transform_rgb = cv2.cvtColor(transform_bgr, cv2.COLOR_BGR2RGB)
-            else:
-                transform_bgr = bgr
-                transform_rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-            #transform_rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-
-            # compute depth
-            depth_numpy, depth_colormap = compute_depth(transform_bgr, depth_anything, INPUT_SIZE, make_colormap=True)
-            
+            print(last_key_pressed)
+            poll_keyboard()
             # Check for stop keys first (these exit the control loop)
             if last_key_pressed == 'p':
                 """
@@ -291,18 +275,21 @@ def main():
                 mavc.arm(0)
                 print("Pressed p. EMERGENCY STOP.", flush=True)
                 shouldStop = True
+                last_key_pressed = None
                 break
             elif last_key_pressed == 'c':
                 mavc.set_mode('BRAKE')
                 mavc.set_mode('LAND')
                 print("Pressed c. Ending control.", flush=True)
                 shouldStop = True
+                last_key_pressed = None
                 break
             elif last_key_pressed == 'r':
                 print("\nPressed r. Switching to SMART_RTL.\n", flush=True)
                 if FLY_VEHICLE:
                     mavc.set_mode('SMART_RTL')
                 shouldStop = True
+                last_key_pressed = None
                 break
             
             # Check for mode/command keys (these change behavior but don't stop)
@@ -311,17 +298,21 @@ def main():
                 if FLY_VEHICLE:
                     mavc.send_body_offset_ned_vel(0, 0, yaw_rate=0) # hover in place
                 traj_index = None  # Stop following any trajectory
+                last_key_pressed = None
             
             # Check for trajectory control keys
             if last_key_pressed == 'a':
                 print("Pressed a. Going left.", flush=True)
                 traj_index = 0 # left
+                last_key_pressed = None
             elif last_key_pressed == 'w':
                 print("Pressed w. Going straight.", flush=True)
                 traj_index = len(traj_list)//2 # straight
+                last_key_pressed = None
             elif last_key_pressed == 'd':
                 print("Pressed d. Going right.", flush=True)
                 traj_index = len(traj_list)-1  # right
+                last_key_pressed = None
             elif last_key_pressed == 'g':      # GO mode
                 print("Pressed g. Using MonoNav.", flush=True)
                 traj_index = max_traj_idx
@@ -334,6 +325,7 @@ def main():
                     np.savetxt(file, row.reshape(1, -1), delimiter=',', fmt='%s')
 
             start_time = time.time()
+            prev_frame_time = None
             while time.time() - start_time <= period:
                 if traj_index is not None:
                     yawrate = amplitudes[traj_index] * np.sin(np.pi/period*(time.time() - start_time))  # rad/s
@@ -341,6 +333,27 @@ def main():
                     yawrate = yawrate * yawrate_gain
                     if FLY_VEHICLE:
                         mavc.send_body_offset_ned_vel(forward_speed, yvel, yaw_rate=yawrate)
+                
+                bgr = cap.read()
+                poll_keyboard() # required for OpenCV window update + keypress capture
+                # get_latest_pose returns (x, y, z, yaw, pitch, roll) - non-blocking from thread
+                pose = get_latest_pose()
+
+                # Optionally transform camera image (undistort + crop) based on config
+                if enable_undistort:
+                    transform_bgr = transform_image(bgr, mtx, dist, optimal_mtx, roi)
+                    transform_rgb = cv2.cvtColor(transform_bgr, cv2.COLOR_BGR2RGB)
+                else:
+                    transform_bgr = bgr
+                    transform_rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+                #transform_rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+
+                # compute depth
+                depth_numpy, depth_colormap = compute_depth(transform_bgr, depth_anything, INPUT_SIZE, make_colormap=True)
+                camera_position = get_pose_matrix(*pose)
+                
+                # integrate the vbg (prefers rgb)
+                vbg.integration_step(transform_rgb, depth_numpy, camera_position)
 
                 if goal_position is not None:
                     dist_to_goal = np.linalg.norm(camera_position[0:-1, -1]-goal_position[0])
@@ -348,41 +361,39 @@ def main():
                         print("Reached goal!")
                         shouldStop = True
                         break
-                time.sleep(0.1) # sleep briefly
-                
-                # integrate the vbg (prefers rgb)
-                vbg.integration_step(transform_rgb, depth_numpy, camera_position)
 
-            if depth_colormap is not None:
-                # Add FPS counter to depth display (based on full frame processing time)
-                dt = time.time() - start_time
-                processing_speed = 1.0 / dt if dt > 0 else 0.0
-                fps_text = ("%0.2f" % (processing_speed,)) + ' fps'
-                textsize = cv2.getTextSize(fps_text, cv2.FONT_HERSHEY_SIMPLEX, 1, 2)[0]
-                cv2.putText(
-                    depth_colormap,
-                    fps_text,
-                    org=(int((depth_colormap.shape[1] - textsize[0] / 2)), int((textsize[1]) / 2)),
-                    fontFace=cv2.FONT_HERSHEY_SIMPLEX,
-                    fontScale=0.5,
-                    thickness=1,
-                    color=(255, 255, 255),
-                )
-                cv2.imshow("Depth", depth_colormap)
-            #cv2.imshow("RGB", transform_bgr)
+                if depth_colormap is not None:
+                    # Add FPS counter to depth display (based on full frame processing time)
+                    now = time.time()
+                    if prev_frame_time is None:
+                        processing_speed = 0.0
+                    else:
+                        frame_dt = now - prev_frame_time
+                        processing_speed = 1.0 / frame_dt if frame_dt > 0 else 0.0
+                    prev_frame_time = now
+                    fps_text = ("%0.2f" % (processing_speed,)) + ' fps'
+                    textsize = cv2.getTextSize(fps_text, cv2.FONT_HERSHEY_SIMPLEX, 1, 2)[0]
+                    cv2.putText(
+                        depth_colormap,
+                        fps_text,
+                        org=(int((depth_colormap.shape[1] - textsize[0] / 2)), int((textsize[1]) / 2)),
+                        fontFace=cv2.FONT_HERSHEY_SIMPLEX,
+                        fontScale=0.5,
+                        thickness=1,
+                        color=(255, 255, 255),
+                    )
+                    cv2.imshow("Depth", depth_colormap)
+                #cv2.imshow("RGB", transform_bgr)
 
-            if save_during_flight:
-                cv2.imwrite(img_dir + '/frame-%06d.rgb.jpg'%(frame_number), bgr)
-                cv2.imwrite(transform_img_dir + '/transform_frame-%06d.rgb.jpg'%(frame_number), transform_bgr)
-                cv2.imwrite(transform_depth_dir + '/' + 'transform_frame-%06d.depth.jpg'%(frame_number), depth_colormap)
-                np.save(transform_depth_dir + '/' + 'transform_frame-%06d.depth.npy'%(frame_number), depth_numpy) # saved in meters
-                np.savetxt(pose_dir + '/frame-%06d.pose.txt'%(frame_number), camera_position)
+                if save_during_flight:
+                    cv2.imwrite(img_dir + '/frame-%06d.rgb.jpg'%(frame_number), bgr)
+                    cv2.imwrite(transform_img_dir + '/transform_frame-%06d.rgb.jpg'%(frame_number), transform_bgr)
+                    cv2.imwrite(transform_depth_dir + '/' + 'transform_frame-%06d.depth.jpg'%(frame_number), depth_colormap)
+                    np.save(transform_depth_dir + '/' + 'transform_frame-%06d.depth.npy'%(frame_number), depth_numpy) # saved in meters
+                    np.savetxt(pose_dir + '/frame-%06d.pose.txt'%(frame_number), camera_position)
 
-            frame_number += 1
+                frame_number += 1
             traj_counter += 1
-
-            if last_key_pressed != 'g':
-                last_key_pressed = None
 
             # In GO mode, update selected trajectory from planner.
             max_traj_idx = choose_primitive(vbg.vbg, camera_position, traj_linesets, goal_position, min_dist2obs, filterYvals, filterWeights, filterTSDF, weight_threshold)
