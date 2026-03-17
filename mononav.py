@@ -334,7 +334,36 @@ def main():
                     np.savetxt(file, row.reshape(1, -1), delimiter=',', fmt='%s')
 
             start_time = time.time()
+<<<<<<< HEAD
             while time.time() - start_time <= period:
+=======
+            while time.time() - start_time < period:
+                bgr = cap.read()
+            # get_latest_pose returns (x, y, z, yaw, pitch, roll) - non-blocking from thread
+                pose = get_latest_pose()
+                camera_position = get_pose_matrix(*pose)
+
+                if goal_position is not None:
+                    dist_to_goal = np.linalg.norm(camera_position[0:-1, -1]-goal_position[0])
+                    if dist_to_goal < min_dist2goal:
+                        print("Reached goal!")
+                        autonomous_mode = False
+                        shouldStop = True
+                        break
+
+                # Optionally transform camera image (undistort + crop) based on config
+                if enable_undistort:
+                    transform_bgr = transform_image(bgr, mtx, dist, optimal_mtx, roi)
+                    transform_rgb = cv2.cvtColor(transform_bgr, cv2.COLOR_BGR2RGB)
+                else:
+                    transform_bgr = bgr
+                    transform_rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+                #transform_rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+
+                # compute depth
+                depth_numpy, depth_colormap = compute_depth(transform_bgr, depth_anything, INPUT_SIZE, make_colormap=True)
+
+>>>>>>> a7b03d6 (Original-like)
                 if traj_index is not None:
                     yawrate = amplitudes[traj_index] * np.sin(np.pi/period*(time.time() - start_time))  # rad/s
                     yvel = yawrate * yvel_gain
@@ -381,8 +410,26 @@ def main():
             frame_number += 1
             traj_counter += 1
 
+<<<<<<< HEAD
             if last_key_pressed != 'g':
                 last_key_pressed = None
+=======
+        # In autonomous GO mode, update selected trajectory from planner.
+            if autonomous_mode:
+                max_traj_idx = choose_primitive(vbg.vbg, camera_position, traj_linesets, goal_position, min_dist2obs, filterYvals, filterWeights, filterTSDF, weight_threshold)
+                if max_traj_idx is None:
+                    traj_index = None
+                    mavc.set_mode('BRAKE')
+                    autonomous_mode = False
+                    time.sleep(0.2) # brief brake before hover to prevent drift during stop
+                    print("[INFO] No safe trajectory found. Hovering in place.", flush=True)
+                else:
+                    if autonomous_mode == False:
+                        mavc.set_mode('GUIDED') # ensure we're in guided mode to accept velocity commands
+                        autonomous_mode = True
+                    print(f"[TRAJ] Selected traj: {max_traj_idx}/{len(traj_list)-1}", flush=True)
+                    traj_index = max_traj_idx
+>>>>>>> a7b03d6 (Original-like)
 
             # In GO mode, update selected trajectory from planner.
             max_traj_idx = choose_primitive(vbg.vbg, camera_position, traj_linesets, goal_position, min_dist2obs, filterYvals, filterWeights, filterTSDF, weight_threshold)

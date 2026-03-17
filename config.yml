@@ -1,5 +1,6 @@
 # Directory Settings
 save_dir_prefix: 'data/mononav-'
+trajlib_dir: "utils/trajlib/" # where to save & retrieve the trajectory library (motion primitives)
 # Camera Settings
 camera_source: 'esp32-cam'                                   # used for naming files
 camera_calibration_path: 'utils/calibration/intrinsics.json' # camera calibration file (for undistortion)
@@ -27,6 +28,7 @@ VoxelBlockGrid:
   trunc_voxel_multiplier: 8.0
   device: None                # "CUDA:0" (faster) or "CPU:0". None for auto-selection (Only selects the first CPU or GPU instance)
 
+<<<<<<< HEAD
 # Planning Settings
 trajlib_dir: "utils/trajlib/" # where to save & retrieve the trajectory library (motion primitives)
 planner_type: "mononav"   # "mononav" or "bendyruler"
@@ -50,6 +52,8 @@ depth_bendy_memory_stride_px: 12   # denser obstacle sampling without being too 
 depth_bendy_memory_max_points: 1200
 depth_bendy_memory_max_depth_m: 3.0
 
+=======
+>>>>>>> a7b03d6 (Original-like)
 # Goal position in RDF frame (metres). 
 # Comment out for undirected exploration.
 goal_position_rdf: # from EKF origin
