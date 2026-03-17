@@ -404,470 +404,119 @@ def choose_primitive(vbg, camera_position, traj_linesets, goal_position, dist_th
     return max_traj_idx
 
 
-# ── Depth-image BendyRuler planner ─────────────────────────────────────────
-#
-# Inspired by ArduPilot's AP_OABendyRuler::search_xy_path() but works
-# directly on a monocular metric depth image instead of a VoxelBlockGrid.
-# No trajectory library is required; the output is a chosen horizontal
-# bearing offset that callers convert to velocity / yaw-rate commands.
+def _extract_obstacle_voxels_numpy(vbg, filterYvals, filterWeights, filterTSDF, weight_threshold):
+    """Return filtered obstacle voxel coordinates as a CPU numpy array."""
+    weights = vbg.attribute("weight").reshape((-1))
+    tsdf = vbg.attribute("tsdf").reshape((-1))
+    voxel_coords, voxel_indices = vbg.voxel_coordinates_and_flattened_indices()
 
-def _wrap_180(angle_deg):
-    """Wrap angle to [-180, 180) degrees."""
-    return (float(angle_deg) + 180.0) % 360.0 - 180.0
+    # Align attributes with voxel coordinate ordering.
+    weights = weights[voxel_indices]
+    tsdf = tsdf[voxel_indices]
 
+    if filterYvals:
+        mask = voxel_coords[:, 1] < -0.3
+        voxel_coords = voxel_coords[mask]
+        weights = weights[mask]
+        tsdf = tsdf[mask]
 
-def _depth_sector_clearance(depth_m, col_lo, col_hi, row_lo, row_hi, percentile=10):
-    """
-    Robust minimum depth (metres) inside a rectangular image sector.
+    if filterWeights:
+        mask = weights > weight_threshold
+        voxel_coords = voxel_coords[mask, :]
+        tsdf = tsdf[mask]
 
-    Uses a low percentile so even a small cluster of near pixels flags an
-    obstacle, mirroring BendyRuler's conservative margin check.
-    """
-    col_lo = int(np.clip(col_lo, 0, depth_m.shape[1] - 1))
-    col_hi = int(np.clip(col_hi, 0, depth_m.shape[1] - 1))
-    row_lo = int(np.clip(row_lo, 0, depth_m.shape[0] - 1))
-    row_hi = int(np.clip(row_hi, 0, depth_m.shape[0] - 1))
-    if col_hi <= col_lo or row_hi <= row_lo:
-        return 0.0
-    sector = depth_m[row_lo:row_hi, col_lo:col_hi]
-    if sector.size == 0:
-        return 0.0
-    return float(np.percentile(sector, percentile))
+    if filterTSDF:
+        mask = tsdf < 0.0
+        voxel_coords = voxel_coords[mask, :]
+
+    return voxel_coords.cpu().numpy()
 
 
-def _bearing_col_range(bearing_deg, half_width_deg, fx, cx, img_width):
-    """
-    Map a horizontal bearing offset (degrees, +right) and half-sweep width to
-    a pixel column range clipped to [0, img_width-1].
-    """
-    lo = fx * np.tan(np.radians(bearing_deg - half_width_deg)) + cx
-    hi = fx * np.tan(np.radians(bearing_deg + half_width_deg)) + cx
-    col_lo = int(np.clip(min(lo, hi), 0, img_width - 1))
-    col_hi = int(np.clip(max(lo, hi), 0, img_width - 1))
-    return col_lo, col_hi
+def _lookahead_points(pts, lookahead_m):
+    """Return the initial segment of trajectory points up to lookahead distance."""
+    if pts.shape[0] <= 1:
+        return pts
+    if lookahead_m is None or lookahead_m <= 0:
+        return pts
+
+    seg_lengths = np.linalg.norm(np.diff(pts, axis=0), axis=1)
+    cumulative = np.concatenate(([0.0], np.cumsum(seg_lengths)))
+    keep = cumulative <= float(lookahead_m)
+    if not np.any(keep):
+        return pts[:1]
+    last_idx = int(np.where(keep)[0][-1])
+    return pts[:max(last_idx + 1, 2)]
 
 
-def _memory_sector_clearance(points_cam, bearing_deg, half_width_deg):
-    """Return the minimum Euclidean distance of remembered points in a bearing sector."""
-    if points_cam is None or len(points_cam) == 0:
-        return np.inf
-
-    pts = np.asarray(points_cam, dtype=np.float32)
-    if pts.ndim != 2 or pts.shape[1] != 3:
-        return np.inf
-
-    forward_mask = pts[:, 2] > 0.0
-    if not np.any(forward_mask):
-        return np.inf
-    pts = pts[forward_mask]
-
-    bearings = np.degrees(np.arctan2(pts[:, 0], pts[:, 2]))
-    sector_mask = np.abs(bearings - float(bearing_deg)) <= float(half_width_deg)
-    if not np.any(sector_mask):
-        return np.inf
-
-    return float(np.min(np.linalg.norm(pts[sector_mask], axis=1)))
-
-
-def project_depth_obstacles_to_camera_points(
-    depth_m,
-    fx,
-    fy,
-    cx,
-    cy,
-    row_frac_lo=0.2,
-    row_frac_hi=0.8,
-    max_depth_m=4.0,
-    stride_px=16,
-    max_points=400,
+def choose_primitive_bendyruler(
+    vbg,
+    camera_position,
+    traj_linesets,
+    goal_position,
+    dist_threshold,
+    filterYvals,
+    filterWeights,
+    filterTSDF,
+    weight_threshold,
+    lookahead_m=5.0,
+    clearance_weight=2.0,
+    goal_weight=1.0,
+    turn_weight=0.2,
 ):
     """
-    Downsample a metric depth image into obstacle points in the camera RDF frame.
+    BendyRuler-style local planner over existing primitive trajectories.
 
-    The result is used as a short-lived obstacle memory for the depth-based
-    BendyRuler planner so hazards remain visible for a short time after they
-    leave the current image.
+    This planner evaluates each primitive by:
+    1) rejecting trajectories that violate minimum clearance,
+    2) preferring higher clearance inside a lookahead window,
+    3) preferring endpoints that progress toward goal,
+    4) softly penalizing large turns from the center primitive.
     """
-    H, W = depth_m.shape[:2]
-    row_lo = int(H * row_frac_lo)
-    row_hi = int(H * row_frac_hi)
-
-    rows = np.arange(row_lo, row_hi, max(int(stride_px), 1), dtype=np.int32)
-    cols = np.arange(0, W, max(int(stride_px), 1), dtype=np.int32)
-    if rows.size == 0 or cols.size == 0:
-        return np.empty((0, 3), dtype=np.float32)
-
-    vv, uu = np.meshgrid(rows, cols, indexing='ij')
-    sampled_depth = depth_m[vv, uu]
-    valid = np.isfinite(sampled_depth) & (sampled_depth > 0.0) & (sampled_depth <= float(max_depth_m))
-    if not np.any(valid):
-        return np.empty((0, 3), dtype=np.float32)
-
-    d = sampled_depth[valid].astype(np.float32)
-    u = uu[valid].astype(np.float32)
-    v = vv[valid].astype(np.float32)
-
-    x = ((u - float(cx)) / float(fx)) * d
-    y = ((v - float(cy)) / float(fy)) * d
-    z = d
-    pts = np.column_stack((x, y, z)).astype(np.float32)
-
-    if pts.shape[0] > int(max_points):
-        idx = np.linspace(0, pts.shape[0] - 1, int(max_points), dtype=np.int32)
-        pts = pts[idx]
-    return pts
-
-
-class TimedObstacleDatabase:
-    """Short-lived obstacle memory stored in world coordinates."""
-
-    def __init__(self, timeout_s=1.0, max_points=1200):
-        self.timeout_s = float(timeout_s)
-        self.max_points = int(max_points)
-        self._points_world = np.empty((0, 3), dtype=np.float32)
-        self._timestamps = np.empty((0,), dtype=np.float64)
-
-    def _prune(self, now_s):
-        if self._timestamps.size == 0:
-            return
-        keep = (now_s - self._timestamps) <= self.timeout_s
-        self._points_world = self._points_world[keep]
-        self._timestamps = self._timestamps[keep]
-
-    def update_from_camera_points(self, camera_points, camera_position, now_s=None):
-        now_s = time.time() if now_s is None else float(now_s)
-        self._prune(now_s)
-        if camera_points is None or len(camera_points) == 0:
-            return
-
-        pts = np.asarray(camera_points, dtype=np.float32)
-        if pts.ndim != 2 or pts.shape[1] != 3:
-            return
-
-        rot = np.asarray(camera_position[:3, :3], dtype=np.float32)
-        trans = np.asarray(camera_position[:3, 3], dtype=np.float32)
-        points_world = (pts @ rot.T) + trans
-
-        self._points_world = np.vstack((self._points_world, points_world))
-        self._timestamps = np.concatenate((self._timestamps, np.full(points_world.shape[0], now_s, dtype=np.float64)))
-
-        if self._points_world.shape[0] > self.max_points:
-            keep_from = self._points_world.shape[0] - self.max_points
-            self._points_world = self._points_world[keep_from:]
-            self._timestamps = self._timestamps[keep_from:]
-
-    def get_points_camera(self, camera_position, now_s=None, max_distance_m=None):
-        now_s = time.time() if now_s is None else float(now_s)
-        self._prune(now_s)
-        if self._points_world.shape[0] == 0:
-            return np.empty((0, 3), dtype=np.float32)
-
-        cam_inv = np.linalg.inv(camera_position)
-        rot = np.asarray(cam_inv[:3, :3], dtype=np.float32)
-        trans = np.asarray(cam_inv[:3, 3], dtype=np.float32)
-        points_cam = (self._points_world @ rot.T) + trans
-
-        keep = points_cam[:, 2] > 0.0
-        if max_distance_m is not None:
-            keep &= np.linalg.norm(points_cam, axis=1) <= float(max_distance_m)
-        return points_cam[keep].astype(np.float32)
-
-
-def depth_bendyruler_plan(
-    depth_m,
-    fx,
-    cx,
-    goal_bearing_deg=0.0,
-    lookahead_m=3.0,
-    safety_margin_m=1.5,
-    bearing_inc_deg=5.0,
-    max_bearing_deg=85.0,
-    row_frac_lo=0.2,
-    row_frac_hi=0.8,
-    prev_bearing=None,
-    bendy_ratio=1.5,
-    bendy_angle=75.0,
-    clearance_percentile=10,
-    memory_points_cam=None,
-):
-    """
-    BendyRuler-style local planner operating directly on a metric depth image.
-
-    Mirrors AP_OABendyRuler::search_xy_path(): sweeps horizontal bearing
-    offsets alternately left/right, performs a two-step clearance check, and
-    applies a bearing-change resistance heuristic to reduce oscillation.
-
-    Parameters
-    ----------
-    depth_m : np.ndarray (H, W) float32
-        Metric depth image in metres from DepthAnythingV2.
-    fx : float
-        Horizontal focal length in pixels.
-    cx : float
-        Principal-point x coordinate in pixels.
-    goal_bearing_deg : float
-        Desired direction in the camera frame (degrees, positive = right,
-        0 = straight ahead).  Pass 0 for undirected / exploration mode.
-    lookahead_m : float
-        Step-1 threshold: a direction passes if sector min-depth >= lookahead_m
-        (≈ OA_BENDYRULER_LOOKAHEAD).
-    safety_margin_m : float
-        Step-2 threshold applied to the three sub-bearings from the lookahead
-        point (≈ _margin_max in BendyRuler).
-    bearing_inc_deg : float
-        Sweep increment in degrees (≈ OA_BENDYRULER_BEARING_INC_XY = 5°).
-    max_bearing_deg : float
-        Maximum search angle left/right (≈ 170° search range at 5° steps).
-    row_frac_lo, row_frac_hi : float
-        Fractional row band of the depth image used for clearance checks
-        (avoids floor at the bottom and sky at the top).
-    prev_bearing : float or None
-        Bearing chosen at the previous planning step (degrees) for the
-        bearing-change resistance heuristic.
-    bendy_ratio : float
-        Clearance ratio below which a large bearing change is resisted
-        (≈ OA_BENDYRULER_CONT_RATIO = 1.5).
-    bendy_angle : float
-        Bearing change (degrees) above which resistance is active
-        (≈ OA_BENDYRULER_CONT_ANGLE = 75°).
-    clearance_percentile : int
-        Depth percentile used as the sector clearance metric.
-
-    Returns
-    -------
-    chosen_bearing_deg : float
-        Horizontal bearing offset (degrees) to steer toward. Positive = right.
-    new_prev_bearing : float
-        Updated hysteresis bearing to be stored and passed back next call.
-    active : bool
-        True if avoidance is redirecting away from straight-ahead (matches
-        BendyRuler's ``active`` flag used for telemetry / logging).
-    best_margin : float
-        Clearance (metres) in the chosen direction.
-    """
-    H, W = depth_m.shape[:2]
-    row_lo = int(H * row_frac_lo)
-    row_hi = int(H * row_frac_hi)
-    half_inc = bearing_inc_deg / 2.0
-
-    best_bearing = None           # best fully-validated direction
-    best_bearing_clearance = -np.inf
-    best_margin = -np.inf         # overall best clearance for fallback
-    best_margin_bearing = 0.0
-
-    n_steps = int(max_bearing_deg / bearing_inc_deg)
-
-    for i in range(n_steps + 1):
-        for side in (0, 1):       # 0 = left (negative), 1 = right (positive)
-            if i == 0 and side == 1:   # don't double-check centre
-                continue
-            bearing_test = float(i * bearing_inc_deg * (1.0 if side == 1 else -1.0))
-
-            col_lo, col_hi = _bearing_col_range(bearing_test, half_inc, fx, cx, W)
-            depth_clearance = _depth_sector_clearance(
-                depth_m, col_lo, col_hi, row_lo, row_hi, clearance_percentile
-            )
-            memory_clearance = _memory_sector_clearance(memory_points_cam, bearing_test, half_inc)
-            clearance = min(depth_clearance, memory_clearance)
-
-            if (clearance > best_margin or
-                    (np.isclose(clearance, best_margin) and
-                     abs(_wrap_180(bearing_test - goal_bearing_deg)) <
-                     abs(_wrap_180(best_margin_bearing - goal_bearing_deg)))):
-                best_margin = clearance
-                best_margin_bearing = bearing_test
-
-            if clearance < lookahead_m:
-                continue
-
-            # ── Step 2: check three sub-bearings at the lookahead distance ──
-            # Mirrors BendyRuler's second-stage {0°, +45°, -45°} fan check.
-            step2_ok = False
-            for delta2 in (0.0, 45.0, -45.0):
-                b2 = bearing_test + delta2
-                c2_lo, c2_hi = _bearing_col_range(b2, half_inc, fx, cx, W)
-                depth_c2 = _depth_sector_clearance(
-                    depth_m, c2_lo, c2_hi, row_lo, row_hi,
-                    min(clearance_percentile + 10, 50),   # slightly more lenient
-                )
-                memory_c2 = _memory_sector_clearance(memory_points_cam, b2, half_inc)
-                c2 = min(depth_c2, memory_c2)
-                if c2 >= safety_margin_m:
-                    step2_ok = True
-                    break
-
-            if not step2_ok:
-                continue
-
-            active_candidate = (i != 0)
-
-            # ── Bearing-change resistance (mirrors resist_bearing_change()) ──
-            final_bearing = bearing_test
-            final_clearance = clearance
-            if (active_candidate and prev_bearing is not None and
-                    abs(_wrap_180(prev_bearing - bearing_test)) > bendy_angle and
-                    bendy_ratio > 0):
-                p_lo, p_hi = _bearing_col_range(
-                    _wrap_180(prev_bearing), half_inc, fx, cx, W
-                )
-                prev_depth_clearance = _depth_sector_clearance(
-                    depth_m, p_lo, p_hi, row_lo, row_hi, clearance_percentile
-                )
-                prev_memory_clearance = _memory_sector_clearance(memory_points_cam, _wrap_180(prev_bearing), half_inc)
-                prev_clearance = min(prev_depth_clearance, prev_memory_clearance)
-                if prev_clearance > 0 and clearance < bendy_ratio * prev_clearance:
-                    # New direction doesn't offer sufficient improvement —
-                    # resist the change and keep the previous bearing.
-                    final_bearing = prev_bearing
-                    final_clearance = prev_clearance
-
-            # Prefer the candidate closest to the goal bearing.
-            final_goal_error = abs(_wrap_180(final_bearing - goal_bearing_deg))
-            best_goal_error = np.inf if best_bearing is None else abs(_wrap_180(best_bearing - goal_bearing_deg))
-            if (best_bearing is None or
-                    final_goal_error < best_goal_error or
-                    (np.isclose(final_goal_error, best_goal_error) and
-                     final_clearance > best_bearing_clearance)):
-                best_bearing = final_bearing
-                best_bearing_clearance = final_clearance
-
-    # ── Determine output ─────────────────────────────────────────────────────
-    if best_bearing is not None:
-        chosen = best_bearing
-        new_prev_bearing = best_bearing
-        active = abs(_wrap_180(chosen)) > bearing_inc_deg / 2.0
-        margin_out = best_bearing_clearance
-    else:
-        # No fully clear path — use best-effort direction (highest margin).
-        chosen = best_margin_bearing
-        new_prev_bearing = best_margin_bearing
-        active = True
-        margin_out = best_margin
-
-    return chosen, new_prev_bearing, active, margin_out
-
-
-def depth_bendyruler_commands(
-    depth_m,
-    fx,
-    cx,
-    goal_bearing_deg=0.0,
-    forward_speed=0.5,
-    yaw_rate_gain=0.8,
-    lateral_gain=0.0,
-    lookahead_m=3.0,
-    safety_margin_m=1.5,
-    bearing_inc_deg=5.0,
-    max_bearing_deg=85.0,
-    row_frac_lo=0.2,
-    row_frac_hi=0.8,
-    prev_bearing=None,
-    bendy_ratio=1.5,
-    bendy_angle=75.0,
-    clearance_percentile=10,
-    memory_points_cam=None,
-):
-    """
-    Full BendyRuler depth planner: convert the chosen bearing into direct
-    body-frame velocity / yaw-rate commands.
-
-    Compatible with ``mavc.send_body_offset_ned_vel(fwd, lat, yaw_rate=yr)``.
-
-    Parameters
-    ----------
-    depth_m : np.ndarray (H, W) float32
-        Metric depth image in metres.
-    fx, cx : float
-        Horizontal focal length and principal-point x (pixels).
-    goal_bearing_deg : float
-        Desired horizontal direction in camera frame (degrees, +right).
-    forward_speed : float
-        Body-x (forward) velocity in m/s when a safe path exists.
-    yaw_rate_gain : float
-        Proportional gain: yaw_rate = gain * chosen_bearing_rad (rad/s).
-    lateral_gain : float
-        Optional gain for body-y lateral velocity to counter sideslip during
-        turns.  Set 0 to disable (default).  Same sign convention as mononav.
-    lookahead_m, safety_margin_m : float
-        Step-1 and step-2 depth clearance thresholds (metres).
-    bearing_inc_deg, max_bearing_deg : float
-        Sweep granularity and range.
-    row_frac_lo, row_frac_hi : float
-        Depth-image row band for clearance checks.
-    prev_bearing : float or None
-        Previous chosen bearing (degrees) for hysteresis.
-    bendy_ratio, bendy_angle : float
-        Bearing-change resistance parameters.
-    clearance_percentile : int
-        Depth percentile used as obstacle clearance metric.
-
-    Returns
-    -------
-    fwd_speed : float
-        Body-x (forward) velocity command (m/s).
-    lat_vel : float
-        Body-y (lateral) velocity command (m/s).
-    yaw_rate : float
-        Yaw-rate command (rad/s, positive = clockwise from above).
-    new_prev_bearing : float
-        Updated bearing state to be stored and passed back next call.
-    active : bool
-        True if avoidance is actively redirecting.
-    margin : float
-        Clearance in the chosen direction (metres).
-    """
-    chosen_deg, new_prev, active, margin = depth_bendyruler_plan(
-        depth_m, fx, cx,
-        goal_bearing_deg=goal_bearing_deg,
-        lookahead_m=lookahead_m,
-        safety_margin_m=safety_margin_m,
-        bearing_inc_deg=bearing_inc_deg,
-        max_bearing_deg=max_bearing_deg,
-        row_frac_lo=row_frac_lo,
-        row_frac_hi=row_frac_hi,
-        prev_bearing=prev_bearing,
-        bendy_ratio=bendy_ratio,
-        bendy_angle=bendy_angle,
-        clearance_percentile=clearance_percentile,
-        memory_points_cam=memory_points_cam,
+    voxel_coords_numpy = _extract_obstacle_voxels_numpy(
+        vbg, filterYvals, filterWeights, filterTSDF, weight_threshold
     )
+    center_idx = len(traj_linesets) // 2
 
-    # No safe path found — hover in place.
-    if margin <= 0:
-        return 0.0, 0.0, 0.0, new_prev, active, margin
+    best_idx = None
+    best_score = -np.inf
 
-    chosen_rad = np.radians(chosen_deg)
-    yaw_rate = yaw_rate_gain * chosen_rad     # proportional yaw toward chosen direction
-    lat_vel = lateral_gain * yaw_rate         # optional lateral bias (same sign as mononav)
+    for traj_idx, traj_lineset in enumerate(traj_linesets):
+        traj_lineset_copy = copy.deepcopy(traj_lineset)
+        traj_lineset_copy.transform(camera_position)
+        pts = np.asarray(traj_lineset_copy.points)
+        if pts.shape[0] == 0:
+            continue
 
-    return float(forward_speed), float(lat_vel), float(yaw_rate), new_prev, active, margin
+        la_pts = _lookahead_points(pts, lookahead_m)
 
+        if voxel_coords_numpy.size > 0:
+            d2 = distance.cdist(voxel_coords_numpy, la_pts, "sqeuclidean")
+            nearest_clearance = float(np.sqrt(np.min(d2)))
+        else:
+            nearest_clearance = np.inf
 
-def goal_bearing_cam_deg(camera_position, goal_edm):
-    """
-    Compute horizontal bearing to goal in the camera/body frame.
+        if nearest_clearance <= dist_threshold:
+            continue
 
-    Parameters
-    ----------
-    camera_position : np.ndarray (4, 4)
-        Pose matrix from ``get_pose_matrix()`` (RDF frame used by Open3D /
-        VoxelBlockGrid: X=right, Y=down, Z=front).
-    goal_edm : array-like (3,) or None
-        Goal position in the VBG internal frame [E, D, N] as stored in
-        ``goal_position[0]`` in mononav.py.  Pass ``None`` for undirected mode
-        (returns 0.0, i.e., aim straight ahead).
+        score = 0.0
+        if np.isfinite(nearest_clearance):
+            score += float(clearance_weight) * nearest_clearance
+        else:
+            score += float(clearance_weight) * (dist_threshold + 2.0)
 
-    Returns
-    -------
-    float
-        Bearing in degrees; positive = right, 0 = straight ahead.
-    """
-    if goal_edm is None:
-        return 0.0
-    g = np.array([float(goal_edm[0]), float(goal_edm[1]), float(goal_edm[2]), 1.0])
-    g_cam = np.linalg.inv(camera_position) @ g
-    # In the RDF camera frame: x_cam = right, z_cam = forward.
-    return float(np.degrees(np.arctan2(float(g_cam[0]), float(g_cam[2]))))
+        if goal_position is not None:
+            goal_np = np.asarray(goal_position).reshape(-1, 3)
+            d2_goal = distance.cdist(goal_np, la_pts, "sqeuclidean")
+            min_goal_dist = float(np.sqrt(np.min(d2_goal)))
+            score -= float(goal_weight) * min_goal_dist
+
+        score -= float(turn_weight) * abs(traj_idx - center_idx)
+
+        if score > best_score:
+            best_score = score
+            best_idx = traj_idx
+
+    return best_idx
 
 
 """
@@ -1026,19 +675,11 @@ def _pose_thread_worker():
             _pose_latest = {'x': x, 'y': y, 'z': z, 'yaw': yaw, 'pitch': pitch, 'roll': roll}
         time.sleep(sleep_time)
 
-<<<<<<< HEAD
-def start_pose_thread(frequency_hz=15):
-    """Start the background pose thread at specified frequency.
-    
-    Args:
-        frequency_hz: Update frequency in Hz (default: 15.0)
-=======
 def start_pose_thread(frequency_hz):
     """Start the background pose thread at specified frequency.
     
     Args:
         frequency_hz: Update frequency in Hz
->>>>>>> 5b0ee56 (Original-like)
     """
     global _pose_thread, _pose_thread_stop, _pose_thread_hz
     
