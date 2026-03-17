@@ -9,7 +9,7 @@ Also provides functions to receive pose data from the copter.
 from pymavlink import mavutil
 import time
 
-FLTMODES = {'GUIDED': 4, 'LOITER':5, 'LAND':9, 'BRAKE':17, 'SmartRTL':21}
+FLTMODES = {'GUIDED': 4, 'LOITER':5, 'LAND':9, 'BRAKE':17, 'SMART_RTL':21}
 
 DEBUG = True                                                # Whether to print debug messages
 
@@ -65,15 +65,33 @@ def set_mode(mode_name):
     """
     if mode_name not in FLTMODES:
         printd(f"Unknown mode: {mode_name}")
-        mode_name = "LAND"
-    mode_id = FLTMODES[mode_name]
-    drone.mav.set_mode_send(
-        drone.target_system,
-        mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED,
-        mode_id
-    )
-    printd(f"Switching to {mode_name}...")
-    time.sleep(0.1)
+    else:
+        mode_id = FLTMODES[mode_name]
+        drone.mav.set_mode_send(
+            drone.target_system,
+            mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED,
+            mode_id
+        )
+        printd(f"Switching to {mode_name}...")
+
+
+def get_mode():
+    while True:
+        msg = drone.recv_match(type='HEARTBEAT', blocking=True)
+
+        if msg is None:
+            continue
+
+        if msg.get_srcComponent() != mavutil.mavlink.MAV_COMP_ID_AUTOPILOT1:
+            continue
+
+        mode_id = msg.custom_mode
+
+        for name, value in FLTMODES.items():
+            if value == mode_id:
+                return name
+
+        return f"UNKNOWN({mode_id})"
 
 def en_pose_stream(freq=20):
     """
