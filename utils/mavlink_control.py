@@ -35,11 +35,8 @@ def connect_drone(IP, baud=115200):
     ex: "udpout:192.168.199.51:14550" -> Similar functionality as UDPCl in Mission Planner if you first send out a heartbeat.
     """
     global drone
-    drone = None
-    while not drone:
-        drone = mavutil.mavlink_connection(IP, baud, autoreconnect=True)
-        time.sleep(0.05)
-    printd("Connected")
+    drone = mavutil.mavlink_connection(IP, baud, autoreconnect=True)
+    time.sleep(0.05)
     printd("Waiting for heartbeat...")
     while not drone.wait_heartbeat(timeout=1):
         send_heartbeat()

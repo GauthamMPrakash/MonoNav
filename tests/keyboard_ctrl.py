@@ -28,12 +28,19 @@ Run this script independently when you want to manually fly the drone.
 ALWAYS KEEP IN MIND THE POSSIBILITY OF FAILURE TO RESPECT THE BOUNDS AS MAY BE THE CASE IF THE SENSORS 
 ARE BAD OR EKF FAILS. SO ALWAYS FLY WITH CAUTION!
 """
-bl, br, bf, bb = -0.2, 0.2, None, -0.5
+bl, br, bf, bb = -0.3, 0.3, 10, -1
 # The example values above create a safety bound with 20 cm to either side, no forward bound, and a backward bound of 50 cm. Adjust as needed for your environment and testing purposes.
 
+import os
+import sys
 import time
 from pynput import keyboard
 from pynput.keyboard import Key
+
+# Ensure the repository root is on sys.path so we can import `utils` from anywhere
+repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
+if repo_root not in sys.path:
+    sys.path.insert(0, repo_root)
 
 import numpy as np
 from pymavlink import mavutil
@@ -43,7 +50,7 @@ import utils.mavlink_control as mavc
 # ---------------------------------------------------------------------------
 # configuration constants
 # ---------------------------------------------------------------------------
-CONFIG_FILE = 'config.yml'
+CONFIG_FILE = '../config.yml'
 # single speed parameter used for both forward/backward and strafe
 SPEED = 0.5              # horizontal speed (m/s); adjustable with arrow keys
 YAW_RATE = 70.0          # deg/s when pressing 'q' or 'e'; adjustable with left/right arrows
@@ -155,7 +162,7 @@ def main():
     mavc.connect_drone(config['IP'], baud=config.get('baud', 115200))
     mavc.set_ekf_origin(EKF_LAT, EKF_LON)
     mavc.reboot_if_EKF_origin()  # Reset EKF origin to ensure the safety bounds work as intended
-    mavc.en_pose_stream(20)
+    mavc.en_pose_stream(15)
     init_heading = mavc.heading_offset_init()
     print(f"[KB] initial heading offset: {np.rad2deg(init_heading):.1f} deg")
     print("[KB] vehicle should now be in GUIDED mode")
@@ -201,7 +208,7 @@ def main():
                 mavc.takeoff(alt)
                 _takeoff_requested = False
                 takeoff_in_progress = True
-                start_pose_thread(15)
+                start_pose_thread(10)
             
             if _land_requested:
                 print("[KB] switching to LAND mode")

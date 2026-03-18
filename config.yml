@@ -1,6 +1,7 @@
 # Directory Settings
 save_dir_prefix: 'data/mononav-'
 trajlib_dir: "utils/trajlib/" # where to save & retrieve the trajectory library (motion primitives)
+
 # Camera Settings
 camera_source: 'esp32-cam'                                   # used for naming files
 camera_calibration_path: 'utils/calibration/intrinsics.json' # camera calibration file (for undistortion)
@@ -21,39 +22,13 @@ save_during_flight : False     # Whether to save images and reconstructions duri
 filterYvals: True             # this helps filter out the ground / ceiling (for planar navigation)
 filterWeights: True           # this helps filter out low-weight voxels
 filterTSDF: True
-weight_threshold: 4           # determine the weight threshold for filtering (higher threshold -> fewer points)
+weight_threshold: 5         # determine the weight threshold for filtering (higher threshold -> fewer points)
 VoxelBlockGrid:
   depth_scale: 1000.0         # 1000.0 is default (mm to m), scale factor for depth values during integration
   depth_max: 10.0             # max depth to include in the reconstruction
-  trunc_voxel_multiplier: 8.0
+  trunc_voxel_multiplier: 7.0
   device: None                # "CUDA:0" (faster) or "CPU:0". None for auto-selection (Only selects the first CPU or GPU instance)
 
-<<<<<<< HEAD
-# Planning Settings
-trajlib_dir: "utils/trajlib/" # where to save & retrieve the trajectory library (motion primitives)
-planner_type: "mononav"   # "mononav" or "bendyruler"
-
-# Direct depth-image BendyRuler settings
-depth_bendy_lookahead_m: 2.0      # tuned from min_dist2obs=0.7 -> ~3x clearance horizon
-depth_bendy_safety_margin_m: 0.9  # slightly above min_dist2obs to account for depth noise
-depth_bendy_bearing_inc_deg: 5.0
-depth_bendy_max_bearing_deg: 60.0 # closer to AP default behavior, avoids extreme side turns
-depth_bendy_row_frac_lo: 0.25     # ignore more of the ceiling / upper clutter
-depth_bendy_row_frac_hi: 0.75     # ignore more of the floor for planar flight
-depth_bendy_bendy_ratio: 1.5
-depth_bendy_bendy_angle: 60.0
-depth_bendy_clearance_percentile: 15
-
-# Short-lived obstacle memory for bendyrule.
-# Keeps recent depth obstacles for a short time after they leave the image.
-depth_bendy_memory_enable: True
-depth_bendy_memory_timeout_s: 1  # short persistence at forward_speed=0.5 m/s
-depth_bendy_memory_stride_px: 12   # denser obstacle sampling without being too heavy
-depth_bendy_memory_max_points: 1200
-depth_bendy_memory_max_depth_m: 3.0
-
-=======
->>>>>>> a7b03d6 (Original-like)
 # Goal position in RDF frame (metres). 
 # Comment out for undirected exploration.
 goal_position_rdf: # from EKF origin
@@ -61,7 +36,7 @@ goal_position_rdf: # from EKF origin
   - -1.3   # Down
   - 4   # Forward
 
-min_dist2obs: 0.5             # minimum acceptable distance from obstacles, meters (for primitive selection)
+min_dist2obs: 0.8             # minimum acceptable distance from obstacles, meters (for primitive selection)
 min_dist2goal: 1.0            # termination condition for reaching the goal, meters
 
 # Drone Settings

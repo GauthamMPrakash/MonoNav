@@ -61,12 +61,6 @@ if ENCODER is None:
     ENCODER = CHECKPOINT.split('_')[-1].split('.')[0]
     print(f"[warning] DA2_ENCODER not set in config, parsed '{ENCODER}' from checkpoint name")
 DEVICE = 'cuda:0' if torch.cuda.is_available() else 'cpu'
-DA2_ENABLE_AUTOCAST = bool(config.get('DA2_ENABLE_AUTOCAST', True))
-DA2_AUTOCAST_DTYPE = str(config.get('DA2_AUTOCAST_DTYPE', 'float16'))
-DA2_USE_HALF_MODEL = bool(config.get('DA2_USE_HALF_MODEL', False))
-DA2_CHANNELS_LAST = bool(config.get('DA2_CHANNELS_LAST', True))
-DA2_FAST_RESIZE = bool(config.get('DA2_FAST_RESIZE', True))
-DA2_CPU_THREADS = config.get('DA2_CPU_THREADS', None)
 
 IP = config['IP']                      # dronebridge IP
 height = config['height']
@@ -95,26 +89,10 @@ model_configs = {
 depth_anything = DepthAnythingV2(**{**model_configs[ENCODER], 'max_depth': DEPTH_RANGE_M[1]})
 depth_anything.load_state_dict(torch.load(CHECKPOINT, map_location=DEVICE))
 depth_anything = depth_anything.to(DEVICE).eval()
-
-if torch.cuda.is_available():
-    torch.backends.cudnn.benchmark = True
-    torch.backends.cuda.matmul.allow_tf32 = True
-    torch.backends.cudnn.allow_tf32 = True
-elif DA2_CPU_THREADS is not None:
-    torch.set_num_threads(int(DA2_CPU_THREADS))
-
-runtime_cfg = depth_anything.configure_runtime(
-    use_autocast=DA2_ENABLE_AUTOCAST,
-    autocast_dtype=DA2_AUTOCAST_DTYPE,
-    use_channels_last=DA2_CHANNELS_LAST,
-    use_half_precision_model=DA2_USE_HALF_MODEL,
-    fast_resize=DA2_FAST_RESIZE,
-)
 model_device = next(depth_anything.parameters()).device
 
 print(f"[device] torch.cuda.is_available()={torch.cuda.is_available()}")
 print(f"[device] selected DEVICE={DEVICE}, model_device={model_device}")
-print(f"[device] runtime_cfg={runtime_cfg}")
 if torch.cuda.is_available():
     print(f"[device] cuda_name={torch.cuda.get_device_name(torch.cuda.current_device())}")
 if model_device.type != 'cuda' and torch.cuda.is_available():
@@ -142,25 +120,13 @@ obstacle_sender_stop_event = threading.Event()
 # Event and thread for periodic timesync calls
 timesync_stop_event = threading.Event()
 
-# Intrinsics for undistortion (optional)
-camera_calibration_path = config.get('camera_calibration_path')
-enable_undistort = config.get('enable_undistort', True)
-if enable_undistort and camera_calibration_path:
-    mtx, dist, optimal_mtx, roi = get_calibration_values(camera_calibration_path) # for the robot's camera
-else:
-    mtx = dist = optimal_mtx = roi = None
-
-# compute fusion intrinsics if we have a valid ROI
-if roi is not None:
-    fusion_intrinsics = get_cropped_intrinsics(optimal_mtx, roi)
-else:
-    fusion_intrinsics = None
-
-# retrieve calibration resolution if available (used elsewhere?)
-if camera_calibration_path:
-    calib_width, calib_height = get_calibration_resolution(camera_calibration_path)
-else:
-    calib_width = calib_height = None
+# Intrinsics for undistortion
+camera_calibration_path = config['camera_calibration_path']
+mtx, dist, optimal_mtx, roi = get_calibration_values(camera_calibration_path) # for the robot's camera
+calib_width, calib_height = get_calibration_resolution(camera_calibration_path)
+fusion_intrinsics = get_cropped_intrinsics(optimal_mtx, roi)
+# Whether to apply the undistort/warp transform to incoming frames
+apply_undistort_transform = config.get('apply_undistort_transform', True)
 
 # Initialize VoxelBlockGrid
 depth_scale = config['VoxelBlockGrid']['depth_scale']
@@ -168,6 +134,8 @@ obstacle_depth_scale_m_per_unit = 1.0 / float(depth_scale)
 depth_max = config['VoxelBlockGrid']['depth_max']
 trunc_voxel_multiplier = config['VoxelBlockGrid']['trunc_voxel_multiplier']
 weight_threshold = config['weight_threshold'] # for planning and visualization (!! important !!)
+# Use cropped intrinsics for VoxelBlockGrid from the start
+cropped_mtx = get_cropped_intrinsics(optimal_mtx, roi)
 if config['VoxelBlockGrid']['device'] != "None": 
     device = config['VoxelBlockGrid']['device']
 else:
@@ -299,8 +267,8 @@ def find_obstacle_line_height():
     # Sanity check
     if obstacle_line_height < 0:
         obstacle_line_height = 0
-    elif obstacle_line_height >= DEPTH_HEIGHT:
-        obstacle_line_height = DEPTH_HEIGHT - 1
+    elif obstacle_line_height > DEPTH_HEIGHT:
+        obstacle_line_height = DEPTH_HEIGHT
     
     return obstacle_line_height
 
@@ -308,17 +276,6 @@ def find_obstacle_line_height():
 def set_obstacle_distance_params_from_intrinsics(camera_matrix, width, height):
     global angle_offset, camera_facing_angle_degree, increment_f
     global depth_hfov_deg, depth_vfov_deg
-    # If no camera intrinsics are available (e.g., undistort disabled),
-    # fall back to reasonable default FOV assumptions so obstacle-distance
-    # messaging can still operate.
-    if camera_matrix is None:
-        mavc.printd("No camera intrinsics available; using fallback FOV values")
-        # Common approximate FOV for many small RGB sensors; conservative defaults
-        depth_hfov_deg = 62.2
-        depth_vfov_deg = 48.8
-        angle_offset = camera_facing_angle_degree - (depth_hfov_deg / 2)
-        increment_f = depth_hfov_deg / distances_array_length
-        return
 
     fx = camera_matrix[0, 0]
     fy = camera_matrix[1, 1]
@@ -403,34 +360,17 @@ def _timesync_loop(period_s, stop_event):
             stop_event.wait(sleep_time)
 
 def save_and_visualize_vbg(vbg, npz_save_filename, weight_threshold):
-    # Attempt to save VoxelBlockGrid if the target directory exists; if not,
-    # skip saving but still extract & visualize the point cloud so the user
-    # can inspect the reconstruction even when file saving is disabled.
-    try:
-        save_dir = os.path.dirname(npz_save_filename) if npz_save_filename else None
-        if save_dir and os.path.isdir(save_dir):
-            mavc.printd(" Saving VoxelBlockGrid to {}...".format(npz_save_filename))
-            try:
-                vbg.vbg.save(npz_save_filename)
-                mavc.printd(" VoxelBlockGrid saved successfully")
-            except Exception as e:
-                mavc.printd(f"[warning] failed to save VoxelBlockGrid: {e}")
-        else:
-            mavc.printd(" Save directory not present or saving disabled; skipping VBG file save")
-    except Exception as e:
-        mavc.printd(f"[warning] exception while attempting to save VBG: {e}")
+    mavc.printd(" Saving VoxelBlockGrid to {}...".format(npz_save_filename))
+    vbg.vbg.save(npz_save_filename)
+    mavc.printd(" VoxelBlockGrid saved successfully")
 
-    # Always attempt to extract and visualize the point cloud (do not fail here)
-    try:
-        mavc.printd(" Extracting and visualizing point cloud...")
-        pcd = vbg.vbg.extract_point_cloud(weight_threshold)
-        pcd_cpu = pcd.cpu()
-        pcd_legacy = pcd_cpu.to_legacy()
-        num_points = len(pcd_legacy.points)
-        mavc.printd("Point cloud has {} points (weight_threshold={})".format(num_points, weight_threshold))
-        visualize_pointcloud(pcd_legacy)
-    except Exception as e:
-        mavc.printd(f"[warning] failed to extract/visualize point cloud: {e}")
+    mavc.printd(" Extracting and visualizing point cloud...")
+    pcd = vbg.vbg.extract_point_cloud(weight_threshold)
+    pcd_cpu = pcd.cpu()
+    pcd_legacy = pcd_cpu.to_legacy()
+    num_points = len(pcd_legacy.points)
+    mavc.printd("Point cloud has {} points (weight_threshold={})".format(num_points, weight_threshold))
+    visualize_pointcloud(pcd_legacy)
 
 # MAIN MONONAV CONTROL LOOP
 def main():
@@ -491,13 +431,10 @@ def main():
             scale_y = DEPTH_HEIGHT / calib_height
             if abs(scale_x - 1.0) > 1e-6 or abs(scale_y - 1.0) > 1e-6:
                 mavc.printd(f"Scaling intrinsics: {calib_width}x{calib_height} → {DEPTH_WIDTH}x{DEPTH_HEIGHT}")
-        # Update VoxelBlockGrid with adjusted intrinsics (if ROI available)
-        if roi is not None:
-            vbg_intrinsics = get_cropped_intrinsics(optimal_mtx, roi)
-            vbg.intrinsic_matrix = vbg_intrinsics
-            vbg.depth_intrinsic = o3d.core.Tensor(vbg_intrinsics, o3d.core.Dtype.Float64)
-        else:
-            mavc.printd("No ROI available; skipping cropped intrinsics update")
+        # Update VoxelBlockGrid with adjusted intrinsics
+        vbg_intrinsics = get_cropped_intrinsics(optimal_mtx, roi)
+        vbg.intrinsic_matrix = vbg_intrinsics
+        vbg.depth_intrinsic = o3d.core.Tensor(vbg_intrinsics, o3d.core.Dtype.Float64)
 
     else:
         raise RuntimeError("Unable to read first frame from camera")
@@ -526,18 +463,12 @@ def main():
     # to match camera_position[0:-1, -1] from get_pose_matrix().
     print("Goal position (RDF):", goal_position)
     if goal_position is not None:
-        # convert user-specified RDF goal into NED frame
-        goal_position_ned = np.array(rdf_goal_to_ned(goal_position[0], goal_position[1], goal_position[2], hdg))
-        print(f"Goal position (NED): {goal_position_ned}")
-        # we keep a copy in NED for MAVLink commands
-        # but camera_position (from get_pose_matrix) is expressed in EDN order
-        # (east, down, north) because of the internal permutation in get_pose_matrix.
-        # to compute distances we convert the goal to EDN as well.
-        goal_position = np.array([goal_position_ned[1], goal_position_ned[2], goal_position_ned[0]])
-        # goal_position variable now holds the EDN version; shape (3,)
-    else:
-        goal_position_ned = None
-    mavc.printd(f"Heading offset : {hdg*180/np.pi}")
+        goal_position = np.array(
+            rdf_goal_to_ned(goal_position[0], goal_position[1], goal_position[2], hdg)
+        )
+        print(f"Goal position (NED): {goal_position}")
+        goal_position = np.array([goal_position[1], goal_position[2], goal_position[0]]).reshape(1, 3)
+    mavc.printd(f"Heading offset : {mavc.heading_offset*180/np.pi}")
 
     print("\n=== Keyboard Controls ===")
     if FLY_VEHICLE:
@@ -563,16 +494,12 @@ def main():
         with vehicle_pose_lock:
             vehicle_pitch_rad = pitch_rad
         camera_position = get_pose_matrix(pos_x, pos_y, pos_z, vehicle_yaw_rad, pitch_rad, vehicle_roll_rad)
-        # extract translation component (x,y,z) from 4x4 pose for distance checks
-        cam_xyz = camera_position[:3, 3]
 
-        # apply undistort/crop only if enabled in config
-        if config.get("enable_undistort", True):
+        if apply_undistort_transform and mtx is not None and dist is not None and optimal_mtx is not None and roi is not None:
             transform_bgr = transform_image(bgr, mtx, dist, optimal_mtx, roi)
-            transform_rgb = cv2.cvtColor(transform_bgr, cv2.COLOR_BGR2RGB)
         else:
             transform_bgr = bgr
-            transform_rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+        transform_rgb = cv2.cvtColor(transform_bgr, cv2.COLOR_BGR2RGB)
 
         depth_mat, depth_colormap = compute_depth(transform_bgr, depth_anything, INPUT_SIZE)
 
@@ -629,14 +556,11 @@ def main():
                 # Send position target only once when entering goal navigation mode
                 if not goal_nav_active:
                     print("Pressed g. Using BendyRuler navigation to goal.")
-                    # send value in true NED order: north, east, down.
-                    # use goal_position_ned computed earlier rather than EDN copy.
-                    mavc.send_local_ned_pos(goal_position_ned[0], goal_position_ned[1], goal_position_ned[2])
+                    mavc.send_local_ned_pos(goal_position[0, 2], goal_position[0, 0], goal_position[0, 1]) # remember, goal_position is now in EDN
                     goal_nav_active = True
                 
                 # Check distance to goal (both in NED frame after heading correction)
-                # cam_xyz is in EDN (east, down, north); goal_position is the EDN goal.
-                dist_to_goal = np.linalg.norm(cam_xyz - goal_position)
+                dist_to_goal = np.linalg.norm(camera_position[0:-1, -1] - goal_position)
                 if dist_to_goal <= min_dist2goal:
                     print("Reached goal!")
                     shouldStop = True

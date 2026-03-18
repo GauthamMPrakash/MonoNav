@@ -1,4 +1,4 @@
-"""
+r"""
   __  __                   _   _             
  |  \/  | ___  _ __   ___ | \ | | __ ___   __
  | |\/| |/ _ \| '_ \ / _ \|  \| |/ _` \ \ / /
@@ -220,12 +220,12 @@ def get_pose_matrix(pos_x, pos_y, pos_z, vehicle_yaw_rad, vehicle_pitch_rad, veh
     sp, cp = m.sin(vehicle_pitch_rad), m.cos(vehicle_pitch_rad)
     sy, cy = m.sin(vehicle_yaw_rad), m.cos(vehicle_yaw_rad)
 
-    # Construct the rotation matrix directly using NumPy for efficiency
+    # NED->EDN (considered as RDF for Open3D) basis reorder
     pose = np.array([
-        [cy * cp, cy * sp * sr - sy * cr, cy * sp * cr + sy * sr, pos_y],  # Row 0
-        [sy * cp, sy * sp * sr + cy * cr, sy * sp * cr - cy * sr, pos_z],  # Row 1
-        [-sp,     cp * sr,               cp * cr,                 pos_x],  # Row 2
-        [0,       0,                     0,                           1]   # Homogeneous row
+        [sy*sp*sr + cy*cr, sy*sp*cr - cy*sr, sy*cp, pos_y],
+        [cp*sr,            cp*cr,            -sp,   pos_z],
+        [cy*sp*sr - sy*cr, cy*sp*cr + sy*sr, cy*cp, pos_x],
+        [0,           0,           0,           1]
     ])
 
     return pose
@@ -285,7 +285,7 @@ def get_traj_linesets(traj_list):
     for traj in traj_list:
         # traj_dict = {key: traj[key] for key in traj.files}
         z_tsdf = traj['x_sample']
-        x_tsdf = traj['y_sample']
+        x_tsdf = -traj['y_sample']
         points = []
         lines = []
         for i in range(len(x_tsdf)):
@@ -308,9 +308,6 @@ def get_traj_linesets(traj_list):
 MonoNav Planner: Return the chosen trajectory index given the current position, current reconstruction, trajectory library, and goal position.
 """
 def choose_primitive(vbg, camera_position, traj_linesets, goal_position, dist_threshold, filterYvals, filterWeights, filterTSDF, weight_threshold):
-
-    # Boolean for stopping criteria
-    shouldStop = False
 
     # Get weights and tsdf values from the voxel block grid
     weights = vbg.attribute("weight").reshape((-1))
@@ -363,33 +360,33 @@ def choose_primitive(vbg, camera_position, traj_linesets, goal_position, dist_th
         traj_lineset_copy = copy.deepcopy(traj_linset)
         traj_lineset_copy.transform(camera_position) # transform the lineset (copy) to the camera position
         pts = np.asarray(traj_lineset_copy.points) # meters # extract the points from the lineset
-        tmp = distance.cdist(voxel_coords_numpy, pts, "sqeuclidean") # compute the distance between all voxels and all points in the trajectory
-        
-        # Guard against empty distance matrix (e.g., no voxels mapped yet)
-        if tmp.size == 0:
-            # No voxels in the scene; allow this trajectory
-            if goal_position is not None:
-                # With a goal, prefer trajectories; just use the first safe one
-                if max_traj_idx is None:
-                    max_traj_idx = traj_idx
-            else:
-                # No goal, just pick the first trajectory
-                if max_traj_idx is None:
-                    max_traj_idx = traj_idx
+
+        # Skip malformed trajectories with no sampled points.
+        if pts.size == 0:
             continue
-        
-        voxel_idx, pt_idx = np.unravel_index(np.argmin(tmp), tmp.shape) # extract indices of the nearest voxel to and nearest point in the trajectory
-        nearest_voxel_dist = np.sqrt(tmp[voxel_idx, pt_idx])
-        #mavc.printd(f"traj {traj_idx}: nearest_obstacle={nearest_voxel_dist:.3f}m (threshold={dist_threshold}m)")
+
+        # If no obstacle voxels are available yet, treat trajectory as clear.
+        if voxel_coords_numpy.size == 0:
+            nearest_voxel_dist = np.inf
+        else:
+            tmp = distance.cdist(voxel_coords_numpy, pts, "sqeuclidean") # compute the distance between all voxels and all points in the trajectory
+            if tmp.size == 0:
+                nearest_voxel_dist = np.inf
+            else:
+                voxel_idx, pt_idx = np.unravel_index(np.argmin(tmp), tmp.shape) # extract indices of the nearest voxel to and nearest point in the trajectory
+                nearest_voxel_dist = np.sqrt(tmp[voxel_idx, pt_idx])
+
         if nearest_voxel_dist > dist_threshold:
             # the trajectory meets the dist_threshold criterion
             if goal_position is not None:
                 # the trajectory satisfies the dist_threshold; let's compute the goal score
                 tmp_to_goal = distance.cdist(goal_position, pts, "sqeuclidean")
+                if tmp_to_goal.size == 0:
+                    continue
                 dst_to_goal = np.sqrt(np.min(tmp_to_goal))
                 if dst_to_goal < min_goal_score:
                     # we have a trajectory that gets us closer to the goal
-                    #mavc.printd("traj %d gets us closer to the goal: %f"%(traj_idx, dst_to_goal))
+                    print("[TRAJ] traj %d gets us closer to the goal: %f"%(traj_idx, dst_to_goal))
                     max_traj_idx = traj_idx
                     min_goal_score = dst_to_goal
             else:
@@ -399,125 +396,7 @@ def choose_primitive(vbg, camera_position, traj_linesets, goal_position, dist_th
                     max_traj_idx = traj_idx
                     max_traj_score = nearest_voxel_dist
 
-    # Do not force an immediate stop here. Let the caller (`mononav.py`) handle
-    # transient cases where `max_traj_idx` is None (e.g., hover and retry).
     return max_traj_idx
-
-
-def _extract_obstacle_voxels_numpy(vbg, filterYvals, filterWeights, filterTSDF, weight_threshold):
-    """Return filtered obstacle voxel coordinates as a CPU numpy array."""
-    weights = vbg.attribute("weight").reshape((-1))
-    tsdf = vbg.attribute("tsdf").reshape((-1))
-    voxel_coords, voxel_indices = vbg.voxel_coordinates_and_flattened_indices()
-
-    # Align attributes with voxel coordinate ordering.
-    weights = weights[voxel_indices]
-    tsdf = tsdf[voxel_indices]
-
-    if filterYvals:
-        mask = voxel_coords[:, 1] < -0.3
-        voxel_coords = voxel_coords[mask]
-        weights = weights[mask]
-        tsdf = tsdf[mask]
-
-    if filterWeights:
-        mask = weights > weight_threshold
-        voxel_coords = voxel_coords[mask, :]
-        tsdf = tsdf[mask]
-
-    if filterTSDF:
-        mask = tsdf < 0.0
-        voxel_coords = voxel_coords[mask, :]
-
-    return voxel_coords.cpu().numpy()
-
-
-def _lookahead_points(pts, lookahead_m):
-    """Return the initial segment of trajectory points up to lookahead distance."""
-    if pts.shape[0] <= 1:
-        return pts
-    if lookahead_m is None or lookahead_m <= 0:
-        return pts
-
-    seg_lengths = np.linalg.norm(np.diff(pts, axis=0), axis=1)
-    cumulative = np.concatenate(([0.0], np.cumsum(seg_lengths)))
-    keep = cumulative <= float(lookahead_m)
-    if not np.any(keep):
-        return pts[:1]
-    last_idx = int(np.where(keep)[0][-1])
-    return pts[:max(last_idx + 1, 2)]
-
-
-def choose_primitive_bendyruler(
-    vbg,
-    camera_position,
-    traj_linesets,
-    goal_position,
-    dist_threshold,
-    filterYvals,
-    filterWeights,
-    filterTSDF,
-    weight_threshold,
-    lookahead_m=5.0,
-    clearance_weight=2.0,
-    goal_weight=1.0,
-    turn_weight=0.2,
-):
-    """
-    BendyRuler-style local planner over existing primitive trajectories.
-
-    This planner evaluates each primitive by:
-    1) rejecting trajectories that violate minimum clearance,
-    2) preferring higher clearance inside a lookahead window,
-    3) preferring endpoints that progress toward goal,
-    4) softly penalizing large turns from the center primitive.
-    """
-    voxel_coords_numpy = _extract_obstacle_voxels_numpy(
-        vbg, filterYvals, filterWeights, filterTSDF, weight_threshold
-    )
-    center_idx = len(traj_linesets) // 2
-
-    best_idx = None
-    best_score = -np.inf
-
-    for traj_idx, traj_lineset in enumerate(traj_linesets):
-        traj_lineset_copy = copy.deepcopy(traj_lineset)
-        traj_lineset_copy.transform(camera_position)
-        pts = np.asarray(traj_lineset_copy.points)
-        if pts.shape[0] == 0:
-            continue
-
-        la_pts = _lookahead_points(pts, lookahead_m)
-
-        if voxel_coords_numpy.size > 0:
-            d2 = distance.cdist(voxel_coords_numpy, la_pts, "sqeuclidean")
-            nearest_clearance = float(np.sqrt(np.min(d2)))
-        else:
-            nearest_clearance = np.inf
-
-        if nearest_clearance <= dist_threshold:
-            continue
-
-        score = 0.0
-        if np.isfinite(nearest_clearance):
-            score += float(clearance_weight) * nearest_clearance
-        else:
-            score += float(clearance_weight) * (dist_threshold + 2.0)
-
-        if goal_position is not None:
-            goal_np = np.asarray(goal_position).reshape(-1, 3)
-            d2_goal = distance.cdist(goal_np, la_pts, "sqeuclidean")
-            min_goal_dist = float(np.sqrt(np.min(d2_goal)))
-            score -= float(goal_weight) * min_goal_dist
-
-        score -= float(turn_weight) * abs(traj_idx - center_idx)
-
-        if score > best_score:
-            best_score = score
-            best_idx = traj_idx
-
-    return best_idx
-
 
 """
 Load config.yml file
@@ -653,7 +532,13 @@ def visualize_pointcloud(pcd_legacy, window_name="Reconstruction"):
         vis.create_window(window_name=window_name)
         vis.add_geometry(pcd_legacy)
         ctr = vis.get_view_control()
-        bounds = pcd_legacy.get_axis_aligned_bounding_box()
+        # Open3D renamed `get6_axis_aligned_bounding_box` to `get_axis_aligned_bounding_box`.
+        # Use whichever is available for maximum compatibility.
+        get_aabb = getattr(pcd_legacy, 'get_axis_aligned_bounding_box', None)
+        if get_aabb is not None:
+            bounds = get_aabb()
+        else:
+            bounds = pcd_legacy.get6_axis_aligned_bounding_box()
         center = bounds.get_center()
         ctr.set_lookat(center)
         ctr.set_up([0, 0, 1])       # Z up
@@ -662,7 +547,7 @@ def visualize_pointcloud(pcd_legacy, window_name="Reconstruction"):
         vis.run()
         vis.destroy_window()
     except Exception as e:
-        mavc.printd(f"Open3D visualization failed: {e}")
+        print(f"[vis] Open3D visualization failed: {e}")
 
 def _pose_thread_worker():
     """Background thread that polls get_pose at configured frequency and stores latest values (no buffering)."""
@@ -684,14 +569,14 @@ def start_pose_thread(frequency_hz):
     global _pose_thread, _pose_thread_stop, _pose_thread_hz
     
     if _pose_thread and _pose_thread.is_alive():
-        mavc.printd("Pose thread already running")
+        print("[INFO] Pose thread already running")
         return
     
     _pose_thread_hz = frequency_hz
     _pose_thread_stop = False
     _pose_thread = threading.Thread(target=_pose_thread_worker, daemon=True)
     _pose_thread.start()
-    mavc.printd(f"Pose thread started ({frequency_hz}Hz, non-blocking)")
+    print(f"[INFO] Pose thread started ({frequency_hz}Hz, non-blocking)")
 
 def get_latest_pose():
     """Get the latest pose without blocking. Returns (x, y, z, yaw, pitch, roll)."""
@@ -705,4 +590,4 @@ def stop_pose_thread():
     _pose_thread_stop = True
     if _pose_thread and _pose_thread.is_alive():
         _pose_thread.join(timeout=1.0)
-    mavc.printd("Pose thread stopped")
+    print("[INFO]Pose thread stopped")

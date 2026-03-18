@@ -1,4 +1,4 @@
-"""
+r"""
   __  __                   _   _             
  |  \/  | ___  _ __   ___ | \ | | __ ___   __
  | |\/| |/ _ \| '_ \ / _ \|  \| |/ _` \ \ / /
@@ -19,25 +19,30 @@ After fusion, the reconstruction is visualized (in addition to the camera poses)
 import numpy as np
 import time
 import os
-
+import sys
 import open3d as o3d
 from PIL import Image
 import numpy as np
 import yaml
+
+# Ensure the repository root is on sys.path so we can import `utils` from anywhere
+repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
+if repo_root not in sys.path:
+    sys.path.insert(0, repo_root)
+
 from utils.utils import *
 #####################################################################
 
 addPose = True
 
-CONFIG_PATH = "config.yml"
+CONFIG_PATH = "../config.yml"
 with open(CONFIG_PATH, "r") as f:
     config = yaml.safe_load(f)
 
-data_dir = config["data_dir"] # parent directory to look for RGB images, and save depth images
+data_dir = "../data/mononav-2026-03-19-00-17-13" # parent directory to look for RGB images, and save depth images
 
-source = "kinect" # meaning: images have been undistorted to match kinect
-rgb_dir = data_dir + "/" + source + "-rgb-images/"
-depth_dir = data_dir + "/" + source + "-depth-images"
+rgb_dir = data_dir + "/" + "rgb-images/"
+depth_dir = data_dir + "/" + "transform-depth-images"
 pose_dir = data_dir + "/poses/"
 #####################################################################
 
@@ -46,7 +51,11 @@ depth_scale = config["VoxelBlockGrid"]["depth_scale"]
 depth_max = config["VoxelBlockGrid"]["depth_max"]
 trunc_voxel_multiplier = config["VoxelBlockGrid"]["trunc_voxel_multiplier"]
 weight_threshold = config["weight_threshold"] # for planning and visualization (!! important !!)
-device = config["VoxelBlockGrid"]["device"]
+if config['VoxelBlockGrid']['device'] == "None":
+    import torch
+    device = 'CUDA:0' if torch.cuda.is_available() else 'CPU:0'
+else:
+    device = config['VoxelBlockGrid']['device']
 
 vbg = VoxelBlockGrid(depth_scale, depth_max, trunc_voxel_multiplier, o3d.core.Device(device))
         
@@ -67,7 +76,7 @@ for filename in depth_files:
     frame_number = split_filename(filename)
     print("Integrating frame %d/%d"%(frame_number,end_frame))
     # Get rbg_file
-    rgb_file = rgb_dir + source + "_frame-%06d.rgb.jpg"%(frame_number)
+    rgb_file = rgb_dir + "frame-%06d.rgb.jpg"%(frame_number)
 
     # Read in camera pose
     pose_file = data_dir + "/poses/frame-%06d.pose.txt"%(frame_number)
@@ -78,7 +87,7 @@ for filename in depth_files:
     color = Image.open(rgb_file).convert("RGB")  # load
 
     # Integrate
-    depth_file = depth_dir + "/" + source + "_frame-%06d.depth.npy"%(frame_number)
+    depth_file = depth_dir + "/" + "transform_frame-%06d.depth.npy"%(frame_number)
     depth_numpy = np.load(depth_file) # mm
     vbg.integration_step(color, depth_numpy, cam_pose)
 

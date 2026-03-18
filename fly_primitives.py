@@ -200,7 +200,7 @@ def main():
             mavc.set_mode('LAND')
             time.sleep(1)
     except KeyboardInterrupt:
-        print("Interrupted by user — landing and exiting.")
+        print("Interrupted by user. Landing and exiting.")
     finally:
         mavc.set_mode('LAND')
 
