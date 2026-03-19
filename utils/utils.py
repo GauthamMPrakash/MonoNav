@@ -617,4 +617,4 @@ def stop_pose_thread():
     _pose_thread_stop = True
     if _pose_thread and _pose_thread.is_alive():
         _pose_thread.join(timeout=1.0)
-    print("[INFO]Pose thread stopped")
+    print("[INFO] Pose thread stopped")

@@ -329,6 +329,7 @@ def main():
                 break
             elif last_key_pressed == 'c':
                 mavc.set_mode('BRAKE')
+                time.sleep(0.2)
                 mavc.set_mode('LAND')
                 print("Pressed c. Ending control.", flush=True)
                 shouldStop = True
@@ -340,29 +341,53 @@ def main():
                 shouldStop = True
                 break
             
+            elif last_key_pressed == 'f':
+                print("Pressed f. Fusing current frame into VBG (no movement).", flush=True)
+                traj_index = None
+                time.sleep(0.5) # small sleep to prevent busy loop when hovering without a trajectory
+
             # Check for trajectory control keys
             elif last_key_pressed == 'a':
                 print("Pressed a. Going left.", flush=True)
                 traj_index = 0 # left
-                last_key_pressed = None
             elif last_key_pressed == 'w':
                 print("Pressed w. Going straight.", flush=True)
                 traj_index = len(traj_list)//2 # straight
-                last_key_pressed = None
             elif last_key_pressed == 'd':
                 print("Pressed d. Going right.", flush=True)
                 traj_index = len(traj_list)-1  # right
-                last_key_pressed = None
+            elif last_key_pressed == 's':
+                print("Pressed s. Going back.", flush=True)
+                start_time = time.time()
+                while time.time() - start_time <= period:
+                    mavc.send_body_offset_ned_vel(-forward_speed, 0, 0) # send a one-time backward velocity command; will not be sustained without a trajectory
+                    time.sleep(0.1)
+                traj_index = None # no trajectory after the backward command
+            elif last_key_pressed == 'q':
+                print("Pressed q. Yawing left.", flush=True)
+                if FLY_VEHICLE:
+                    start_time = time.time()
+                    while time.time() - start_time <= 1000:
+                        mavc.send_body_offset_ned_vel(0, 0, yaw_rate=-0.5) # send a yaw left command for 1s
+                        time.sleep(0.1)
+                traj_index = None # no trajectory after the yaw comamnd
+            elif last_key_pressed == 'e':
+                print("Pressed e. Yawing right.", flush=True)
+                if FLY_VEHICLE:
+                    start_time = time.time()
+                    while time.time() - start_time <= 1000:
+                        mavc.send_body_offset_ned_vel(0, 0, yaw_rate=0.5) # send a yaw right command for 1s
+                        time.sleep(0.1)
+                traj_index = None # no trajectory after the backward command
             elif last_key_pressed == 'g':      # GO mode
                 print("Pressed g. Using MonoNav.", flush=True)
                 traj_index = max_traj_idx
             else:
                 print("Hovering in place.", flush=True)
-                if FLY_VEHICLE:
-                    mavc.send_body_offset_ned_vel(0, 0, yaw_rate=0) # hover in place
                 traj_index = None
-                last_key_pressed = None
-                time.sleep(0.5) # small sleep to prevent busy loop when hovering without a trajectory
+
+            if last_key_pressed != 'g':
+                last_key_pressed = None # reset key state if we're not in GO mode, so that single keypresses don't carry over into future periods
 
             # Save trajectory information
             if save_during_flight:
@@ -398,7 +423,7 @@ def main():
                 depth_numpy, depth_colormap = compute_depth(transform_bgr, depth_anything, INPUT_SIZE, make_colormap=True)
                 camera_position = get_pose_matrix(*pose)
                 
-                if last_key_pressed in ['g', 'w', 'a', 's', 'd']: # if not in hover mode, integrate into VBG
+                if last_key_pressed in ['g', 'w', 'a', 's', 'd', 'f']: # if not in hover mode, integrate into VBG
                     vbg.integration_step(transform_rgb, depth_numpy, camera_position)
 
                 if goal_position is not None:
@@ -428,9 +453,6 @@ def main():
                         thickness=1,
                         color=(255, 255, 255),
                     )
-
-                    line_spacing = 5
-                    fps_y = int(hz_y + hz_size[1] + line_spacing + textsize[1])
 
                     cv2.putText(
                         depth_colormap,
@@ -463,10 +485,6 @@ def main():
             cur_time  = time.time()
             loop_hz = 1.0 / (cur_time - start_time)
             processing_speed = 1.0 / (cur_time - frame_start_time)
-
-            # If a key was pressed during the period, let the outer loop consume it next.
-            if last_key_pressed in ('p', 'c', 'r', 'a', 'w', 'd', 'h'):
-                continue
 
             # Planner always scores trajectories, but only GO mode applies them.
             max_traj_idx = choose_primitive(vbg.vbg, camera_position, traj_linesets, goal_position, min_dist2obs, filterYvals, filterWeights, filterTSDF, weight_threshold,) # Enable DEBUG to print trajectory scores during selection
