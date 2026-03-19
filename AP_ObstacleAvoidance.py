@@ -433,8 +433,7 @@ def main():
                 mavc.printd(f"Scaling intrinsics: {calib_width}x{calib_height} → {DEPTH_WIDTH}x{DEPTH_HEIGHT}")
         # Update VoxelBlockGrid with adjusted intrinsics
         vbg_intrinsics = get_cropped_intrinsics(optimal_mtx, roi)
-        vbg.intrinsic_matrix = vbg_intrinsics
-        vbg.depth_intrinsic = o3d.core.Tensor(vbg_intrinsics, o3d.core.Dtype.Float64)
+        vbg.set_intrinsics(vbg_intrinsics)
 
     else:
         raise RuntimeError("Unable to read first frame from camera")

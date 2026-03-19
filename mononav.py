@@ -106,7 +106,7 @@ if model_device.type != 'cuda' and torch.cuda.is_available():
 # Intrinsics for undistort (optional)
 camera_calibration_path = config.get('camera_calibration_path')
 enable_undistort = config.get('enable_undistort', True)
-if enable_undistort and camera_calibration_path:
+if camera_calibration_path:
     mtx, dist, optimal_mtx, roi = get_calibration_values(camera_calibration_path) # for the robot's camera
     calib_width, calib_height = get_calibration_resolution(camera_calibration_path)
     # only compute cropped intrinsics if roi is valid
@@ -115,10 +115,10 @@ if enable_undistort and camera_calibration_path:
     else:
         fusion_intrinsics = None
 else:
-    # no calibration available or undistort disabled; use defaults
+    # no calibration available; fall back to an ideal matrix once frame size is known
     mtx = dist = optimal_mtx = roi = None
     calib_width = calib_height = None
-    fusion_intrinsics = None  # VoxelBlockGrid will choose default intrinsics
+    fusion_intrinsics = None
 
 # Initialize VoxelBlockGrid
 depth_scale = config['VoxelBlockGrid']['depth_scale']
@@ -198,7 +198,7 @@ def _on_key_press(key):
         if key.char:
             last_key_pressed = key.char.lower()
     except AttributeError:
-        return
+        last_key_pressed = key
 
 
 def start_keyboard_listener():
@@ -215,12 +215,12 @@ def stop_keyboard_listener():
         keyboard_listener = None
 
 
-def opencv_waitkey(mark_esc=True):
-    """Process OpenCV GUI events; optionally latch Esc into global key state."""
+def opencv_waitkey():
+    """
+    Process OpenCV GUI events; optionally latch Esc into global key state.
+    """
     key = cv2.waitKey(1) & 0xFF
-    if key == 27 and mark_esc:
-        global last_key_pressed
-        last_key_pressed = 'esc'
+    if key == 27:
         return True
     return False
 
@@ -232,10 +232,6 @@ def main():
     global mtx, dist, optimal_mtx, roi
     global goal_position
     global save_dir
-
-    cap = None
-    camera_position = None
-    traj_index = None # which primitive are we currently executing? (None for hover/no motion)
 
     while True:
         # ARDUCOPTER CONTROL
@@ -262,11 +258,13 @@ def main():
             mtx, dist, optimal_mtx, roi, frame_width, frame_height, calib_width, calib_height
         )
 
-    # Only update VBG intrinsics when valid calibration intrinsics are available.
+    # Use calibrated intrinsics when available; otherwise fall back to an ideal
+    # pinhole matrix sized for the current frame.
     if optimal_mtx is not None and roi is not None:
         vbg_intrinsics = get_cropped_intrinsics(optimal_mtx, roi)
-        vbg.intrinsic_matrix = vbg_intrinsics
-        vbg.depth_intrinsic = o3d.core.Tensor(vbg_intrinsics)
+    else:
+        vbg_intrinsics = get_ideal_intrinsics(frame_width, frame_height)
+    vbg.set_intrinsics(vbg_intrinsics)
 
     # Scale mtx, dist to match current camera resolution
     # Read one frame to get actual resolution
@@ -280,11 +278,9 @@ def main():
             print("TIME TO COMPUTE DEPTH:", time.time() - start_time_test)
             cv2.imshow("test", bgr)
             # Ignore warmup keys to avoid carrying stale ESC into the control loop.
-            opencv_waitkey(mark_esc=False)
+            opencv_waitkey()
         cv2.destroyAllWindows()
         start_keyboard_listener()
-        last_key_pressed = None
-        shouldStop = False
         
         hdg = mavc.get_pose()[3] # get initial yaw
         # Convert startup nose-relative RDF goal to absolute NED, then reorder
@@ -316,17 +312,11 @@ def main():
         # Initialize lists and frame counter.
         frame_number = 0
         processing_speed, loop_hz = 0, 0
+        traj_index = len(traj_list)//2
 
         while not shouldStop:
-            # Check for stop keys first (these exit the control loop)
-            if last_key_pressed == 'esc':
-                mavc.set_mode('BRAKE')
-                mavc.set_mode('LAND')
-                print("Pressed esc. Ending control.", flush=True)
-                shouldStop = True
-                last_key_pressed = None
-                break
-            elif last_key_pressed == 'p':
+            # Check for stop keys first (these exit the control loop). Important that they break out of the loop
+            if last_key_pressed == 'p':
                 """
                 DO NOT USE FOR NORMAL FLYING. WILL STOP MOTORS IMMEDIATELY CAUSING A CRASH. Only use in emergency situations when you need to stop the drone immediately.
                 """
@@ -334,33 +324,22 @@ def main():
                 mavc.arm(0)
                 print("Pressed p. EMERGENCY STOP.", flush=True)
                 shouldStop = True
-                last_key_pressed = None
                 break
             elif last_key_pressed == 'c':
                 mavc.set_mode('BRAKE')
                 mavc.set_mode('LAND')
                 print("Pressed c. Ending control.", flush=True)
                 shouldStop = True
-                last_key_pressed = None
                 break
             elif last_key_pressed == 'r':
                 print("\nPressed r. Switching to SMART_RTL.\n", flush=True)
                 if FLY_VEHICLE:
                     mavc.set_mode('SMART_RTL')
                 shouldStop = True
-                last_key_pressed = None
                 break
             
-            # Check for mode/command keys (these change behavior but don't stop)
-            elif last_key_pressed == 'h':
-                print("Pressed h. Hovering in place.", flush=True)
-                if FLY_VEHICLE:
-                    mavc.send_body_offset_ned_vel(0, 0, yaw_rate=0) # hover in place
-                traj_index = None  # Stop following any trajectory
-                last_key_pressed = None
-            
             # Check for trajectory control keys
-            if last_key_pressed == 'a':
+            elif last_key_pressed == 'a':
                 print("Pressed a. Going left.", flush=True)
                 traj_index = 0 # left
                 last_key_pressed = None
@@ -375,19 +354,26 @@ def main():
             elif last_key_pressed == 'g':      # GO mode
                 print("Pressed g. Using MonoNav.", flush=True)
                 traj_index = max_traj_idx
-        
-        # Save trajectory information
+            else:
+                print("Hovering in place.", flush=True)
+                if FLY_VEHICLE:
+                    mavc.send_body_offset_ned_vel(0, 0, yaw_rate=0) # hover in place
+                traj_index = None
+                last_key_pressed = None
+                time.sleep(0.5) # small sleep to prevent busy loop when hovering without a trajectory
+
+            # Save trajectory information
             if save_during_flight:
                 traj_idx_to_log = max_traj_idx if max_traj_idx is not None else -1
                 row = np.array([frame_number, int(traj_idx_to_log), time.time()-start_flight_time]) # time since start of flight
                 with open(save_dir + '/trajectories.csv', 'a') as file:
                     np.savetxt(file, row.reshape(1, -1), delimiter=',', fmt='%s')
-
+            
             start_time = time.time()
             while time.time() - start_time <= period:
                 frame_start_time = time.time()
                 if traj_index is not None:
-                    yawrate = amplitudes[traj_index] * np.sin(np.pi/period*(time.time() - start_time))  # rad/s
+                    yawrate = -amplitudes[traj_index] * np.sin(np.pi/period*(time.time() - start_time))  # rad/s
                     yvel = yawrate * yvel_gain
                     yawrate = yawrate * yawrate_gain
                     if FLY_VEHICLE:
@@ -410,7 +396,7 @@ def main():
                 depth_numpy, depth_colormap = compute_depth(transform_bgr, depth_anything, INPUT_SIZE, make_colormap=True)
                 camera_position = get_pose_matrix(*pose)
                 
-                if last_key_pressed != 'h': # if not in hover mode, integrate into VBG
+                if last_key_pressed in ['g', 'w', 'a', 's', 'd']: # if not in hover mode, integrate into VBG
                     vbg.integration_step(transform_rgb, depth_numpy, camera_position)
 
                 if goal_position is not None:
@@ -476,16 +462,15 @@ def main():
             loop_hz = 1.0 / (cur_time - start_time)
             processing_speed = 1.0 / (cur_time - frame_start_time)
 
-            # If this cycle ended due to a stop command, do not run planner updates.
-            if shouldStop:
-                break
+            # If a key was pressed during the period, let the outer loop consume it next.
+            if last_key_pressed in ('p', 'c', 'r', 'a', 'w', 'd', 'h'):
+                continue
 
-            # In GO mode, update selected trajectory from planner.
-            max_traj_idx = choose_primitive(vbg.vbg, camera_position, traj_linesets, goal_position, min_dist2obs, filterYvals, filterWeights, filterTSDF, weight_threshold)
+            # Planner always scores trajectories, but only GO mode applies them.
+            max_traj_idx = choose_primitive(vbg.vbg, camera_position, traj_linesets, goal_position, min_dist2obs, filterYvals, filterWeights, filterTSDF, weight_threshold,) # Enable DEBUG to print trajectory scores during selection
 
             mode = mavc.get_mode()
             if max_traj_idx is None:
-                traj_index = None
                 if mode == 'GUIDED':      
                     mavc.set_mode('BRAKE')
                     time.sleep(0.1) # brief brake before hover to prevent drift during stop
@@ -493,8 +478,15 @@ def main():
             else:
                 if mode == 'BRAKE':     # so that external mode commands from GCS or RC would not be overridden
                     mavc.set_mode('GUIDED') # ensure we're in guided mode to accept velocity commands
-                print(f"[TRAJ] Selected traj: {max_traj_idx}/{len(traj_list)-1}", flush=True)
-                traj_index = max_traj_idx
+                if last_key_pressed == 'g':
+                    traj_str = "Selected traj:"
+                else:
+                    traj_str = "Next traj:"
+                print(f"[TRAJ] {traj_str} {max_traj_idx}/{len(traj_list)-1}", flush=True)
+
+            # If this cycle ended due to a stop command, do not run planner updates.
+            if shouldStop:
+                break
 
         if camera_position is not None:
             camera_position = camera_position[0:-1, -1]

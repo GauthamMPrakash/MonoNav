@@ -55,13 +55,10 @@ class VoxelBlockGrid:
         self.depth_max = depth_max
         self.trunc_voxel_multiplier = trunc_voxel_multiplier
         self.device = device
-        if intrinsic_matrix is None:
-            self.camera = o3d.camera.PinholeCameraIntrinsic(
-                o3d.camera.PinholeCameraIntrinsicParameters.PrimeSenseDefault
-            )  # Kinect Intrinsics (default)
-            intrinsic_matrix = self.camera.intrinsic_matrix
-        self.intrinsic_matrix = np.asarray(intrinsic_matrix)
-        self.depth_intrinsic = o3d.core.Tensor(self.intrinsic_matrix)
+        self.intrinsic_matrix = None
+        self.depth_intrinsic = None
+        if intrinsic_matrix is not None:
+            self.set_intrinsics(intrinsic_matrix)
 
         # Initialize the VoxelBlockGrid
         self.vbg = o3d.t.geometry.VoxelBlockGrid(
@@ -73,9 +70,19 @@ class VoxelBlockGrid:
             block_count=50000,
             device=device)
 
+    def set_intrinsics(self, intrinsic_matrix):
+        self.intrinsic_matrix = np.asarray(intrinsic_matrix, dtype=np.float64)
+        self.depth_intrinsic = o3d.core.Tensor(self.intrinsic_matrix, o3d.core.Dtype.Float64)
+
+    def ensure_intrinsics_for_frame(self, frame_width, frame_height):
+        if self.intrinsic_matrix is None:
+            self.set_intrinsics(get_ideal_intrinsics(frame_width, frame_height))
+
     def integration_step(self, color, depth_numpy, cam_pose):
         # Integration Step (TSDF Fusion)
         depth_numpy = depth_numpy.astype(np.uint16)  # Convert to uint16
+        frame_height, frame_width = depth_numpy.shape[:2]
+        self.ensure_intrinsics_for_frame(frame_width, frame_height)
         depth = o3d.t.geometry.Image(depth_numpy).to(self.device)
         # Open3D frustum indexing expects camera tensors on CPU even when VBG lives on CUDA.
         depth_intrinsic_cpu = self.depth_intrinsic.to(o3d.core.Device("CPU:0"))
@@ -307,7 +314,7 @@ def get_traj_linesets(traj_list):
 """
 MonoNav Planner: Return the chosen trajectory index given the current position, current reconstruction, trajectory library, and goal position.
 """
-def choose_primitive(vbg, camera_position, traj_linesets, goal_position, dist_threshold, filterYvals, filterWeights, filterTSDF, weight_threshold):
+def choose_primitive(vbg, camera_position, traj_linesets, goal_position, dist_threshold, filterYvals, filterWeights, filterTSDF, weight_threshold, DEBUG=False):
 
     # Get weights and tsdf values from the voxel block grid
     weights = vbg.attribute("weight").reshape((-1))
@@ -386,7 +393,8 @@ def choose_primitive(vbg, camera_position, traj_linesets, goal_position, dist_th
                 dst_to_goal = np.sqrt(np.min(tmp_to_goal))
                 if dst_to_goal < min_goal_score:
                     # we have a trajectory that gets us closer to the goal
-                    print("[TRAJ] traj %d gets us closer to the goal: %f"%(traj_idx, dst_to_goal))
+                    if DEBUG:
+                        print("[TRAJ] traj %d gets us closer to the goal: %f"%(traj_idx, dst_to_goal), flush=True)
                     max_traj_idx = traj_idx
                     min_goal_score = dst_to_goal
             else:
@@ -436,6 +444,25 @@ def scale_intrinsics(intrinsic_matrix, scale_x, scale_y):
     scaled_intrinsic[0, 2] *= scale_x
     scaled_intrinsic[1, 2] *= scale_y
     return scaled_intrinsic
+
+
+def get_ideal_intrinsics(frame_width, frame_height):
+    """
+    Return a simple pinhole camera matrix for the given frame size.
+
+    This is only used as a fallback when no calibration intrinsics are available.
+    It assumes square pixels, a centered principal point, and a focal length equal
+    to the larger image dimension.
+    """
+    focal_length = float(max(frame_width, frame_height))
+    return np.array(
+        [
+            [focal_length, 0.0, (frame_width - 1) / 2.0],
+            [0.0, focal_length, (frame_height - 1) / 2.0],
+            [0.0, 0.0, 1.0],
+        ],
+        dtype=np.float64,
+    )
 
 
 def adjust_intrinsics_to_frame_size(mtx, dist, optimal_mtx, roi, frame_width, frame_height, calib_width, calib_height):
