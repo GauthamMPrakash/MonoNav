@@ -39,11 +39,40 @@ CONFIG_PATH = "../config.yml"
 with open(CONFIG_PATH, "r") as f:
     config = yaml.safe_load(f)
 
-data_dir = "../data/mononav-2026-03-19-00-17-13" # parent directory to look for RGB images, and save depth images
+def _latest_data_dir(prefix):
+    prefix = os.path.normpath(prefix)
+    directory_parent = os.path.dirname(prefix)
+    basename = os.path.basename(prefix)
+    if not basename:
+        raise ValueError(f"save_dir_prefix must have a basename, got '{prefix}'")
 
-rgb_dir = data_dir + "/" + "rgb-images/"
-depth_dir = data_dir + "/" + "transform-depth-images"
-pose_dir = data_dir + "/poses/"
+    if os.path.isabs(directory_parent):
+        parent_dir = directory_parent
+    elif directory_parent:
+        parent_dir = os.path.join(repo_root, directory_parent)
+    else:
+        parent_dir = repo_root
+
+    parent_dir = os.path.abspath(parent_dir)
+    if not os.path.isdir(parent_dir):
+        raise FileNotFoundError(f"parent data directory '{parent_dir}' not found")
+
+    candidates = [
+        os.path.join(parent_dir, entry)
+        for entry in os.listdir(parent_dir)
+        if entry.startswith(basename) and os.path.isdir(os.path.join(parent_dir, entry))
+    ]
+    if not candidates:
+        raise FileNotFoundError(f"no data directories starting with '{basename}' in '{parent_dir}'")
+
+    latest_dir = max(candidates, key=os.path.getmtime)
+    print(f"[fuse_depth] using latest data directory: {latest_dir}", flush=True)
+    return latest_dir
+
+data_dir = _latest_data_dir(config["save_dir_prefix"])  # parent directory to look for RGB images, and save depth images
+rgb_dir = os.path.join(data_dir, "rgb-images")
+depth_dir = os.path.join(data_dir, "transform-depth-images")
+pose_dir = os.path.join(data_dir, "poses")
 #####################################################################
 
 # Initialize TSDF VoxelBlockGrid
@@ -75,11 +104,10 @@ for filename in depth_files:
     # Get the frame number from the depth filename
     frame_number = split_filename(filename)
     print("Integrating frame %d/%d"%(frame_number,end_frame))
-    # Get rbg_file
-    rgb_file = rgb_dir + "frame-%06d.rgb.jpg"%(frame_number)
+    rgb_file = os.path.join(rgb_dir, "frame-%06d.rgb.jpg"%frame_number)
 
     # Read in camera pose
-    pose_file = data_dir + "/poses/frame-%06d.pose.txt"%(frame_number)
+    pose_file = os.path.join(pose_dir, "frame-%06d.pose.txt"%frame_number)
     cam_pose = np.loadtxt(pose_file)
     poses.append(cam_pose)
 
@@ -87,7 +115,7 @@ for filename in depth_files:
     color = Image.open(rgb_file).convert("RGB")  # load
 
     # Integrate
-    depth_file = depth_dir + "/" + "transform_frame-%06d.depth.npy"%(frame_number)
+    depth_file = os.path.join(depth_dir, "transform_frame-%06d.depth.npy"%frame_number)
     depth_numpy = np.load(depth_file) # mm
     vbg.integration_step(color, depth_numpy, cam_pose)
 
