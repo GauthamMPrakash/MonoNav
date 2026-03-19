@@ -15,6 +15,8 @@ Here, we use Open3D's tensor reconstruction system: the VoxelBlockGrid.
 After fusion, the reconstruction is visualized (in addition to the camera poses), and saved to file.
 
 """
+addPose = True  # Visualize camera poses in addition to the point cloud
+data_dir = None # if None, will automatically look for latest data directory with prefix specified in config.yml (e.g. "data/flight-")
 
 import numpy as np
 import time
@@ -32,8 +34,6 @@ if repo_root not in sys.path:
 
 from utils.utils import *
 #####################################################################
-
-addPose = True
 
 CONFIG_PATH = "../config.yml"
 with open(CONFIG_PATH, "r") as f:
@@ -69,7 +69,8 @@ def _latest_data_dir(prefix):
     print(f"[fuse_depth] using latest data directory: {latest_dir}", flush=True)
     return latest_dir
 
-data_dir = _latest_data_dir(config["save_dir_prefix"])  # parent directory to look for RGB images, and save depth images
+if data_dir is None:
+    data_dir = _latest_data_dir(config["save_dir_prefix"])  # parent directory to look for RGB images, and save depth images
 rgb_dir = os.path.join(data_dir, "rgb-images")
 depth_dir = os.path.join(data_dir, "transform-depth-images")
 pose_dir = os.path.join(data_dir, "poses")
