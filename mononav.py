@@ -56,7 +56,7 @@ ENCODER = CHECKPOINT[-8:-4]  # crude parse: expects filenames like "..._vits.pth
 if ENCODER is None:
     ENCODER = CHECKPOINT.split('_')[-1].split('.')[0]  # crude parse: last part before extension
     print(f"[warning] DA2_ENCODER not set in config, parsed '{ENCODER}' from checkpoint name")
-MAX_DEPTH = 20
+MAX_DEPTH = config['MODEL_MAX_DEPTH'] # maximum depth (in meters) that the depth model can predict
 vbg_device_cfg = config.get('VoxelBlockGrid', {}).get('device')
 if vbg_device_cfg is None or str(vbg_device_cfg).lower() == "none":
     DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -123,6 +123,8 @@ else:
 # Initialize VoxelBlockGrid
 depth_scale = config['VoxelBlockGrid']['depth_scale']
 depth_max = config['VoxelBlockGrid']['depth_max']
+if depth_max > MAX_DEPTH:
+    depth_max = MAX_DEPTH
 trunc_voxel_multiplier = config['VoxelBlockGrid']['trunc_voxel_multiplier']
 weight_threshold = config['weight_threshold'] # for planning and visualization (!! important !!)
 if vbg_device_cfg is None or str(vbg_device_cfg).lower() == "none":

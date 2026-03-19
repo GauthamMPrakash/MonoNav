@@ -142,7 +142,7 @@ def compute_depth(frame, depth_anything, size, make_colormap=True):
 
     depth = depth_anything.infer_image(frame, size)    # as np ndarray, in meters (float32)
     depth = (1000*depth).astype(np.uint16)             # Convert to mm and uint16 for Open3D integration (depth in mm is more standard for TSDF fusion)
-    # the above line works as long as depth is ensured to be under 65.535 meters. 
+    # the above line works as long as depth is ensured to be under 65.535 meters but this shouldn't matter
     # In case KITTI is used and you for some reason want to integrate VBG more than this limit (depth_max in config.yml), beware
 
     if make_colormap:
