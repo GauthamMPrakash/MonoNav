@@ -17,7 +17,7 @@ else:
   os.environ["QT_QPA_PLATFORM"] = "xcb"
 
 # --- CONFIG ---
-URL = "http://192.168.53.56:81/stream"
+URL = "http://0.0.0.0:81/stream"        # replcace with your camera's URL or use integer 0, 1, 2... for webcam
 DICT = cv.aruco.getPredefinedDictionary(cv.aruco.DICT_4X4_50)
 
 board = cv.aruco.CharucoBoard((SQUARES_X, SQUARES_Y), SQUARE_LENGTH, MARKER_LENGTH, DICT)

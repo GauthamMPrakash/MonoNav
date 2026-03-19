@@ -12,7 +12,7 @@ camera_ip: 'http://192.168.53.56:81/stream'
 
 # Depth Model Settings
 num_pre_depth_frames: 3       # how many times to run the depth model before starting (the first few inferences are much slower)
-INPUT_SIZE: 252               # Multiple of 14. Scales the image by INPUT_SIZE/smaller image dimension
+INPUT_SIZE: 224               # Multiple of 14. Scales the image by INPUT_SIZE/smaller image dimension
 DA2_CHECKPOINT: "DepthAnythingV2-metric/checkpoints/depth_anything_v2_metric_hypersim_vits.pth" # path to checkpoint for DepthAnythingV2, make sure it matches the encoder you choose
 MODEL_MAX_DEPTH: 20           # maximum depth (in meters) that the depth dataset can predict
 
@@ -41,16 +41,17 @@ min_dist2obs: 0.8             # minimum acceptable distance from obstacles, mete
 min_dist2goal: 1.0            # termination condition for reaching the goal, meters
 
 planner:
-  type: dstar_lite            # dstar_lite or primitive
+  type: dstar_lite_primitives # dstar_lite, dstar_lite_primitives, or primitive
   replan_period: null         # seconds between replans in GO mode; null uses primitive period
-  grid_resolution: 0.3        # occupancy-grid cell size in metres
-  inflation_radius: 0.8       # obstacle inflation radius in metres
+  grid_resolution: 0.4        # occupancy-grid cell size in metres
+  inflation_radius: 0.6       # obstacle inflation radius in metres
   bounds_margin: 1.5          # extra map margin around start, goal, and observed voxels
-  min_window_size: 8.0        # minimum side length of the planning window in metres
-  vertical_half_extent: 0.75  # keep voxels within +/- this down-axis distance from current altitude
-  unknown_traversal_cost: 1.75 # unknown cells stay traversable but are penalized
-  lookahead_distance: 0.75    # metres to look ahead along the D* Lite path when commanding waypoints
-  waypoint_reached_radius: 0.5
+  min_window_size: 1.5        # minimum side length of the planning window in metres
+  vertical_half_extent: 0.4  # keep voxels within +/- this down-axis distance from current altitude
+  unknown_traversal_cost: 1.0 # unknown cells stay traversable but are penalized
+  heading_bins: 10             # discrete heading bins for dstar_lite_primitives
+  lookahead_distance: 0.8     # metres to look ahead along the D* Lite path when commanding waypoints
+  waypoint_reached_radius: 1.0
   hold_goal_altitude: False   # command the goal down position while following the horizontal path
 
 # Drone Settings
@@ -60,7 +61,7 @@ planner:
 # IP and port of the telemetry module on the drone. Set appropriate connection strings.
 # Replace with serial port name (ex: 'COM9') if using serial telemetry on the PC
 #IP: "udpout:10.42.0.110:14550" 
-IP: "udp:0.0.0.0:14550" 
+IP: "udpout:192.168.53.51:14550" 
 baud: 115200               # Set baud, only required for serial telemetry
 height: 1.2                # flight altitude, meters
 EKF_LAT: 8.4723591

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import heapq
 import math
 from typing import Iterable, Optional
@@ -13,6 +13,7 @@ INF = float("inf")
 
 
 GridCell = tuple[int, int]
+PrimitiveState = tuple[int, int, int]
 
 
 @dataclass(frozen=True)
@@ -54,10 +55,31 @@ class PathPlanResult:
     rebuilt: bool
     changed_cells: int
     reason: str = ""
+    selected_primitives: list[str] = field(default_factory=list)
+    selected_primitive_indices: list[int] = field(default_factory=list)
 
     @property
     def found(self) -> bool:
         return len(self.grid_path) > 0
+
+
+@dataclass(frozen=True)
+class MotionPrimitive2D:
+    path_xy: np.ndarray
+    yaw_delta_rad: float
+    length_m: float
+    name: str = ""
+    index: int = -1
+
+
+@dataclass(frozen=True)
+class PrimitiveEdge:
+    successor: PrimitiveState
+    traversed_cells: tuple[GridCell, ...]
+    length_m: float
+    samples_world_xy: np.ndarray
+    primitive_name: str = ""
+    primitive_index: int = -1
 
 
 class DStarLite:
@@ -439,6 +461,487 @@ class DStarLitePlanner2D:
         inflated = _inflate_obstacles(occupancy, self.obstacle_buffer_m, grid_spec.resolution)
         observed |= inflated
         return inflated, observed
+
+
+class PrimitiveDStarLite:
+    def __init__(
+        self,
+        grid_spec: GridSpec2D,
+        occupancy: np.ndarray,
+        observed: np.ndarray,
+        primitives: list[MotionPrimitive2D],
+        start_state: PrimitiveState,
+        goal_cell: GridCell,
+        heading_bins: int = 16,
+        unknown_travel_cost: float = 2.5,
+    ):
+        self.grid_spec = grid_spec
+        self.occupancy = occupancy.astype(bool, copy=True)
+        self.observed = observed.astype(bool, copy=True)
+        self.primitives = list(primitives)
+        self.heading_bins = max(1, int(heading_bins))
+        self.unknown_travel_cost = max(1.0, float(unknown_travel_cost))
+        self.start = start_state
+        self.last_start = start_state
+        self.goal_cell = goal_cell
+        self.goal_states = {(goal_cell[0], goal_cell[1], heading) for heading in range(self.heading_bins)}
+        self.km = 0.0
+
+        state_shape = (self.heading_bins, grid_spec.height, grid_spec.width)
+        self.g = np.full(state_shape, INF, dtype=float)
+        self.rhs = np.full(state_shape, INF, dtype=float)
+        for goal_state in self.goal_states:
+            self._set_rhs(goal_state, 0.0)
+
+        self._heap: list[tuple[float, float, int, PrimitiveState]] = []
+        self._open_keys: dict[PrimitiveState, tuple[float, float]] = {}
+        self._counter = 0
+        for goal_state in self.goal_states:
+            self._push(goal_state, self.calculate_key(goal_state))
+
+        self._successors: dict[PrimitiveState, tuple[PrimitiveEdge, ...]] = {}
+        self._predecessors: dict[PrimitiveState, tuple[PrimitiveState, ...]] = {}
+        self._cell_sources: dict[GridCell, set[PrimitiveState]] = {}
+        self.max_reach_m = max((primitive.length_m for primitive in self.primitives), default=0.0)
+        self._build_graph()
+
+    def _idx(self, state: PrimitiveState) -> tuple[int, int, int]:
+        col, row, heading = state
+        return heading, row, col
+
+    def _is_goal_state(self, state: PrimitiveState) -> bool:
+        return state in self.goal_states
+
+    def _g(self, state: PrimitiveState) -> float:
+        return self.g[self._idx(state)]
+
+    def _rhs(self, state: PrimitiveState) -> float:
+        return self.rhs[self._idx(state)]
+
+    def _set_g(self, state: PrimitiveState, value: float) -> None:
+        self.g[self._idx(state)] = value
+
+    def _set_rhs(self, state: PrimitiveState, value: float) -> None:
+        self.rhs[self._idx(state)] = value
+
+    def _push(self, state: PrimitiveState, key: tuple[float, float]) -> None:
+        self._open_keys[state] = key
+        heapq.heappush(self._heap, (key[0], key[1], self._counter, state))
+        self._counter += 1
+
+    def _discard(self, state: PrimitiveState) -> None:
+        self._open_keys.pop(state, None)
+
+    def _top_key(self) -> tuple[float, float]:
+        while self._heap:
+            k1, k2, _, state = self._heap[0]
+            if self._open_keys.get(state) != (k1, k2):
+                heapq.heappop(self._heap)
+                continue
+            return (k1, k2)
+        return (INF, INF)
+
+    def _pop(self) -> tuple[PrimitiveState, tuple[float, float]]:
+        while self._heap:
+            k1, k2, _, state = heapq.heappop(self._heap)
+            if self._open_keys.get(state) != (k1, k2):
+                continue
+            self._open_keys.pop(state, None)
+            return state, (k1, k2)
+        raise KeyError("priority queue is empty")
+
+    def _heuristic(self, a: PrimitiveState, b: PrimitiveState) -> float:
+        dx = (a[0] - b[0]) * self.grid_spec.resolution
+        dy = (a[1] - b[1]) * self.grid_spec.resolution
+        return math.hypot(dx, dy)
+
+    def calculate_key(self, state: PrimitiveState) -> tuple[float, float]:
+        g_rhs = min(self._g(state), self._rhs(state))
+        return (g_rhs + self._heuristic(self.start, state) + self.km, g_rhs)
+
+    def _node_cost(self, state: PrimitiveState) -> float:
+        col, row, _ = state
+        if self.occupancy[row, col]:
+            return INF
+        if self.observed[row, col]:
+            return 1.0
+        return self.unknown_travel_cost
+
+    def _edge_cost(self, src: PrimitiveState, dst: PrimitiveState) -> float:
+        for edge in self._successors.get(src, ()):
+            if edge.successor != dst:
+                continue
+            if not math.isfinite(self._node_cost(src)) or not math.isfinite(self._node_cost(dst)):
+                return INF
+            max_cost = max(self._node_cost(src), self._node_cost(dst))
+            for col, row in edge.traversed_cells:
+                cell_cost = INF if self.occupancy[row, col] else (1.0 if self.observed[row, col] else self.unknown_travel_cost)
+                if not math.isfinite(cell_cost):
+                    return INF
+                if cell_cost > max_cost:
+                    max_cost = cell_cost
+            return edge.length_m * max_cost
+        return INF
+
+    def neighbors(self, state: PrimitiveState) -> Iterable[PrimitiveState]:
+        return (edge.successor for edge in self._successors.get(state, ()))
+
+    def predecessors(self, state: PrimitiveState) -> Iterable[PrimitiveState]:
+        return self._predecessors.get(state, ())
+
+    def update_vertex(self, state: PrimitiveState) -> None:
+        if not self._is_goal_state(state):
+            best_rhs = INF
+            for neighbor in self.neighbors(state):
+                candidate = self._edge_cost(state, neighbor) + self._g(neighbor)
+                if candidate < best_rhs:
+                    best_rhs = candidate
+            self._set_rhs(state, best_rhs)
+        else:
+            self._set_rhs(state, 0.0)
+
+        self._discard(state)
+        if not math.isclose(self._g(state), self._rhs(state), rel_tol=0.0, abs_tol=1e-9):
+            self._push(state, self.calculate_key(state))
+
+    def update_cell(self, cell: GridCell, occupied: bool, observed: bool) -> None:
+        col, row = cell
+        if not self.grid_spec.in_bounds(cell):
+            return
+        if self.occupancy[row, col] == occupied and self.observed[row, col] == observed:
+            return
+
+        self.occupancy[row, col] = occupied
+        self.observed[row, col] = observed
+
+        affected = set(self._cell_sources.get(cell, set()))
+        for heading in range(self.heading_bins):
+            state = (col, row, heading)
+            affected.add(state)
+            affected.update(self.predecessors(state))
+
+        for state in affected:
+            self.update_vertex(state)
+
+    def move_start(self, new_start: PrimitiveState) -> None:
+        self.km += self._heuristic(self.last_start, new_start)
+        self.last_start = new_start
+        self.start = new_start
+
+    def compute_shortest_path(self, max_iterations: Optional[int] = None) -> None:
+        iterations = 0
+        if max_iterations is None:
+            max_iterations = self.heading_bins * self.grid_spec.width * self.grid_spec.height * 20
+
+        while (
+            self._top_key() < self.calculate_key(self.start)
+            or not math.isclose(self._rhs(self.start), self._g(self.start), rel_tol=0.0, abs_tol=1e-9)
+        ):
+            if iterations >= max_iterations:
+                break
+            try:
+                state, old_key = self._pop()
+            except KeyError:
+                break
+            new_key = self.calculate_key(state)
+            if old_key < new_key:
+                self._push(state, new_key)
+            elif self._g(state) > self._rhs(state):
+                self._set_g(state, self._rhs(state))
+                for pred in self.predecessors(state):
+                    self.update_vertex(pred)
+            else:
+                self._set_g(state, INF)
+                self.update_vertex(state)
+                for pred in self.predecessors(state):
+                    self.update_vertex(pred)
+            iterations += 1
+
+    def extract_path(self, start_state: Optional[PrimitiveState] = None, max_steps: Optional[int] = None) -> list[PrimitiveState]:
+        if start_state is None:
+            start_state = self.start
+        if max_steps is None:
+            max_steps = self.heading_bins * self.grid_spec.width * self.grid_spec.height
+
+        if not math.isfinite(self._g(start_state)) and not math.isfinite(self._rhs(start_state)):
+            return []
+
+        path = [start_state]
+        current = start_state
+        visited = {start_state}
+
+        for _ in range(max_steps):
+            if current[:2] == self.goal_cell:
+                return path
+            best_neighbor = None
+            best_score = INF
+            for neighbor in self.neighbors(current):
+                score = self._edge_cost(current, neighbor) + self._g(neighbor)
+                if score < best_score:
+                    best_score = score
+                    best_neighbor = neighbor
+            if best_neighbor is None or not math.isfinite(best_score):
+                return []
+            if best_neighbor in visited:
+                return []
+            path.append(best_neighbor)
+            visited.add(best_neighbor)
+            current = best_neighbor
+
+        return []
+
+    def path_to_world(self, state_path: list[PrimitiveState]) -> np.ndarray:
+        if not state_path:
+            return np.empty((0, 2), dtype=float)
+
+        world_points = [self.grid_spec.cell_to_world(state_path[0][:2])]
+        for src, dst in zip(state_path[:-1], state_path[1:]):
+            edge = self._edge_between(src, dst)
+            if edge is None:
+                return np.empty((0, 2), dtype=float)
+            world_points.extend(np.asarray(edge.samples_world_xy, dtype=float))
+        return _dedupe_path(np.asarray(world_points, dtype=float))
+
+    def primitive_sequence(self, state_path: list[PrimitiveState]) -> list[str]:
+        if len(state_path) < 2:
+            return []
+        selected = []
+        for src, dst in zip(state_path[:-1], state_path[1:]):
+            edge = self._edge_between(src, dst)
+            if edge is None:
+                return []
+            selected.append(edge.primitive_name)
+        return selected
+
+    def primitive_index_sequence(self, state_path: list[PrimitiveState]) -> list[int]:
+        if len(state_path) < 2:
+            return []
+        selected = []
+        for src, dst in zip(state_path[:-1], state_path[1:]):
+            edge = self._edge_between(src, dst)
+            if edge is None:
+                return []
+            selected.append(edge.primitive_index)
+        return selected
+
+    def _edge_between(self, src: PrimitiveState, dst: PrimitiveState) -> Optional[PrimitiveEdge]:
+        for edge in self._successors.get(src, ()):
+            if edge.successor == dst:
+                return edge
+        return None
+
+    def _build_graph(self) -> None:
+        for heading in range(self.heading_bins):
+            for row in range(self.grid_spec.height):
+                for col in range(self.grid_spec.width):
+                    state = (col, row, heading)
+                    edges = self._build_edges_for_state(state)
+                    self._successors[state] = edges
+                    for edge in edges:
+                        self._predecessors.setdefault(edge.successor, []).append(state)
+                        for touched_cell in edge.traversed_cells:
+                            self._cell_sources.setdefault(touched_cell, set()).add(state)
+
+        self._predecessors = {
+            state: tuple(predecessors)
+            for state, predecessors in self._predecessors.items()
+        }
+
+    def _build_edges_for_state(self, state: PrimitiveState) -> tuple[PrimitiveEdge, ...]:
+        col, row, heading_idx = state
+        state_xy = self.grid_spec.cell_to_world((col, row))
+        heading_rad = _heading_from_index(heading_idx, self.heading_bins)
+        cos_h = math.cos(heading_rad)
+        sin_h = math.sin(heading_rad)
+        rotation = np.array([[cos_h, -sin_h], [sin_h, cos_h]], dtype=float)
+
+        best_edges: dict[PrimitiveState, PrimitiveEdge] = {}
+        for primitive in self.primitives:
+            samples_world = state_xy + primitive.path_xy @ rotation.T
+            endpoint_cell = self.grid_spec.world_to_cell(samples_world[-1], clamp=False)
+            if endpoint_cell is None:
+                continue
+            successor_heading = _heading_to_index(heading_rad + primitive.yaw_delta_rad, self.heading_bins)
+            successor = (endpoint_cell[0], endpoint_cell[1], successor_heading)
+
+            traversed_cells = []
+            seen_cells = set()
+            for sample_point in np.vstack((state_xy.reshape(1, 2), samples_world)):
+                sample_cell = self.grid_spec.world_to_cell(sample_point, clamp=False)
+                if sample_cell is None:
+                    traversed_cells = []
+                    break
+                if sample_cell not in seen_cells:
+                    traversed_cells.append(sample_cell)
+                    seen_cells.add(sample_cell)
+            if not traversed_cells or successor == state:
+                continue
+
+            edge = PrimitiveEdge(
+                successor=successor,
+                traversed_cells=tuple(traversed_cells),
+                length_m=primitive.length_m,
+                samples_world_xy=np.asarray(samples_world, dtype=np.float32),
+                primitive_name=primitive.name,
+                primitive_index=primitive.index,
+            )
+            previous = best_edges.get(successor)
+            if previous is None or edge.length_m < previous.length_m:
+                best_edges[successor] = edge
+
+        return tuple(best_edges.values())
+
+
+class DStarLitePrimitivePlanner2D(DStarLitePlanner2D):
+    def __init__(
+        self,
+        motion_primitives: Iterable[MotionPrimitive2D],
+        heading_bins: int = 16,
+        resolution: float = 0.25,
+        obstacle_buffer_m: float = 0.8,
+        bounds_padding_m: float = 1.5,
+        min_window_size_m: float = 8.0,
+        unknown_travel_cost: float = 2.5,
+    ):
+        super().__init__(
+            resolution=resolution,
+            obstacle_buffer_m=obstacle_buffer_m,
+            bounds_padding_m=bounds_padding_m,
+            min_window_size_m=min_window_size_m,
+            unknown_travel_cost=unknown_travel_cost,
+        )
+        self.motion_primitives = list(motion_primitives)
+        self.heading_bins = max(1, int(heading_bins))
+        self.planner: Optional[PrimitiveDStarLite] = None
+        self.goal_cell: Optional[GridCell] = None
+
+    def plan(
+        self,
+        start_xy: np.ndarray,
+        goal_xy: np.ndarray,
+        obstacle_points_xy: Optional[np.ndarray] = None,
+        observed_points_xy: Optional[np.ndarray] = None,
+        start_heading_rad: float = 0.0,
+    ) -> PathPlanResult:
+        start_xy = np.asarray(start_xy, dtype=float).reshape(2)
+        goal_xy = np.asarray(goal_xy, dtype=float).reshape(2)
+        obstacle_points_xy = _as_xy_array(obstacle_points_xy)
+        observed_points_xy = _as_xy_array(observed_points_xy)
+
+        grid_spec, rebuilt = self._ensure_grid_spec(start_xy, goal_xy, obstacle_points_xy, observed_points_xy)
+        occupancy, observed = self._rasterize(grid_spec, obstacle_points_xy, observed_points_xy)
+
+        raw_start = grid_spec.world_to_cell(start_xy, clamp=True)
+        raw_goal = grid_spec.world_to_cell(goal_xy, clamp=True)
+        start_cell = _nearest_traversable_cell(raw_start, occupancy)
+        goal_cell = _nearest_traversable_cell(raw_goal, occupancy)
+
+        if start_cell is None or goal_cell is None:
+            self.grid_spec = grid_spec
+            self.occupancy = occupancy
+            self.observed = observed
+            self.planner = None
+            self.goal_cell = goal_cell
+            return PathPlanResult(
+                world_path=np.empty((0, 2), dtype=float),
+                grid_path=[],
+                start_cell=start_cell,
+                goal_cell=goal_cell,
+                rebuilt=rebuilt,
+                changed_cells=0,
+                reason="no traversable start or goal cell",
+            )
+
+        start_heading_idx = _heading_to_index(float(start_heading_rad), self.heading_bins)
+        start_state = (start_cell[0], start_cell[1], start_heading_idx)
+
+        if rebuilt or self.planner is None or self.goal_cell != goal_cell:
+            self.grid_spec = grid_spec
+            self.occupancy = occupancy
+            self.observed = observed
+            self.goal_cell = goal_cell
+            self.planner = PrimitiveDStarLite(
+                grid_spec=grid_spec,
+                occupancy=occupancy,
+                observed=observed,
+                primitives=self.motion_primitives,
+                start_state=start_state,
+                goal_cell=goal_cell,
+                heading_bins=self.heading_bins,
+                unknown_travel_cost=self.unknown_travel_cost,
+            )
+            changed_cells = int(np.count_nonzero(occupancy) + np.count_nonzero(observed))
+        else:
+            changed_mask = (occupancy != self.occupancy) | (observed != self.observed)
+            changed_indices = np.argwhere(changed_mask)
+            changed_cells = int(len(changed_indices))
+            self.occupancy[:, :] = occupancy
+            self.observed[:, :] = observed
+            for row, col in changed_indices:
+                self.planner.update_cell((int(col), int(row)), bool(occupancy[row, col]), bool(observed[row, col]))
+            self.planner.move_start(start_state)
+
+        self.planner.compute_shortest_path()
+        state_path = self.planner.extract_path(start_state)
+        grid_path = [(state[0], state[1]) for state in state_path]
+        world_path = self.planner.path_to_world(state_path) if state_path else np.empty((0, 2), dtype=float)
+        selected_primitives = self.planner.primitive_sequence(state_path) if state_path else []
+        selected_primitive_indices = self.planner.primitive_index_sequence(state_path) if state_path else []
+        reason = "" if state_path else "planner could not extract a primitive path"
+
+        return PathPlanResult(
+            world_path=world_path,
+            grid_path=grid_path,
+            start_cell=start_cell,
+            goal_cell=goal_cell,
+            rebuilt=rebuilt,
+            changed_cells=changed_cells,
+            reason=reason,
+            selected_primitives=selected_primitives,
+            selected_primitive_indices=selected_primitive_indices,
+        )
+
+
+def motion_primitives_from_traj_list(traj_list: Iterable[object]) -> list[MotionPrimitive2D]:
+    primitives: list[MotionPrimitive2D] = []
+    for index, traj in enumerate(traj_list):
+        x_samples = np.asarray(traj["x_sample"], dtype=float).reshape(-1)
+        y_samples = np.asarray(traj["y_sample"], dtype=float).reshape(-1)
+        yaw_values = np.asarray(traj["yawvals"], dtype=float).reshape(-1)
+        if len(x_samples) == 0 or len(y_samples) == 0 or len(x_samples) != len(y_samples):
+            continue
+        path_xy = np.column_stack((x_samples, -y_samples))
+        deltas = np.diff(np.vstack((np.zeros((1, 2), dtype=float), path_xy)), axis=0)
+        length_m = float(np.sum(np.linalg.norm(deltas, axis=1)))
+        primitives.append(
+            MotionPrimitive2D(
+                path_xy=path_xy,
+                yaw_delta_rad=float(yaw_values[-1]) if len(yaw_values) > 0 else 0.0,
+                length_m=max(length_m, 1e-6),
+                name=f"traj-{index:02d}",
+                index=index,
+            )
+        )
+    return primitives
+
+
+def _heading_to_index(heading_rad: float, heading_bins: int) -> int:
+    wrapped = float(heading_rad) % (2.0 * math.pi)
+    return int(round(wrapped / (2.0 * math.pi / heading_bins))) % heading_bins
+
+
+def _heading_from_index(index: int, heading_bins: int) -> float:
+    return (2.0 * math.pi * int(index)) / int(heading_bins)
+
+
+def _dedupe_path(path_xy: np.ndarray) -> np.ndarray:
+    if len(path_xy) <= 1:
+        return np.asarray(path_xy, dtype=float)
+    deduped = [np.asarray(path_xy[0], dtype=float)]
+    for point in np.asarray(path_xy[1:], dtype=float):
+        if not np.allclose(point, deduped[-1], atol=1e-6):
+            deduped.append(point)
+    return np.asarray(deduped, dtype=float)
 
 
 def select_lookahead_waypoint(
