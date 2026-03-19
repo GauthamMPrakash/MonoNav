@@ -40,6 +40,19 @@ goal_position_rdf: # from EKF origin
 min_dist2obs: 0.8             # minimum acceptable distance from obstacles, meters (for primitive selection)
 min_dist2goal: 1.0            # termination condition for reaching the goal, meters
 
+planner:
+  type: dstar_lite            # dstar_lite or primitive
+  replan_period: null         # seconds between replans in GO mode; null uses primitive period
+  grid_resolution: 0.3        # occupancy-grid cell size in metres
+  inflation_radius: 0.8       # obstacle inflation radius in metres
+  bounds_margin: 1.5          # extra map margin around start, goal, and observed voxels
+  min_window_size: 8.0        # minimum side length of the planning window in metres
+  vertical_half_extent: 0.75  # keep voxels within +/- this down-axis distance from current altitude
+  unknown_traversal_cost: 1.75 # unknown cells stay traversable but are penalized
+  lookahead_distance: 0.75    # metres to look ahead along the D* Lite path when commanding waypoints
+  waypoint_reached_radius: 0.5
+  hold_goal_altitude: False   # command the goal down position while following the horizontal path
+
 # Drone Settings
 # --------------
 # radio_uri: 'radio://0/4/2M/E7E7E7E7E7' # update the drone ID# to match your vehicle, check using cfclient

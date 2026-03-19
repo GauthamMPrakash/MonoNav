@@ -406,6 +406,51 @@ def choose_primitive(vbg, camera_position, traj_linesets, goal_position, dist_th
 
     return max_traj_idx
 
+
+def extract_planar_vbg_points(
+    vbg,
+    current_down,
+    vertical_half_extent,
+    filter_weights=True,
+    weight_threshold=0.0,
+):
+    """
+    Project the fused TSDF map into a 2D planning slice around the current altitude.
+
+    Returns:
+        observed_points_xz: Nx2 array of observed voxel coordinates [x, z] in metres.
+        obstacle_points_xz: Mx2 array of occupied voxel coordinates [x, z] in metres.
+    """
+    weights = vbg.attribute("weight").reshape((-1))
+    tsdf = vbg.attribute("tsdf").reshape((-1))
+    voxel_coords, voxel_indices = vbg.voxel_coordinates_and_flattened_indices()
+
+    voxel_coords = voxel_coords.cpu().numpy()
+    voxel_indices = voxel_indices.cpu().numpy().astype(np.int64).reshape(-1)
+    weights = weights.cpu().numpy().reshape(-1)[voxel_indices]
+    tsdf = tsdf.cpu().numpy().reshape(-1)[voxel_indices]
+
+    if voxel_coords.size == 0:
+        empty = np.empty((0, 2), dtype=float)
+        return empty, empty
+
+    mask = np.ones(len(voxel_coords), dtype=bool)
+    if vertical_half_extent is not None:
+        mask &= np.abs(voxel_coords[:, 1] - float(current_down)) <= float(vertical_half_extent)
+    if filter_weights:
+        mask &= weights > float(weight_threshold)
+
+    voxel_coords = voxel_coords[mask]
+    tsdf = tsdf[mask]
+
+    if voxel_coords.size == 0:
+        empty = np.empty((0, 2), dtype=float)
+        return empty, empty
+
+    observed_points_xz = voxel_coords[:, [0, 2]].astype(float, copy=False)
+    obstacle_points_xz = observed_points_xz[tsdf < 0.0]
+    return observed_points_xz, obstacle_points_xz
+
 """
 Load config.yml file
 """

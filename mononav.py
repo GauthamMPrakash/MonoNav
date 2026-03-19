@@ -43,6 +43,7 @@ import utils.mavlink_control as mavc   # import the mavlink helper script
 
 # Helper functions. Core MonoNav algorithms are implemented in utils.py
 from utils.utils import *
+from utils.dstar_lite import DStarLitePlanner2D, select_lookahead_waypoint
 
 # LOAD VALUES FROM CONFIG FILE
 config = load_config('config.yml')
@@ -150,7 +151,6 @@ if config['forward_speed'] is not None:
     forward_speed = config['forward_speed']
 max_traj_idx = int(len(traj_list)/2)
 print(f"\nTrajectory library loaded: {len(traj_list)} trajectories", flush=True)
-print("Press 'g' to enable MonoNav autonomous mode, or 'a'/'w'/'d' for manual left/straight/right", flush=True)
 
 # Planning presets
 filterYvals = config['filterYvals']
@@ -165,6 +165,31 @@ else:
 
 min_dist2obs = config['min_dist2obs']
 min_dist2goal = config['min_dist2goal']
+
+planner_cfg = config.get('planner', {})
+planner_type = str(planner_cfg.get('type', 'dstar_lite')).lower()
+planner_replan_period = planner_cfg.get('replan_period')
+if planner_replan_period is None:
+    planner_replan_period = float(period)
+else:
+    planner_replan_period = float(planner_replan_period)
+planner_vertical_half_extent = float(planner_cfg.get('vertical_half_extent', max(min_dist2obs, 0.75)))
+planner_waypoint_lookahead = float(planner_cfg.get('lookahead_distance', 0.75))
+planner_waypoint_reached_radius = float(planner_cfg.get('waypoint_reached_radius', max(0.35, planner_waypoint_lookahead * 0.5)))
+planner_hold_goal_altitude = bool(planner_cfg.get('hold_goal_altitude', True))
+
+dstar_planner = DStarLitePlanner2D(
+    resolution=float(planner_cfg.get('grid_resolution', 0.25)),
+    obstacle_buffer_m=float(planner_cfg.get('inflation_radius', min_dist2obs)),
+    bounds_padding_m=float(planner_cfg.get('bounds_margin', 1.5)),
+    min_window_size_m=float(planner_cfg.get('min_window_size', 8.0)),
+    unknown_travel_cost=float(planner_cfg.get('unknown_traversal_cost', 1.75)),
+)
+
+if planner_type == 'dstar_lite' and goal_position is None:
+    print("[warning] planner.type is dstar_lite but no goal_position_rdf is configured. GO mode will fall back to primitive selection.", flush=True)
+print(f"Planner: {planner_type}", flush=True)
+print("Press 'g' for autonomous mode, 'h' to hover, or 'a'/'w'/'d' for manual left/straight/right", flush=True)
 
 if save_during_flight:
     # Make directories for data
@@ -234,6 +259,7 @@ def main():
     global mtx, dist, optimal_mtx, roi
     global goal_position
     global save_dir
+    cap = None
 
     while True:
         # ARDUCOPTER CONTROL
@@ -315,8 +341,14 @@ def main():
         frame_number = 0
         processing_speed, loop_hz = 0, 0
         traj_index = len(traj_list)//2
+        auto_mode_active = False
+        current_waypoint_edn = None
+        current_path_xz = np.empty((0, 2), dtype=float)
+        camera_position = None
 
         while not shouldStop:
+            traj_index = None
+
             # Check for stop keys first (these exit the control loop). Important that they break out of the loop
             if last_key_pressed == 'p':
                 """
@@ -339,40 +371,62 @@ def main():
                     mavc.set_mode('SMART_RTL')
                 shouldStop = True
                 break
-            
-            # Check for trajectory control keys
+
+            elif last_key_pressed == 'h':
+                print("Pressed h. Hovering in place.", flush=True)
+                auto_mode_active = False
+                current_waypoint_edn = None
+                current_path_xz = np.empty((0, 2), dtype=float)
+                last_key_pressed = None
+
             elif last_key_pressed == 'a':
                 print("Pressed a. Going left.", flush=True)
-                traj_index = 0 # left
+                auto_mode_active = False
+                current_waypoint_edn = None
+                traj_index = 0
                 last_key_pressed = None
             elif last_key_pressed == 'w':
                 print("Pressed w. Going straight.", flush=True)
-                traj_index = len(traj_list)//2 # straight
+                auto_mode_active = False
+                current_waypoint_edn = None
+                traj_index = len(traj_list)//2
                 last_key_pressed = None
             elif last_key_pressed == 'd':
                 print("Pressed d. Going right.", flush=True)
-                traj_index = len(traj_list)-1  # right
+                auto_mode_active = False
+                current_waypoint_edn = None
+                traj_index = len(traj_list)-1
                 last_key_pressed = None
-            elif last_key_pressed == 'g':      # GO mode
-                print("Pressed g. Using MonoNav.", flush=True)
-                traj_index = max_traj_idx
+            elif last_key_pressed == 'g':
+                auto_mode_active = True
+                if planner_type == 'dstar_lite' and goal_position is not None:
+                    print("Pressed g. Using MonoNav D* Lite.", flush=True)
+                else:
+                    print("Pressed g. Using MonoNav primitive planner.", flush=True)
+                    traj_index = max_traj_idx
+                last_key_pressed = None
+            elif auto_mode_active:
+                if planner_type == 'dstar_lite' and goal_position is not None:
+                    traj_index = None
+                else:
+                    traj_index = max_traj_idx
             else:
                 print("Hovering in place.", flush=True)
+                current_waypoint_edn = None
                 if FLY_VEHICLE:
-                    mavc.send_body_offset_ned_vel(0, 0, yaw_rate=0) # hover in place
-                traj_index = None
-                last_key_pressed = None
-                time.sleep(0.5) # small sleep to prevent busy loop when hovering without a trajectory
+                    mavc.send_body_offset_ned_vel(0, 0, yaw_rate=0)
+                time.sleep(0.1)
 
             # Save trajectory information
             if save_during_flight:
-                traj_idx_to_log = max_traj_idx if max_traj_idx is not None else -1
+                traj_idx_to_log = traj_index if traj_index is not None else -1
                 row = np.array([frame_number, int(traj_idx_to_log), time.time()-start_flight_time]) # time since start of flight
                 with open(save_dir + '/trajectories.csv', 'a') as file:
                     np.savetxt(file, row.reshape(1, -1), delimiter=',', fmt='%s')
-            
+
+            command_period = planner_replan_period if auto_mode_active and planner_type == 'dstar_lite' and goal_position is not None else period
             start_time = time.time()
-            while time.time() - start_time <= period:
+            while time.time() - start_time <= command_period:
                 frame_start_time = time.time()
                 if traj_index is not None:
                     yawrate = -amplitudes[traj_index] * np.sin(np.pi/period*(time.time() - start_time))  # rad/s
@@ -380,7 +434,10 @@ def main():
                     yawrate = yawrate * yawrate_gain
                     if FLY_VEHICLE:
                         mavc.send_body_offset_ned_vel(forward_speed, yvel, yaw_rate=yawrate)
-                
+                elif auto_mode_active and planner_type == 'dstar_lite' and current_waypoint_edn is not None:
+                    if FLY_VEHICLE:
+                        mavc.send_local_ned_pos(current_waypoint_edn[2], current_waypoint_edn[0], current_waypoint_edn[1])
+
                 bgr = cap.read()
                 # get_latest_pose returns (x, y, z, yaw, pitch, roll) - non-blocking from thread
                 pose = get_latest_pose()
@@ -397,8 +454,8 @@ def main():
                 # compute depth
                 depth_numpy, depth_colormap = compute_depth(transform_bgr, depth_anything, INPUT_SIZE, make_colormap=True)
                 camera_position = get_pose_matrix(*pose)
-                
-                if last_key_pressed in ['g', 'w', 'a', 's', 'd']: # if not in hover mode, integrate into VBG
+
+                if auto_mode_active or traj_index is not None:
                     vbg.integration_step(transform_rgb, depth_numpy, camera_position)
 
                 if goal_position is not None:
@@ -465,26 +522,76 @@ def main():
             processing_speed = 1.0 / (cur_time - frame_start_time)
 
             # If a key was pressed during the period, let the outer loop consume it next.
-            if last_key_pressed in ('p', 'c', 'r', 'a', 'w', 'd', 'h'):
+            if last_key_pressed in ('p', 'c', 'r', 'a', 'w', 'd', 'g', 'h'):
                 continue
 
-            # Planner always scores trajectories, but only GO mode applies them.
-            max_traj_idx = choose_primitive(vbg.vbg, camera_position, traj_linesets, goal_position, min_dist2obs, filterYvals, filterWeights, filterTSDF, weight_threshold,) # Enable DEBUG to print trajectory scores during selection
-
-            mode = mavc.get_mode()
-            if max_traj_idx is None:
-                if mode == 'GUIDED':      
-                    mavc.set_mode('BRAKE')
-                    time.sleep(0.1) # brief brake before hover to prevent drift during stop
-                print("[INFO] No safe trajectory found. Hovering in place.", flush=True)
-            else:
-                if mode == 'BRAKE':     # so that external mode commands from GCS or RC would not be overridden
-                    mavc.set_mode('GUIDED') # ensure we're in guided mode to accept velocity commands
-                if last_key_pressed == 'g':
-                    traj_str = "Selected traj:"
+            if auto_mode_active and planner_type == 'dstar_lite' and goal_position is not None and camera_position is not None:
+                current_position = camera_position[0:-1, -1].astype(float)
+                observed_points_xz, obstacle_points_xz = extract_planar_vbg_points(
+                    vbg.vbg,
+                    current_down=current_position[1],
+                    vertical_half_extent=planner_vertical_half_extent,
+                    filter_weights=filterWeights,
+                    weight_threshold=weight_threshold,
+                )
+                plan_result = dstar_planner.plan(
+                    start_xy=current_position[[0, 2]],
+                    goal_xy=goal_position[0, [0, 2]],
+                    obstacle_points_xy=obstacle_points_xz,
+                    observed_points_xy=observed_points_xz,
+                )
+                mode = mavc.get_mode() if FLY_VEHICLE else 'GUIDED'
+                if plan_result.found:
+                    current_path_xz = plan_result.world_path
+                    waypoint_xz = select_lookahead_waypoint(
+                        plan_result.world_path,
+                        current_position[[0, 2]],
+                        planner_waypoint_lookahead,
+                        planner_waypoint_reached_radius,
+                    )
+                    target_down = float(goal_position[0, 1]) if planner_hold_goal_altitude else float(current_position[1])
+                    if waypoint_xz is not None:
+                        current_waypoint_edn = np.array([waypoint_xz[0], target_down, waypoint_xz[1]], dtype=float)
+                        if mode == 'BRAKE' and FLY_VEHICLE:
+                            mavc.set_mode('GUIDED')
+                        print(
+                            f"[PLAN] D* Lite cells={len(plan_result.grid_path)} changed={plan_result.changed_cells} waypoint EDN={np.round(current_waypoint_edn, 3)}",
+                            flush=True,
+                        )
+                    else:
+                        current_waypoint_edn = None
+                        print("[PLAN] D* Lite produced no usable waypoint.", flush=True)
                 else:
-                    traj_str = "Next traj:"
-                print(f"[TRAJ] {traj_str} {max_traj_idx}/{len(traj_list)-1}", flush=True)
+                    current_path_xz = np.empty((0, 2), dtype=float)
+                    current_waypoint_edn = None
+                    if mode == 'GUIDED' and FLY_VEHICLE:
+                        mavc.set_mode('BRAKE')
+                        time.sleep(0.1)
+                    print(f"[PLAN] No D* Lite path: {plan_result.reason}", flush=True)
+
+            elif auto_mode_active and camera_position is not None:
+                max_traj_idx = choose_primitive(
+                    vbg.vbg,
+                    camera_position,
+                    traj_linesets,
+                    goal_position,
+                    min_dist2obs,
+                    filterYvals,
+                    filterWeights,
+                    filterTSDF,
+                    weight_threshold,
+                )
+
+                mode = mavc.get_mode() if FLY_VEHICLE else 'GUIDED'
+                if max_traj_idx is None:
+                    if mode == 'GUIDED' and FLY_VEHICLE:
+                        mavc.set_mode('BRAKE')
+                        time.sleep(0.1)
+                    print("[INFO] No safe trajectory found. Hovering in place.", flush=True)
+                else:
+                    if mode == 'BRAKE' and FLY_VEHICLE:
+                        mavc.set_mode('GUIDED')
+                    print(f"[TRAJ] Selected traj: {max_traj_idx}/{len(traj_list)-1}", flush=True)
 
             # If this cycle ended due to a stop command, do not run planner updates.
             if shouldStop:
@@ -534,9 +641,11 @@ def main():
             
     finally:
         print("Releasing camera capture.")
+        stop_pose_thread()
         stop_keyboard_listener()
         cv2.destroyAllWindows()
-        cap.cap.release()
+        if cap is not None:
+            cap.cap.release()
 
 if __name__ == "__main__":
     main()
