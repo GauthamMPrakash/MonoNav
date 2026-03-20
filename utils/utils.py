@@ -26,14 +26,14 @@ import yaml, json
 import time
 
 from . import mavlink_control as mavc  # ArduCopter MAVLink wrappers (relative import)
-import queue, threading                # For bufferless video capture
+import threading                       # For bufferless video capture and pose threading
 
-# Background pose thread variables for non-blocking pose polling
-_pose_lock = threading.Lock()
+_pose_latest = None   # (timestamp, x, y, z, yaw, pitch, roll)
 _pose_thread = None
-_pose_thread_stop = False
-_pose_thread_hz = 10.0  # default frequency
-_pose_latest = {'x': 0, 'y': 0, 'z': 0, 'yaw': 0, 'pitch': 0, 'roll': 0}
+_pose_thread_hz = 15
+
+_stop_event = threading.Event()
+_pose_ready = threading.Event()   # signals first pose is available
 
 
 """
@@ -98,57 +98,87 @@ class VoxelBlockGrid:
 """
 Bufferless VideoCapture, courtesy of Ulrich Stern (https://stackoverflow.com/a/54577746)
 Otherwise, a lag builds up in the video stream.
+
+Use this for USB receivers when using something like an FPV camera
+"""
+# import queue
+# class VideoCapture:
+
+#   def __init__(self, name):
+#     self.cap = cv2.VideoCapture(name)
+#     self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+#     self.q = queue.Queue(maxsize=1)
+#     self.last_frame = None
+#     t = threading.Thread(target=self._reader)
+#     t.daemon = True
+#     t.start()
+
+#   # read frames as soon as they are available, keeping only most recent one
+#   def _reader(self):
+#     while True:
+#       ret, frame = self.cap.read()
+#       if not ret:
+#         break
+#       self.last_frame = frame
+#       if self.q.full():
+#         try:
+#           self.q.get_nowait()   # discard previous (unprocessed) frame
+#         except queue.Empty:
+#           pass
+#       self.q.put_nowait(frame)
+
+#   def read(self, timeout=1.0):
+#     try:
+#       return self.q.get(timeout=timeout)
+#     except queue.Empty:
+#       if self.last_frame is not None:
+#         return self.last_frame
+#       raise RuntimeError("VideoCapture timeout: no frame available")
+
+"""
+Adapated from the above implementation for lower latency for network streams which buffer before sending
 """
 class VideoCapture:
+    def __init__(self, name):
+        self.cap = cv2.VideoCapture(name)
+        self.last_frame = None
+        self.lock = threading.Lock()
 
-  def __init__(self, name):
-    self.cap = cv2.VideoCapture(name)
-    self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-    self.q = queue.Queue(maxsize=1)
-    self.last_frame = None
-    t = threading.Thread(target=self._reader)
-    t.daemon = True
-    t.start()
+        t = threading.Thread(target=self._reader, daemon=True)
+        t.start()
 
-  # read frames as soon as they are available, keeping only most recent one
-  def _reader(self):
-    while True:
-      ret, frame = self.cap.read()
-      if not ret:
-        break
-      self.last_frame = frame
-      if self.q.full():
-        try:
-          self.q.get_nowait()   # discard previous (unprocessed) frame
-        except queue.Empty:
-          pass
-      self.q.put_nowait(frame)
+    def _reader(self):
+        while True:
+            ret, frame = self.cap.read()
+            if not ret:
+                break
+            with self.lock:
+                self.last_frame = frame
 
-  def read(self, timeout=1.0):
-    try:
-      return self.q.get(timeout=timeout)
-    except queue.Empty:
-      if self.last_frame is not None:
-        return self.last_frame
-      raise RuntimeError("VideoCapture timeout: no frame available")
-
-
+    def read(self):
+        while True:
+            with self.lock:
+                if self.last_frame is not None:
+                    return self.last_frame
+                
 """
 Compute depth from an RGB image using DepthAnythingV2
-Returns depth_numpy (uint16 in mm), depth_colormap (for visualization)
+Returns: depth_numpy (uint16 in mm), depth_colormap (for visualization) if make_colormap is True, otherwise None.
+
+Uncomment the cmap line and the currently commented depth_colormap line and comment out the second depth_colormap line for a nicer colormap but adds a slight overhead
 """
 # cmap = colormaps.get_cmap('Spectral')
-def compute_depth(frame, depth_anything, size, make_colormap=True):
+def compute_depth(frame, depth_model, size, make_colormap=True):
 
-    depth = depth_anything.infer_image(frame, size)    # as np ndarray, in meters (float32)
+    depth = depth_model.infer_image(frame, size)    # as np ndarray, in meters (float32)
     depth = (1000*depth).astype(np.uint16)             # Convert to mm and uint16 for Open3D integration (depth in mm is more standard for TSDF fusion)
     # the above line works as long as depth is ensured to be under 65.535 meters but this shouldn't matter
     # In case KITTI is used and you for some reason want to integrate VBG more than this limit (depth_max in config.yml), beware
 
     if make_colormap:
         depth_colormap = cv2.normalize(depth, None, 0, 255, cv2.NORM_MINMAX, cv2.CV_8U)
-        #depth_colormap = (cmap(depth_colormap)[:, :, :3] * 255)[:, :, ::-1].astype(np.uint8)
         depth_colormap = cv2.applyColorMap(depth_colormap, cv2.COLORMAP_JET)
+        #depth_colormap = (cmap(depth_colormap)[:, :, :3] * 255)[:, :, ::-1].astype(np.uint8)
     else:
         depth_colormap = None
 
@@ -177,10 +207,6 @@ def rdf_goal_to_ned(goal_right, goal_down, goal_front, heading_offset):
     # down (Y_RDF) -> down (Z_NED)  
     # front (Z_RDF) -> north (X_NED)
     
-    goal_ned_x_unrotated = goal_front
-    goal_ned_y_unrotated = goal_right
-    goal_ned_z = goal_down
-    
     # Apply yaw rotation to account for heading offset.
     # The heading_offset is the absolute yaw at takeoff.
     # RDF coordinates are relative to the drone's initial heading,
@@ -188,10 +214,10 @@ def rdf_goal_to_ned(goal_right, goal_down, goal_front, heading_offset):
     cos_yaw = m.cos(heading_offset)
     sin_yaw = m.sin(heading_offset)
     
-    goal_ned_x = goal_ned_x_unrotated * cos_yaw - goal_ned_y_unrotated * sin_yaw
-    goal_ned_y = goal_ned_x_unrotated * sin_yaw + goal_ned_y_unrotated * cos_yaw
+    goal_ned_x = goal_front * cos_yaw - goal_right * sin_yaw
+    goal_ned_y = goal_front * sin_yaw + goal_right * cos_yaw
     
-    return goal_ned_x, goal_ned_y, goal_ned_z
+    return goal_ned_x, goal_ned_y, goal_down
 
 
 def ned_to_rdf(goal_north, goal_east, goal_down, heading_offset):
@@ -207,7 +233,6 @@ def ned_to_rdf(goal_north, goal_east, goal_down, heading_offset):
     # Unrotate NED coordinates back to the unrotated RDF orientation
     goal_front = goal_north * cos_yaw + goal_east * sin_yaw
     goal_right = -goal_north * sin_yaw + goal_east * cos_yaw
-    goal_down = goal_down
 
     return goal_right, goal_down, goal_front
 
@@ -229,10 +254,10 @@ def get_pose_matrix(pos_x, pos_y, pos_z, vehicle_yaw_rad, vehicle_pitch_rad, veh
 
     # NED->EDN (considered as RDF for Open3D) basis reorder
     pose = np.array([
-        [sy*sp*sr + cy*cr, sy*sp*cr - cy*sr, sy*cp, pos_y],
-        [cp*sr,            cp*cr,            -sp,   pos_z],
-        [cy*sp*sr - sy*cr, cy*sp*cr + sy*sr, cy*cp, pos_x],
-        [0,           0,           0,           1]
+        [sy*sp*sr + cy*cr,  sy*sp*cr - cy*sr,  sy*cp,  pos_y],
+        [cp*sr,             cp*cr,             -sp,    pos_z],
+        [cy*sp*sr - sy*cr,  cy*sp*cr + sy*sr,  cy*cp,  pos_x],
+        [0,                 0,                 0,          1]
     ])
 
     return pose
@@ -577,44 +602,68 @@ def visualize_pointcloud(pcd_legacy, window_name="Reconstruction"):
         print(f"[vis] Open3D visualization failed: {e}")
 
 def _pose_thread_worker():
-    """Background thread that polls get_pose at configured frequency and stores latest values (no buffering)."""
-    global _pose_thread_stop, _pose_latest, _pose_thread_hz
-    
+    """Background thread: stable-rate pose polling with timestamp."""
+    global _pose_latest
+
+    get_pose = mavc.get_pose
     sleep_time = 1.0 / _pose_thread_hz
-    while not _pose_thread_stop:
-        x, y, z, yaw, pitch, roll = mavc.get_pose()
-        with _pose_lock:
-            _pose_latest = {'x': x, 'y': y, 'z': z, 'yaw': yaw, 'pitch': pitch, 'roll': roll}
-        time.sleep(sleep_time)
+    next_time = time.perf_counter()
+
+    while not _stop_event.is_set():
+        next_time += sleep_time
+
+        # Get pose
+        x, y, z, yaw, pitch, roll = get_pose()
+        t = time.time()
+
+        # Update shared pose
+        _pose_latest = (t, x, y, z, yaw, pitch, roll)
+
+        # Signal that pose is ready (only matters first time)
+        _pose_ready.set()
+
+        # Maintain stable loop timing
+        sleep = next_time - time.perf_counter()
+        if sleep > 0:
+            time.sleep(sleep)
+        else:
+            next_time = time.perf_counter()
+
 
 def start_pose_thread(frequency_hz):
-    """Start the background pose thread at specified frequency.
-    
-    Args:
-        frequency_hz: Update frequency in Hz
-    """
-    global _pose_thread, _pose_thread_stop, _pose_thread_hz
-    
+    """Start pose thread at given frequency."""
+    global _pose_thread, _pose_thread_hz
+
     if _pose_thread and _pose_thread.is_alive():
         print("[INFO] Pose thread already running")
         return
-    
+
     _pose_thread_hz = frequency_hz
-    _pose_thread_stop = False
+    _stop_event.clear()
+    _pose_ready.clear()
+
     _pose_thread = threading.Thread(target=_pose_thread_worker, daemon=True)
     _pose_thread.start()
-    print(f"[INFO] Pose thread started ({frequency_hz}Hz, non-blocking)")
+
+    print(f"[INFO] Pose thread started ({frequency_hz} Hz)")
+
 
 def get_latest_pose():
-    """Get the latest pose without blocking. Returns (x, y, z, yaw, pitch, roll)."""
-    with _pose_lock:
-        return (_pose_latest['x'], _pose_latest['y'], _pose_latest['z'],
-                _pose_latest['yaw'], _pose_latest['pitch'], _pose_latest['roll'])
+    """
+    Blocks until first pose is available, then returns immediately.
+    Returns (t, x, y, z, yaw, pitch, roll)
+    """
+    _pose_ready.wait()   # efficient wait (no CPU burn)
+    return _pose_latest
+
 
 def stop_pose_thread():
-    """Stop the background pose thread."""
-    global _pose_thread_stop, _pose_thread
-    _pose_thread_stop = True
+    """Stop pose thread cleanly."""
+    global _pose_thread
+
+    _stop_event.set()
+
     if _pose_thread and _pose_thread.is_alive():
         _pose_thread.join(timeout=1.0)
+
     print("[INFO] Pose thread stopped")

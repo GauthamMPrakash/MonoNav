@@ -241,7 +241,7 @@ def main():
         print("Connecting to drone...", flush=True)
         mavc.connect_drone(IP, baud=baud)
         print("Connected.")
-        mavc.en_pose_stream(30)                    # Commands AP to stream poses at given frequency
+        mavc.en_pose_stream(15)                    # Commands AP to stream poses at given frequency
         mavc.set_ekf_origin(EKF_LAT, EKF_LON, 0) # Ignored if already close to the previous origin, if set
         reboot = mavc.reboot_if_EKF_origin(0.5)  # Call this function after enabling pose_stream
         if reboot:
@@ -308,7 +308,7 @@ def main():
             print("Taking off.", flush=True)
             mavc.takeoff(height)
             # mavc.set_speed(forward_speed)
-        start_pose_thread(15)                      # Start background pose polling at given frequency (non-blocking)
+        start_pose_thread(10)                      # Start background pose polling at given frequency (non-blocking)
         print("Starting control.", flush=True)
         traj_counter = 0         # how many trajectory iterations have we done?
         # Initialize lists and frame counter.
@@ -366,19 +366,15 @@ def main():
             elif last_key_pressed == 'q':
                 print("Pressed q. Yawing left.", flush=True)
                 if FLY_VEHICLE:
-                    start_time = time.time()
-                    while time.time() - start_time <= 1000:
-                        mavc.send_body_offset_ned_vel(0, 0, yaw_rate=-0.5) # send a yaw left command for 1s
-                        time.sleep(0.1)
+                    mavc.send_body_offset_ned_vel(0, 0, yaw_rate=-0.3) # send a yaw left command for 1s
                 traj_index = None # no trajectory after the yaw comamnd
+                last_key_pressed = None # reset key state immediately after yaw command to prevent key carryover into future periods
             elif last_key_pressed == 'e':
                 print("Pressed e. Yawing right.", flush=True)
                 if FLY_VEHICLE:
-                    start_time = time.time()
-                    while time.time() - start_time <= 1000:
-                        mavc.send_body_offset_ned_vel(0, 0, yaw_rate=0.5) # send a yaw right command for 1s
-                        time.sleep(0.1)
+                    mavc.send_body_offset_ned_vel(0, 0, yaw_rate=0.3) # send a yaw right command for 1s
                 traj_index = None # no trajectory after the backward command
+                last_key_pressed = None # reset key state immediately after yaw command to prevent key carryover into future periods
             elif last_key_pressed == 'g':      # GO mode
                 print("Pressed g. Using MonoNav.", flush=True)
                 traj_index = max_traj_idx
@@ -406,9 +402,12 @@ def main():
                     if FLY_VEHICLE:
                         mavc.send_body_offset_ned_vel(forward_speed, yvel, yaw_rate=yawrate)
                 
-                bgr = cap.read()
                 # get_latest_pose returns (x, y, z, yaw, pitch, roll) - non-blocking from thread
+                t0=time.time()
                 pose = get_latest_pose()
+                t1=time.time()
+                bgr = cap.read()
+                t2=time.time()
 
                 # Optionally transform camera image (undistort + crop) based on config
                 if enable_undistort:
@@ -423,7 +422,7 @@ def main():
                 depth_numpy, depth_colormap = compute_depth(transform_bgr, depth_anything, INPUT_SIZE, make_colormap=True)
                 camera_position = get_pose_matrix(*pose)
                 
-                if last_key_pressed in ['g', 'w', 'a', 's', 'd', 'f']: # if not in hover mode, integrate into VBG
+                if last_key_pressed in ['g', 'w', 'a', 's', 'd', 'f']: # if not in hover or land mode, integrate into VBG
                     vbg.integration_step(transform_rgb, depth_numpy, camera_position)
 
                 if goal_position is not None:
@@ -481,6 +480,7 @@ def main():
                 frame_number += 1
             traj_counter += 1
 
+            print(f"{(t1-t0)*1000}, {(t2-t1)*1000}", flush=True)
             # Add FPS counter to depth display
             cur_time  = time.time()
             loop_hz = 1.0 / (cur_time - start_time)
