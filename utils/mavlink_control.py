@@ -74,7 +74,7 @@ def set_mode(mode_name):
 
 def get_mode():
     while True:
-        msg = drone.recv_match(type='HEARTBEAT', blocking=True)
+        msg = drone.recv_match(type='HEARTBEAT', blocking=False)
 
         if msg is None:
             continue
@@ -410,7 +410,7 @@ def set_param(param_id, param_value, param_type, timeout=5.0):
     printd(f"ERROR: No PARAM_VALUE response received for {param_id} within {timeout}s timeout")
     return False
 
-def test(): 
+def test():
     """
     Do not fly the vehicle unless you have configured and tested the drone in a safe environment. Always be ready to disarm if the drone behaves unexpectedly.
     """
@@ -420,7 +420,6 @@ def test():
         EKF_LON = 76.9295203
         IP = "udpout:192.168.53.51:14550"  # Drone IP
         connect_drone(IP)
-        en_pose_stream()
         reboot_if_EKF_origin()
         set_ekf_origin(EKF_LAT, EKF_LON, 0)
         set_mode('GUIDED')

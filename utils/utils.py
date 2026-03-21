@@ -134,32 +134,32 @@ Use this for USB receivers when using something like an FPV camera
 #       if self.last_frame is not None:
 #         return self.last_frame
 #       raise RuntimeError("VideoCapture timeout: no frame available")
-
-"""
-Adapated from the above implementation for lower latency for network streams which buffer before sending
-"""
+    
 class VideoCapture:
     def __init__(self, name):
         self.cap = cv2.VideoCapture(name)
-        self.last_frame = None
+        self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        self.frame = None
         self.lock = threading.Lock()
-
-        t = threading.Thread(target=self._reader, daemon=True)
-        t.start()
+        threading.Thread(target=self._reader, daemon=True).start()
 
     def _reader(self):
         while True:
             ret, frame = self.cap.read()
-            if not ret:
-                break
+            if frame is None:
+                continue
             with self.lock:
-                self.last_frame = frame
+                self.frame = frame
 
-    def read(self):
+    def read(self, timeout=1.0):
+        start = time.time()
         while True:
             with self.lock:
-                if self.last_frame is not None:
-                    return self.last_frame
+                if self.frame is not None:
+                    return self.frame
+            if time.time() - start > timeout:
+                raise RuntimeError("No frame received")
+            time.sleep(0.005)
                 
 """
 Compute depth from an RGB image using DepthAnythingV2
@@ -170,7 +170,7 @@ Uncomment the cmap line and the currently commented depth_colormap line and comm
 # cmap = colormaps.get_cmap('Spectral')
 def compute_depth(frame, depth_model, size, make_colormap=True):
 
-    depth = depth_model.infer_image(frame, size)    # as np ndarray, in meters (float32)
+    depth = depth_model.infer_image(frame, size)       # as np ndarray, in meters (float32)
     depth = (1000*depth).astype(np.uint16)             # Convert to mm and uint16 for Open3D integration (depth in mm is more standard for TSDF fusion)
     # the above line works as long as depth is ensured to be under 65.535 meters but this shouldn't matter
     # In case KITTI is used and you for some reason want to integrate VBG more than this limit (depth_max in config.yml), beware
@@ -392,34 +392,18 @@ def choose_primitive(vbg, camera_position, traj_linesets, goal_position, dist_th
         traj_lineset_copy = copy.deepcopy(traj_linset)
         traj_lineset_copy.transform(camera_position) # transform the lineset (copy) to the camera position
         pts = np.asarray(traj_lineset_copy.points) # meters # extract the points from the lineset
-
-        # Skip malformed trajectories with no sampled points.
-        if pts.size == 0:
-            continue
-
-        # If no obstacle voxels are available yet, treat trajectory as clear.
-        if voxel_coords_numpy.size == 0:
-            nearest_voxel_dist = np.inf
-        else:
-            tmp = distance.cdist(voxel_coords_numpy, pts, "sqeuclidean") # compute the distance between all voxels and all points in the trajectory
-            if tmp.size == 0:
-                nearest_voxel_dist = np.inf
-            else:
-                voxel_idx, pt_idx = np.unravel_index(np.argmin(tmp), tmp.shape) # extract indices of the nearest voxel to and nearest point in the trajectory
-                nearest_voxel_dist = np.sqrt(tmp[voxel_idx, pt_idx])
-
+        tmp = distance.cdist(voxel_coords_numpy, pts, "sqeuclidean") # compute the distance between all voxels and all points in the trajectory
+        voxel_idx, pt_idx = np.unravel_index(np.argmin(tmp), tmp.shape) # extract indices of the nearest voxel to and nearest point in the trajectory
+        nearest_voxel_dist = np.sqrt(tmp[voxel_idx, pt_idx])
         if nearest_voxel_dist > dist_threshold:
             # the trajectory meets the dist_threshold criterion
             if goal_position is not None:
                 # the trajectory satisfies the dist_threshold; let's compute the goal score
                 tmp_to_goal = distance.cdist(goal_position, pts, "sqeuclidean")
-                if tmp_to_goal.size == 0:
-                    continue
                 dst_to_goal = np.sqrt(np.min(tmp_to_goal))
                 if dst_to_goal < min_goal_score:
                     # we have a trajectory that gets us closer to the goal
-                    if DEBUG:
-                        print("[TRAJ] traj %d gets us closer to the goal: %f"%(traj_idx, dst_to_goal), flush=True)
+                    # print("traj %d gets us closer to the goal: %f"%(traj_idx, dst_to_goal))
                     max_traj_idx = traj_idx
                     min_goal_score = dst_to_goal
             else:
@@ -554,20 +538,21 @@ Args:
     apply_undistort: If False, the original image is returned (cropped if
         ``roi`` is not ``None``); no undistortion is performed.
 """
-def transform_image(image, mtx, dist, optimal_matrix, roi, apply_undistort: bool = True):
-    # optionally skip undistortion entirely
-    if not apply_undistort:
-        if roi is not None:
-            x, y, w, h = roi
-            return image[y:y+h, x:x+w]
-        return image
+def transform_image(image, mtx=None, dist=None, optimal_matrix=None, roi=None, enable_undistort = True, roi_crop = True):
+    transformed_image = image
+    if enable_undistort:
+        if not roi_crop:
+            if roi is not None:
+                x, y, w, h = roi
+                return image[y:y+h, x:x+w]
+            return image
 
-    # cv2 can handle both numpy arrays and other array-like objects efficiently
-    transformed_image = cv2.undistort(image if isinstance(image, np.ndarray) else np.asarray(image), 
-                                      mtx, dist, None, optimal_matrix)
-    # Crop the image to the ROI
-    x, y, w, h = roi
-    transformed_image = transformed_image[y:y+h, x:x+w]
+        # cv2 can handle both numpy arrays and other array-like objects efficiently
+        transformed_image = cv2.undistort(image if isinstance(image, np.ndarray) else np.asarray(image), 
+                                        mtx, dist, None, optimal_matrix)
+        # Crop the image to the ROI
+        x, y, w, h = roi
+        transformed_image = transformed_image[y:y+h, x:x+w]
 
     return transformed_image
 
@@ -617,7 +602,7 @@ def _pose_thread_worker():
         t = time.time()
 
         # Update shared pose
-        _pose_latest = (t, x, y, z, yaw, pitch, roll)
+        _pose_latest = (x, y, z, yaw, pitch, roll)
 
         # Signal that pose is ready (only matters first time)
         _pose_ready.set()
