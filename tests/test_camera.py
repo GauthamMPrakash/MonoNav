@@ -1,35 +1,71 @@
-"""
-This script tests the camera feed.
-"""
-
 import cv2
-import yaml
+import urllib.request
+import numpy as np
+import time
 
-CONFIG_PATH = "../config.yml"
-with open(CONFIG_PATH, "r") as f:
-    config = yaml.safe_load(f)
+URL = 'http://192.168.53.56:81/stream'
+CHUNK_SIZE = 256
+MAX_BUFFER_BYTES = 512_000
+REPORT_EVERY = 10
 
-# If you have multiple cameras hooked up to your desktop,
-# The camera number may change. If so, try
-# a different small, positive integer, e.g. -1, 0, 1, 2, 3, ...
-# If you're still having issues, ensure you have ffmpeg installed.
 
-camera = config["camera_num"]
-cap = cv2.VideoCapture(camera)
+def pop_latest_complete_jpeg(buf):
+    """Drain complete JPEGs and return only the newest one to minimize latency."""
+    newest = None
+    while True:
+        start = buf.find(b'\xff\xd8')
+        if start < 0:
+            break
 
-while(True):
-    # Capture frame-by-frame
-    ret, frame = cap.read()
-    if frame is None:
-        print("No frame captured.")
-        break
-    # Display the resulting frame
-    cv2.imshow('frame', frame)
+        end = buf.find(b'\xff\xd9', start + 2)
+        if end < 0:
+            if start > 0:
+                del buf[:start]
+            break
 
-    # Hit q to quit.
-    if cv2.waitKey(1) & 0xFF == ord('q'):
-        break
+        newest = bytes(buf[start:end + 2])
+        del buf[:end + 2]
 
-# Release the capture
-cap.release()
-cv2.destroyAllWindows()
+    return newest
+
+
+stream = urllib.request.urlopen(URL, timeout=5)
+buffer = bytearray()
+sum_ms = 0.0
+count = 0
+
+try:
+    while True:
+        t = time.perf_counter()
+        chunk = stream.read(CHUNK_SIZE)
+        if not chunk:
+            continue
+
+        buffer.extend(chunk)
+        if len(buffer) > MAX_BUFFER_BYTES:
+            del buffer[:-MAX_BUFFER_BYTES]
+
+        jpg = pop_latest_complete_jpeg(buffer)
+        if jpg is None:
+            continue
+
+        frame = cv2.imdecode(np.frombuffer(jpg, dtype=np.uint8), cv2.IMREAD_COLOR)
+        if frame is None:
+            continue
+
+        elapsed_ms = (time.perf_counter() - t) * 1000.0
+        sum_ms += elapsed_ms
+        count += 1
+
+        cv2.imshow('i', frame)
+        key = cv2.waitKey(1) & 0xFF
+        if key == 27 or key == ord('q'):
+            break
+
+        if count >= REPORT_EVERY:
+            print(f"avg read+decode over {count} frames: {sum_ms / count:.2f} ms", flush=True)
+            sum_ms = 0.0
+            count = 0
+finally:
+    stream.close()
+    cv2.destroyAllWindows()

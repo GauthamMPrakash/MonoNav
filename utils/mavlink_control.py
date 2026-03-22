@@ -187,7 +187,7 @@ def get_pose(blocking=False, timeout_s=None):
 
     return x, y, z, yaw, pitch, roll
 
-def arm(arm_state=1, force_disarm=True):
+def arm(arm_state=1, force_disarm=False):
     """
     Arm the drone
     """

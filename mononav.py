@@ -148,7 +148,6 @@ traj_list = get_trajlist(trajlib_dir)
 traj_linesets, period, forward_speed, amplitudes = get_traj_linesets(traj_list)
 if config['forward_speed'] is not None:
     forward_speed = config['forward_speed']
-max_traj_idx = int(len(traj_list)/2)
 print(f"\nTrajectory library loaded: {len(traj_list)} trajectories", flush=True)
 print("Press 'g' to enable MonoNav autonomous mode, or 'a'/'w'/'d' for manual left/straight/right", flush=True)
 
@@ -263,10 +262,9 @@ def main():
         # to internal [E, D, N] so it matches camera_position[0:-1, -1].
         if goal_position is not None:
             print("\nGoal position (RDF): ", goal_position, flush=True)
-            goal_position_ned = np.array(
-                rdf_goal_to_ned(goal_position[0], goal_position[1], goal_position[2], hdg)
-            mavc.printd(f"Goal position (NED): {goal_position_ned}")
-            goal_position = np.array([goal_position_ned[1], goal_position_ned[2], goal_position_ned[0]]).reshape(1, 3)
+            goal_position_ned = rdf_goal_to_ned(goal_position[0], goal_position[1], goal_position[2], hdg)
+            mavc.printd(f"Goal position (NED): {[goal_position_ned]}")
+            goal_position = np.array([goal_position_ned[1], goal_position_ned[2], goal_position_ned[0]]).reshape(1,3) # In EDN (So it is easier to integrate with O3D whoch uses RDF)
         mavc.printd(f"Heading offset: {hdg*180/np.pi}")
         mavc.set_mode('GUIDED')
 
@@ -282,32 +280,30 @@ def main():
 
         start_pose_thread(20)                      # Start background pose polling at given frequency (non-blocking)
 
-        while True: # Run until VBG is populated to prevent planning error
+        while True: # Run until VBG is populated to prevent planning error. This is checked by choose_primitive returning without exception
             bgr = cap.read()
-            if cv2.waitkey(1) && 0xFF == 27:        # exit on Esc
-                break
-            camera_position = get_pose_matrix(*pose)
+            cv2.waitKey(1)
             pose = get_latest_pose()
+            camera_position = get_pose_matrix(*pose)
             # COMPUTE DEPTH
             start_time_test = time.time()
-            depth_numpy, depth_colormap = compute_depth(bgr, depth_anything, INPUT_SIZE)
             transform_bgr = transform_image(bgr, mtx, dist, optimal_mtx, roi, enable_undistort)
             transform_rgb = cv2.cvtColor(transform_bgr, cv2.COLOR_BGR2RGB)
+            depth_numpy, depth_colormap = compute_depth(transform_bgr, depth_anything, INPUT_SIZE)
             print("TIME TO COMPUTE DEPTH:", time.time() - start_time_test)
             cv2.imshow("Frame", bgr)
             vbg.integration_step(transform_rgb, depth_numpy, camera_position)
             try:
                 max_traj_idx = choose_primitive(vbg.vbg, camera_position, traj_linesets, goal_position, min_dist2obs, filterYvals, filterWeights, filterTSDF, weight_threshold,) # Enable DEBUG to print trajectory scores during selection
+                print(f"[TRAJ] Next traj: {max_traj_idx}/{len(traj_list)-1}", flush=True)
                 break
             except ValueError:
                 continue
 
         print("Starting control.", flush=True)
-        traj_counter = 0         # how many trajectory iterations have we done?
-        # Initialize lists and frame counter.
-        frame_number = 0
-        processing_speed, loop_hz = 0, 0
-        traj_index = len(traj_list)//2
+        traj_counter = 0                    # how many trajectory iterations have we done?
+        frame_number = 0                    # Initialize frame counter.
+        processing_speed, loop_hz = 0, 0    # for debug display
 
         while not shouldStop:
             # Check for stop keys first (these exit the control loop). Important that they break out of the loop
@@ -316,22 +312,19 @@ def main():
                 DO NOT USE FOR NORMAL FLYING. WILL STOP MOTORS IMMEDIATELY CAUSING A CRASH. Only use in emergency situations when you need to stop the drone immediately.
                 """
                 mavc.set_mode('BRAKE')
-                mavc.arm(0)
+                mavc.arm(0, force_disarm=True)
                 print("Pressed p. EMERGENCY STOP.", flush=True)
-                shouldStop = True
                 break
             elif last_key_pressed == 'c':
                 mavc.set_mode('BRAKE')
                 time.sleep(0.2)
                 mavc.set_mode('LAND')
                 print("Pressed c. Ending control.", flush=True)
-                shouldStop = True
                 break
             elif last_key_pressed == 'r':
                 print("\nPressed r. Switching to SMART_RTL.\n", flush=True)
                 if FLY_VEHICLE:
                     mavc.set_mode('SMART_RTL')
-                shouldStop = True
                 break
             
             elif last_key_pressed == 'f':
@@ -364,6 +357,7 @@ def main():
                 print("Pressed g. Using MonoNav.", flush=True)
                 traj_index = max_traj_idx
             else:
+                mavc.send_body_offset_ned_vel(0, 0)
                 print("Hovering in place.", flush=True)
                 traj_index = None
 
@@ -376,7 +370,7 @@ def main():
                 row = np.array([frame_number, int(traj_idx_to_log), time.time()-start_flight_time]) # time since start of flight
                 with open(save_dir + '/trajectories.csv', 'a') as file:
                     np.savetxt(file, row.reshape(1, -1), delimiter=',', fmt='%s')
-            
+
             start_time = time.time()
             while time.time() - start_time <= period:
                 frame_start_time = time.time()
@@ -388,11 +382,11 @@ def main():
                         mavc.send_body_offset_ned_vel(forward_speed, yvel, yaw_rate=yawrate)
                 
                 # get_latest_pose returns (x, y, z, yaw, pitch, roll) - non-blocking from thread
-                t0=time.time()
+                #t0=time.time()
                 bgr = cap.read()
-                t1=time.time()
+                #t1=time.time()
                 pose = get_latest_pose()
-                t2=time.time()
+                #t2=time.time()
 
                 # Optionally transform camera image (undistort + crop) based on config
                 transform_bgr = transform_image(bgr, mtx, dist, optimal_mtx, roi, enable_undistort)
@@ -445,6 +439,7 @@ def main():
                     cv2.imshow("Frame", depth_colormap)
                 else:
                     cv2.imshow("Frame", transform_bgr)
+                cv2.waitKey(1)
 
                 if save_during_flight:
                     cv2.imwrite(img_dir + '/frame-%06d.rgb.jpg'%(frame_number), bgr)
@@ -456,7 +451,7 @@ def main():
                 frame_number += 1
             traj_counter += 1
 
-            print(f"Pose delay (ms): ({(t1-t0)*1000}, Capture delay (ms):{(t2-t1)*1000}", flush=True)
+            #print(f"Pose delay (ms): ({(t1-t0)*1000}, Capture delay (ms):{(t2-t1)*1000}", flush=True)
             # Add FPS counter to depth display
             cur_time  = time.time()
             loop_hz = 1.0 / (cur_time - start_time)
@@ -479,28 +474,30 @@ def main():
                 else:
                     traj_str = "Next traj:"
                 print(f"[TRAJ] {traj_str} {max_traj_idx}/{len(traj_list)-1}", flush=True)
-
-            # If this cycle ended due to a stop command, do not run planner updates.
-            if shouldStop:
+            
+            if shouldStop or last_key_pressed == 'Esc':        # exit on Esc or if shouldStop
                 break
 
         if camera_position is not None:
             camera_position = camera_position[0:-1, -1]
-            print("\n[INFO] Current distance to goal (m): ", np.linalg.norm(camera_position-goal_position[0]) if goal_position is not None else "N/A", flush=True)
+            print("\n[INFO] Current distance to goal (m): ", np.linalg.norm(camera_position-goal_position) if goal_position is not None else "N/A", flush=True)
             print("[INFO] Current RDF coords:", *camera_position, flush=True)
             print("[INFO] Current NED coords:", camera_position[2], camera_position[0], camera_position[1], flush=True)
 
         # save and view vbg (robust to missing save dir; always attempt visualization)
-        save_dir = os.path.dirname(npz_save_filename) if npz_save_filename else None
-        if save_dir and os.path.isdir(save_dir):
-            print("\nSaving to {}...".format(npz_save_filename), flush=True)
-            try:
-                vbg.vbg.save(npz_save_filename)
-                print("Saving finished", flush=True)
-            except Exception as e:
-                print(f"[warning] failed to save VoxelBlockGrid: {e}", flush=True)
+        if save_during_flight:
+            save_dir = os.path.dirname(npz_save_filename) if npz_save_filename else None
+            if save_dir and os.path.isdir(save_dir):
+                print("\nSaving to {}...".format(npz_save_filename), flush=True)
+                try:
+                    vbg.vbg.save(npz_save_filename)
+                    print("Saving finished", flush=True)
+                except Exception as e:
+                    print(f"[warning] failed to save VoxelBlockGrid: {e}", flush=True)
+            else:
+                print("\nSave directory not present!; skipping VBG file save\n", flush=True)
         else:
-            print("\nSave directory not present or saving disabled; skipping VBG file save\n", flush=True)
+            print("\nSaving disabled; skipping VBG file save\n", flush=True)
 
         # Attempt to extract and visualize point cloud regardless of save success
         try:
