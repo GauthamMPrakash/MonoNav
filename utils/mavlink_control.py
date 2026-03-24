@@ -36,9 +36,8 @@ def connect_drone(IP, baud=115200):
     """
     global drone
     drone = mavutil.mavlink_connection(IP, baud, autoreconnect=True)
-    time.sleep(0.05)
     printd("Waiting for heartbeat...")
-    while not drone.wait_heartbeat(timeout=1):
+    while not drone.wait_heartbeat(timeout=2):
         send_heartbeat()
     printd(f"Heartbeat received from system {drone.target_system} component {drone.target_component}")
     return drone

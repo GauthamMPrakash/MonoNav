@@ -5,7 +5,7 @@ trajlib_dir: "utils/trajlib/" # where to save & retrieve the trajectory library 
 # Camera Settings
 camera_calibration_path: 'utils/calibration/intrinsics.json' # camera calibration file (for undistortion)
 # Set to False to bypass undistort/crop transformation on incoming frames
-enable_undistort: False
+enable_undistort: True
 #camera_ip: 'http://10.42.0.29:81/stream'                    # camera stream URL (otherwise enter integer for camera index)   
 camera_ip: 'http://192.168.53.56:81/stream'
 
@@ -21,7 +21,7 @@ save_during_flight : False    # Whether to save images and reconstructions durin
 filterYvals: True             # this helps filter out the ground / ceiling (for planar navigation)
 filterWeights: True           # this helps filter out low-weight voxels
 filterTSDF: True
-weight_threshold: 5           # determine the weight threshold for filtering (higher threshold -> fewer points)
+weight_threshold: 4           # determine the weight threshold for filtering (higher threshold -> fewer points)
 VoxelBlockGrid:
   depth_scale: 1000.0         # 1000.0 is default (mm to m), scale factor for depth values during integration
   depth_max: 7.0              # max depth to include in the reconstruction
@@ -33,7 +33,7 @@ VoxelBlockGrid:
 goal_position_rdf: # from EKF origin
   - 0 # Right
   - -1.3   # Down
-  - 4   # Forward
+  - -4   # Forward
 
 min_dist2obs: 1.5             # minimum acceptable distance from obstacles, meters (for primitive selection)
 min_dist2goal: 1.0            # termination condition for reaching the goal, meters
