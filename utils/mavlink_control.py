@@ -372,7 +372,8 @@ def reboot_if_EKF_origin(pos_tolerance=0.2):
 
 def set_param(param_id, param_value, param_type, timeout=5.0):
     """
-    UNTESTED
+    UNTESTED func
+    -------------
 
     Set a parameter on the autopilot. Use with caution and ensure you know what the parameter does before changing.
     Waits for PARAM_VALUE response to verify successful parameter set with configurable timeout.

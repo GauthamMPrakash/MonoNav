@@ -146,10 +146,14 @@ vbg = VoxelBlockGrid(depth_scale, depth_max, trunc_voxel_multiplier, o3d.core.De
 trajlib_dir = config['trajlib_dir']
 traj_list = get_trajlist(trajlib_dir)
 traj_linesets, period, forward_speed, amplitudes = get_traj_linesets(traj_list)
+max_traj_idx = int(len(traj_list)/2) # set initial value to that of FORWARD flight (should be median value)
 if config['forward_speed'] is not None:
     forward_speed = config['forward_speed']
 print(f"\nTrajectory library loaded: {len(traj_list)} trajectories", flush=True)
 print("Press 'g' to enable MonoNav autonomous mode, or 'a'/'w'/'d' for manual left/straight/right", flush=True)
+
+# Track printing state for repeated modes so we only print once per mode transition.
+last_action_state = None
 
 # Planning presets
 filterYvals = config['filterYvals']
@@ -224,6 +228,7 @@ def main():
     global mtx, dist, optimal_mtx, roi
     global goal_position
     global save_dir
+    global last_action_state
 
     while True:
         # ARDUCOPTER CONTROL
@@ -299,12 +304,12 @@ def main():
             vbg.integration_step(transform_rgb, depth_numpy, camera_position)
             try:
                 max_traj_idx = choose_primitive(vbg.vbg, camera_position, traj_linesets, goal_position, min_dist2obs, filterYvals, filterWeights, filterTSDF, weight_threshold,) # Enable DEBUG to print trajectory scores during selection
-                print(f"[TRAJ] Next traj: {max_traj_idx}/{len(traj_list)-1}", flush=True)
                 break
             except ValueError:
                 continue
 
         print("Starting control.", flush=True)
+        print(f"[TRAJ] Estimated next traj: {max_traj_idx}/{len(traj_list)-1}", flush=True)
         traj_counter = 0                    # how many trajectory iterations have we done?
         frame_number = 0                    # Initialize frame counter.
         processing_speed, loop_hz = 0, 0    # for debug display
@@ -322,7 +327,7 @@ def main():
                 if last_key_pressed == 'g':
                     traj_str = "Selected traj:"
                 else:
-                    traj_str = "Next traj:"
+                    traj_str = "Estimate next traj:"
                 print(f"[TRAJ] {traj_str} {max_traj_idx}/{len(traj_list)-1}", flush=True)
                 
             # Check for stop keys first (these exit the control loop). Important that they break out of the loop
@@ -373,7 +378,9 @@ def main():
                 traj_index = None # no trajectory after the backward command
                 last_key_pressed = None # reset key state immediately after yaw command to prevent key carryover into future periods
             elif last_key_pressed == 'g':      # GO mode
-                print("Pressed g. Using MonoNav.", flush=True)
+                if last_action_state != 'g':
+                    print("Pressed g. Using MonoNav.", flush=True)
+                    last_action_state = 'g'
                 traj_index = max_traj_idx
             else:
                 mavc.send_body_offset_ned_vel(0, 0)
@@ -382,7 +389,10 @@ def main():
 
             if last_key_pressed != 'g':
                 last_key_pressed = None # reset key state if we're not in GO mode, so that single keypresses don't carry over into future periods
-                    
+            
+                if last_action_state not in ('g', 'goal'):
+                    last_action_state = None # reset last_action_state if we're not in GO or hover, so that we can print the next mode transition when it happens without being stuck in a state
+
             start_time = time.perf_counter()
             while time.perf_counter() - start_time <= period:
                 frame_start_time = time.perf_counter()
@@ -401,7 +411,7 @@ def main():
                 depth_numpy, depth_colormap = compute_depth(transform_bgr, depth_anything, INPUT_SIZE, make_colormap=True)
                 camera_position = get_pose_matrix(*pose)
                 
-                if last_key_pressed in ['g', 'w', 'a', 'd', 'f']: # if not in hover or land mode, integrate into VBG
+                if last_key_pressed in ('g', 'w', 'a', 'd', 'f'): # if not in hover or land mode, integrate into VBG
                     vbg.integration_step(transform_rgb, depth_numpy, camera_position)
 
                 if traj_index is not None:
@@ -414,7 +424,9 @@ def main():
                 if goal_position is not None:
                     dist_to_goal = np.linalg.norm(camera_position[0:-1, -1]-goal_position[0])
                     if dist_to_goal < min_dist2goal:
-                        print("Reached goal!")
+                        if last_action_state != 'goal':
+                            print("Reached goal!")
+                        last_action_state = 'goal'
                         shouldStop = True
                         break
                 
@@ -469,16 +481,16 @@ def main():
             cur_time  = time.perf_counter()
             loop_hz = 1.0 / (cur_time - start_time)
             processing_speed = 1.0 / (cur_time - frame_start_time)
-
-            # Planner always scores trajectories, but only GO mode applies them.
-            max_traj_idx = choose_primitive(vbg.vbg, camera_position, traj_linesets, goal_position, min_dist2obs, filterYvals, filterWeights, filterTSDF, weight_threshold,) # Enable DEBUG to print trajectory scores during selection
-                
+   
             # Save trajectory information
             if save_during_flight:
                 row = np.array([frame_number, int(max_traj_idx), time.time()-start_flight_time]) # time since start of flight
                 with open(save_dir + '/trajectories.csv', 'a') as file:
                     np.savetxt(file, row.reshape(1, -1), delimiter=',', fmt='%s')
             
+            # Planner always scores trajectories, but only GO mode applies them.
+            max_traj_idx = choose_primitive(vbg.vbg, camera_position, traj_linesets, goal_position, min_dist2obs, filterYvals, filterWeights, filterTSDF, weight_threshold,) # Enable DEBUG to print trajectory scores during selection
+             
             if shouldStop:        # exit on Esc or if shouldStop
                 break
 
@@ -525,10 +537,15 @@ def main():
         traceback.print_exc()
             
     finally:
+        mavc.en_pose_stream(3) # set pose stream to low frequency to reduce bandwidth usage
         print("Releasing camera capture.")
         stop_keyboard_listener()
+        if 'cap' in locals() and cap is not None:
+            try:
+                cap.release()
+            except Exception as e:
+                print(f"[warning] failed to release camera capture: {e}", flush=True)
         cv2.destroyAllWindows()
-        cap.cap.release()
 
 if __name__ == "__main__":
     main()

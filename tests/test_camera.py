@@ -4,9 +4,9 @@ import numpy as np
 import time
 
 URL = 'http://192.168.53.56:81/stream'
-CHUNK_SIZE = 1024
-MAX_BUFFER_BYTES = 262_144
-REPORT_EVERY = 10
+CHUNK_SIZE = 512
+MAX_BUFFER_BYTES = 512_000
+REPORT_EVERY = 20
 
 
 def pop_latest_complete_jpeg(buf):

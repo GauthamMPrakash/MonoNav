@@ -141,12 +141,17 @@ class VideoCapture:
         self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         self.frame = None
         self.lock = threading.Lock()
-        threading.Thread(target=self._reader, daemon=True).start()
+        self.running = True
+        self.thread = threading.Thread(target=self._reader, daemon=True)
+        self.thread.start()
 
     def _reader(self):
-        while True:
+        while self.running:
+            if self.cap is None:
+                break
             ret, frame = self.cap.read()
-            if frame is None:
+            if not ret or frame is None:
+                time.sleep(0.01)
                 continue
             with self.lock:
                 self.frame = frame
@@ -160,6 +165,17 @@ class VideoCapture:
             if time.time() - start > timeout:
                 raise RuntimeError("No frame received")
             time.sleep(0.005)
+
+    def release(self):
+        self.running = False
+        if hasattr(self, 'thread') and self.thread is not None:
+            self.thread.join(timeout=1.0)
+        if hasattr(self, 'cap') and self.cap is not None:
+            try:
+                self.cap.release()
+            except Exception:
+                pass
+            self.cap = None
                 
 """
 Compute depth from an RGB image using DepthAnythingV2
