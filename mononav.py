@@ -152,10 +152,14 @@ vbg = VoxelBlockGrid(depth_scale, depth_max, trunc_voxel_multiplier, o3d.core.De
 trajlib_dir = config['trajlib_dir']
 traj_list = get_trajlist(trajlib_dir)
 traj_linesets, period, forward_speed, amplitudes = get_traj_linesets(traj_list)
+max_traj_idx = int(len(traj_list)/2)
 if config['forward_speed'] is not None:
     forward_speed = config['forward_speed']
-max_traj_idx = int(len(traj_list)/2)
 print(f"\nTrajectory library loaded: {len(traj_list)} trajectories", flush=True)
+print("Press 'g' for autonomous mode, 'h' to hover, 'f' to fuse, 'a'/'w'/'d' for manual left/straight/right, or 'q'/'e' to yaw", flush=True)
+
+# Track mode transitions so repeated states do not spam the console.
+last_action_state = None
 
 # Planning presets
 filterYvals = config['filterYvals']
@@ -173,6 +177,9 @@ min_dist2goal = config['min_dist2goal']
 
 planner_cfg = config.get('planner', {})
 planner_type = str(planner_cfg.get('type', 'dstar_lite')).lower()
+valid_planner_types = ('dstar_lite', 'dstar_lite_primitives', 'primitive')
+if planner_type not in valid_planner_types:
+    raise ValueError(f"Unsupported planner.type '{planner_type}'. Expected one of {valid_planner_types}.")
 planner_replan_period = planner_cfg.get('replan_period')
 if planner_replan_period is None:
     planner_replan_period = float(period)
@@ -205,7 +212,6 @@ primitive_dstar_planner = DStarLitePrimitivePlanner2D(
 if planner_is_dstar and goal_position is None:
     print(f"[warning] planner.type is {planner_type} but no goal_position_rdf is configured. GO mode will fall back to primitive selection.", flush=True)
 print(f"Planner: {planner_type}", flush=True)
-print("Press 'g' for autonomous mode, 'h' to hover, or 'a'/'w'/'d' for manual left/straight/right", flush=True)
 
 if save_during_flight:
     # Make directories for data
@@ -243,16 +249,6 @@ def _on_key_press(key):
     except AttributeError:
         last_key_pressed = key
 
-
-def _planar_heading_from_pose(camera_pose):
-    forward_xz = np.asarray(camera_pose[[0, 2], 2], dtype=float)
-    norm = float(np.linalg.norm(forward_xz))
-    if norm < 1e-6:
-        return 0.0
-    forward_xz /= norm
-    return float(np.arctan2(forward_xz[1], forward_xz[0]))
-
-
 def start_keyboard_listener():
     global keyboard_listener
     if keyboard_listener is None:
@@ -267,14 +263,39 @@ def stop_keyboard_listener():
         keyboard_listener = None
 
 
-def opencv_waitkey():
+def _choose_next_primitive(camera_position):
+    if camera_position is None:
+        return None
+    try:
+        return choose_primitive(
+            vbg.vbg,
+            camera_position,
+            traj_linesets,
+            goal_position,
+            min_dist2obs,
+            filterYvals,
+            filterWeights,
+            filterTSDF,
+            weight_threshold,
+        )
+    except ValueError:
+        return None
+
+
+def _poll_opencv_escape():
+    key_code = cv2.waitKey(1)
+    return key_code != -1 and (key_code & 0xFF) == 27
+
+
+def _planar_heading_from_pose(camera_pose):
     """
-    Process OpenCV GUI events; optionally latch Esc into global key state.
+    Return planar heading for the primitive planner's [forward, right] frame.
     """
-    key = cv2.waitKey(1) & 0xFF
-    if key == 27:
-        return True
-    return False
+    if camera_pose is None:
+        return 0.0
+    forward_axis = np.asarray(camera_pose[:3, 2], dtype=float)
+    return float(np.arctan2(forward_axis[0], forward_axis[2]))
+
 
 # MAIN MONONAV CONTROL LOOP
 def main():
@@ -284,7 +305,9 @@ def main():
     global mtx, dist, optimal_mtx, roi
     global goal_position
     global save_dir
+    global last_action_state
     cap = None
+    camera_position = None
 
     while True:
         # ARDUCOPTER CONTROL
@@ -292,7 +315,7 @@ def main():
         print("Connecting to drone...", flush=True)
         mavc.connect_drone(IP, baud=baud)
         print("Connected.")
-        mavc.en_pose_stream(30)                    # Commands AP to stream poses at given frequency
+        mavc.en_pose_stream(25)                    # Commands AP to stream poses at given frequency
         mavc.set_ekf_origin(EKF_LAT, EKF_LON, 0) # Ignored if already close to the previous origin, if set
         reboot = mavc.reboot_if_EKF_origin(0.5)  # Call this function after enabling pose_stream
         if reboot:
@@ -319,22 +342,7 @@ def main():
         vbg_intrinsics = get_ideal_intrinsics(frame_width, frame_height)
     vbg.set_intrinsics(vbg_intrinsics)
 
-    # Scale mtx, dist to match current camera resolution
-    # Read one frame to get actual resolution
     try:
-        for i in range(0, config['num_pre_depth_frames']):
-            bgr = cap.read()
-            # COMPUTE DEPTH
-            start_time_test = time.time()
-            # depth_numpy, depth_colormap = compute_depth_fast(bgr, INPUT_SIZE)
-            depth_numpy, depth_colormap = compute_depth(bgr, depth_anything, INPUT_SIZE)
-            print("TIME TO COMPUTE DEPTH:", time.time() - start_time_test)
-            cv2.imshow("test", bgr)
-            # Ignore warmup keys to avoid carrying stale ESC into the control loop.
-            opencv_waitkey()
-        cv2.destroyAllWindows()
-        start_keyboard_listener()
-        
         hdg = mavc.get_pose()[3] # get initial yaw
         # Convert startup nose-relative RDF goal to absolute NED, then reorder
         # to internal [E, D, N] so it matches camera_position[0:-1, -1].
@@ -351,6 +359,7 @@ def main():
             ).reshape(1, 3)
         mavc.printd(f"Heading offset: {hdg*180/np.pi}")
         mavc.set_mode('GUIDED')
+        start_keyboard_listener()
 
         start_flight_time = time.time()
         if FLY_VEHICLE:
@@ -359,22 +368,150 @@ def main():
             print("Taking off.", flush=True)
             mavc.takeoff(height)
             # mavc.set_speed(forward_speed)
-        start_pose_thread(15)                      # Start background pose polling at given frequency (non-blocking)
+        start_pose_thread(20)                      # Start background pose polling at given frequency (non-blocking)
+
+        # Prime the VBG until primitive selection becomes valid so manual and primitive GO
+        # modes start with a meaningful candidate instead of immediately erroring on sparse data.
+        while not shouldStop:
+            bgr = cap.read()
+            pose = get_latest_pose()
+            camera_position = get_pose_matrix(*pose)
+            transform_bgr = transform_image(bgr, mtx, dist, optimal_mtx, roi, enable_undistort)
+            transform_rgb = cv2.cvtColor(transform_bgr, cv2.COLOR_BGR2RGB)
+            depth_numpy, depth_colormap = compute_depth(transform_bgr, depth_anything, INPUT_SIZE)
+            vbg.integration_step(transform_rgb, depth_numpy, camera_position)
+            max_traj_idx = _choose_next_primitive(camera_position)
+            if max_traj_idx is not None:
+                break
+
+            if depth_colormap is not None:
+                cv2.imshow("Depth", depth_colormap)
+            else:
+                cv2.imshow("Depth", transform_bgr)
+            if _poll_opencv_escape():
+                print("Pressed esc. Ending control.", flush=True)
+                shouldStop = True
+                last_key_pressed = 'c'
+                break
+
+        if shouldStop:
+            return
+
         print("Starting control.", flush=True)
-        traj_counter = 0         # how many trajectory iterations have we done?
-        # Initialize lists and frame counter.
+        print(f"[TRAJ] Estimated next traj: {max_traj_idx}/{len(traj_list)-1}", flush=True)
         frame_number = 0
         processing_speed, loop_hz = 0, 0
-        traj_index = len(traj_list)//2
-        auto_mode_active = False
         auto_hold_down = None  # latch altitude in 2D mode
         planned_auto_traj_index = None
         current_waypoint_edn = None
-        current_path_xz = np.empty((0, 2), dtype=float)
-        camera_position = None
+
+        def reset_auto_state():
+            nonlocal auto_hold_down, planned_auto_traj_index, current_waypoint_edn
+            auto_hold_down = None
+            planned_auto_traj_index = None
+            current_waypoint_edn = None
+
+        def refresh_dstar_command():
+            nonlocal auto_hold_down, planned_auto_traj_index, current_waypoint_edn
+            if goal_position is None or camera_position is None:
+                reset_auto_state()
+                return
+
+            current_position = camera_position[0:-1, -1].astype(float)
+            if auto_hold_down is None:
+                auto_hold_down = float(current_position[1])
+
+            observed_points_xz, obstacle_points_xz = extract_planar_vbg_points(
+                vbg.vbg,
+                current_down=current_position[1],
+                vertical_half_extent=planner_vertical_half_extent,
+                filter_weights=filterWeights,
+                weight_threshold=weight_threshold,
+            )
+            mode = mavc.get_mode() if FLY_VEHICLE else 'GUIDED'
+
+            if planner_type == 'dstar_lite_primitives':
+                observed_points_fr = observed_points_xz[:, [1, 0]]
+                obstacle_points_fr = obstacle_points_xz[:, [1, 0]]
+                plan_result = primitive_dstar_planner.plan(
+                    start_xy=current_position[[2, 0]],
+                    goal_xy=goal_position[0, [2, 0]],
+                    obstacle_points_xy=obstacle_points_fr,
+                    observed_points_xy=observed_points_fr,
+                    start_heading_rad=_planar_heading_from_pose(camera_position),
+                )
+                planner_name = "D* Lite primitive"
+            else:
+                plan_result = dstar_planner.plan(
+                    start_xy=current_position[[0, 2]],
+                    goal_xy=goal_position[0, [0, 2]],
+                    obstacle_points_xy=obstacle_points_xz,
+                    observed_points_xy=observed_points_xz,
+                )
+                planner_name = "D* Lite"
+
+            if plan_result.found:
+                if planner_type == 'dstar_lite_primitives':
+                    current_waypoint_edn = None
+                    planned_auto_traj_index = (
+                        int(plan_result.selected_primitive_indices[0])
+                        if len(plan_result.selected_primitive_indices) > 0
+                        else None
+                    )
+                    if mode == 'BRAKE' and FLY_VEHICLE:
+                        mavc.set_mode('GUIDED')
+                    primitive_trace = ""
+                    if len(plan_result.selected_primitives) > 0:
+                        shown = plan_result.selected_primitives[:6]
+                        suffix = "..." if len(plan_result.selected_primitives) > len(shown) else ""
+                        primitive_trace = f" prim={shown}{suffix}"
+                    print(
+                        f"[PLAN] {planner_name} cells={len(plan_result.grid_path)} changed={plan_result.changed_cells} next_traj={planned_auto_traj_index}{primitive_trace}",
+                        flush=True,
+                    )
+                    return
+
+                planned_auto_traj_index = None
+                waypoint_xz = select_lookahead_waypoint(
+                    plan_result.world_path,
+                    current_position[[0, 2]],
+                    planner_waypoint_lookahead,
+                    planner_waypoint_reached_radius,
+                )
+                target_down = float(goal_position[0, 1]) if planner_hold_goal_altitude else float(auto_hold_down)
+                if waypoint_xz is not None:
+                    current_waypoint_edn = np.array([waypoint_xz[0], target_down, waypoint_xz[1]], dtype=float)
+                    if mode == 'BRAKE' and FLY_VEHICLE:
+                        mavc.set_mode('GUIDED')
+                    rdf_waypoint = ned_to_rdf(
+                        current_waypoint_edn[2],
+                        current_waypoint_edn[0],
+                        current_waypoint_edn[1],
+                        hdg,
+                    )
+                    print(
+                        f"[PLAN] {planner_name} cells={len(plan_result.grid_path)} changed={plan_result.changed_cells} RDF={np.round(rdf_waypoint, 3)}",
+                        flush=True,
+                    )
+                    return
+
+                current_waypoint_edn = None
+                print(f"[PLAN] {planner_name} produced no usable waypoint.", flush=True)
+                return
+
+            current_waypoint_edn = None
+            planned_auto_traj_index = None
+            if mode == 'GUIDED' and FLY_VEHICLE:
+                mavc.set_mode('BRAKE')
+                time.sleep(0.1)
+            print(f"[PLAN] No {planner_name} path: {plan_result.reason}", flush=True)
 
         while not shouldStop:
             traj_index = None
+            fuse_only = False
+            mode = mavc.get_mode() if FLY_VEHICLE else 'GUIDED'
+            key_before_period = last_key_pressed
+            go_mode_active = last_key_pressed == 'g'
 
             # Check for stop keys first (these exit the control loop). Important that they break out of the loop
             if last_key_pressed == 'p':
@@ -382,14 +519,15 @@ def main():
                 DO NOT USE FOR NORMAL FLYING. WILL STOP MOTORS IMMEDIATELY CAUSING A CRASH. Only use in emergency situations when you need to stop the drone immediately.
                 """
                 mavc.set_mode('BRAKE')
-                mavc.arm(0)
+                mavc.arm(0, force_disarm=True)
                 print("Pressed p. EMERGENCY STOP.", flush=True)
                 shouldStop = True
                 break
-            elif last_key_pressed == 'c':
+            elif last_key_pressed in ('c', 'esc'):
                 mavc.set_mode('BRAKE')
+                time.sleep(0.2)
                 mavc.set_mode('LAND')
-                print("Pressed c. Ending control.", flush=True)
+                print(f"Pressed {last_key_pressed}. Ending control.", flush=True)
                 shouldStop = True
                 break
             elif last_key_pressed == 'r':
@@ -400,50 +538,68 @@ def main():
                 break
 
             elif last_key_pressed == 'h':
-                print("Pressed h. Hovering in place.", flush=True)
-                auto_mode_active = False
-                auto_hold_down = None
-                planned_auto_traj_index = None
-                current_waypoint_edn = None
-                current_path_xz = np.empty((0, 2), dtype=float)
+                if last_action_state != 'hover':
+                    print("Pressed h. Hovering in place.", flush=True)
+                last_action_state = 'hover'
+                reset_auto_state()
                 last_key_pressed = None
 
+            elif last_key_pressed == 'f':
+                print("Pressed f. Fusing current frame into VBG (no movement).", flush=True)
+                last_action_state = 'fuse'
+                reset_auto_state()
+                fuse_only = True
+                last_key_pressed = None
             elif last_key_pressed == 'a':
                 print("Pressed a. Going left.", flush=True)
-                auto_mode_active = False
-                auto_hold_down = None
-                planned_auto_traj_index = None
-                current_waypoint_edn = None
+                last_action_state = 'manual'
+                reset_auto_state()
                 traj_index = 0
                 last_key_pressed = None
             elif last_key_pressed == 'w':
                 print("Pressed w. Going straight.", flush=True)
-                auto_mode_active = False
-                auto_hold_down = None
-                planned_auto_traj_index = None
-                current_waypoint_edn = None
+                last_action_state = 'manual'
+                reset_auto_state()
                 traj_index = len(traj_list)//2
                 last_key_pressed = None
             elif last_key_pressed == 'd':
                 print("Pressed d. Going right.", flush=True)
-                auto_mode_active = False
-                auto_hold_down = None
-                planned_auto_traj_index = None
-                current_waypoint_edn = None
+                last_action_state = 'manual'
+                reset_auto_state()
                 traj_index = len(traj_list)-1
                 last_key_pressed = None
-            elif last_key_pressed == 'g':
-                auto_mode_active = True
-                auto_hold_down = None
-                planned_auto_traj_index = None
-                if planner_is_dstar and goal_position is not None:
-                    planner_label = "MonoNav D* Lite" if planner_type == 'dstar_lite' else "MonoNav D* Lite (primitives)"
-                    print(f"Pressed g. Using {planner_label}.", flush=True)
-                else:
-                    print("Pressed g. Using MonoNav primitive planner.", flush=True)
-                    traj_index = max_traj_idx
+            elif last_key_pressed == 'q':
+                print("Pressed q. Yawing left.", flush=True)
+                last_action_state = 'yaw'
+                reset_auto_state()
+                if FLY_VEHICLE:
+                    mavc.send_body_offset_ned_vel(0, 0, yaw_rate=-0.3)
                 last_key_pressed = None
-            elif auto_mode_active:
+            elif last_key_pressed == 'e':
+                print("Pressed e. Yawing right.", flush=True)
+                last_action_state = 'yaw'
+                reset_auto_state()
+                if FLY_VEHICLE:
+                    mavc.send_body_offset_ned_vel(0, 0, yaw_rate=0.3)
+                last_key_pressed = None
+            elif go_mode_active:
+                planner_state = f"go:{planner_type}" if planner_is_dstar and goal_position is not None else "go:primitive"
+                if last_action_state != planner_state:
+                    reset_auto_state()
+                    if planner_is_dstar and goal_position is not None:
+                        planner_label = "MonoNav D* Lite" if planner_type == 'dstar_lite' else "MonoNav D* Lite (primitives)"
+                        print(f"Pressed g. Using {planner_label}.", flush=True)
+                    else:
+                        print("Pressed g. Using MonoNav primitive planner.", flush=True)
+                last_action_state = planner_state
+                if planner_is_dstar and goal_position is not None:
+                    missing_command = (
+                        planner_type == 'dstar_lite' and current_waypoint_edn is None
+                    ) or (
+                        planner_type == 'dstar_lite_primitives' and planned_auto_traj_index is None
+                    )
+                    if missing_command:
+                        refresh_dstar_command()
                 if planner_type == 'dstar_lite' and goal_position is not None:
                     traj_index = None
                 elif planner_type == 'dstar_lite_primitives' and goal_position is not None:
@@ -451,11 +607,26 @@ def main():
                 else:
                     traj_index = max_traj_idx
             else:
-                print("Hovering in place.", flush=True)
-                current_waypoint_edn = None
+                if last_action_state != 'hover':
+                    print("Hovering in place.", flush=True)
+                last_action_state = 'hover'
+                reset_auto_state()
                 if FLY_VEHICLE:
                     mavc.send_body_offset_ned_vel(0, 0, yaw_rate=0)
                 time.sleep(0.1)
+
+            if go_mode_active and (not planner_is_dstar or goal_position is None) and max_traj_idx is None:
+                if mode == 'GUIDED' and FLY_VEHICLE:
+                    mavc.set_mode('BRAKE')
+                    time.sleep(0.1)
+                if last_action_state != 'hover:no_safe_traj':
+                    print("[INFO] No safe trajectory found. Hovering in place.", flush=True)
+                last_action_state = 'hover:no_safe_traj'
+                traj_index = None
+
+            if FLY_VEHICLE and mode == 'BRAKE':
+                if traj_index is not None or (go_mode_active and planner_type == 'dstar_lite' and current_waypoint_edn is not None):
+                    mavc.set_mode('GUIDED')
 
             # Save trajectory information
             if save_during_flight:
@@ -464,17 +635,22 @@ def main():
                 with open(save_dir + '/trajectories.csv', 'a') as file:
                     np.savetxt(file, row.reshape(1, -1), delimiter=',', fmt='%s')
 
-            command_period = planner_replan_period if auto_mode_active and planner_type == 'dstar_lite' and goal_position is not None else period
-            start_time = time.time()
-            while time.time() - start_time <= command_period:
-                frame_start_time = time.time()
+            if go_mode_active and planner_type == 'dstar_lite' and goal_position is not None:
+                command_period = planner_replan_period
+            else:
+                command_period = period
+
+            start_time = time.perf_counter()
+            while time.perf_counter() - start_time <= command_period:
+                elapsed = time.perf_counter() - start_time
+                frame_start_time = time.perf_counter()
                 if traj_index is not None:
-                    yawrate = -amplitudes[traj_index] * np.sin(np.pi/period*(time.time() - start_time))  # rad/s
+                    yawrate = -amplitudes[traj_index] * np.sin(np.pi / period * elapsed)  # rad/s
                     yvel = yawrate * yvel_gain
                     yawrate = yawrate * yawrate_gain
                     if FLY_VEHICLE:
                         mavc.send_body_offset_ned_vel(forward_speed, yvel, yaw_rate=yawrate)
-                elif auto_mode_active and planner_type == 'dstar_lite' and current_waypoint_edn is not None:
+                elif go_mode_active and planner_type == 'dstar_lite' and current_waypoint_edn is not None:
                     if FLY_VEHICLE:
                         mavc.send_local_ned_pos(current_waypoint_edn[2], current_waypoint_edn[0], current_waypoint_edn[1])
 
@@ -482,26 +658,20 @@ def main():
                 # get_latest_pose returns (x, y, z, yaw, pitch, roll) - non-blocking from thread
                 pose = get_latest_pose()
 
-                # Optionally transform camera image (undistort + crop) based on config
-                if enable_undistort:
-                    transform_bgr = transform_image(bgr, mtx, dist, optimal_mtx, roi)
-                    transform_rgb = cv2.cvtColor(transform_bgr, cv2.COLOR_BGR2RGB)
-                else:
-                    transform_bgr = bgr
-                    transform_rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-                #transform_rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-
-                # compute depth
+                transform_bgr = transform_image(bgr, mtx, dist, optimal_mtx, roi, enable_undistort)
+                transform_rgb = cv2.cvtColor(transform_bgr, cv2.COLOR_BGR2RGB)
                 depth_numpy, depth_colormap = compute_depth(transform_bgr, depth_anything, INPUT_SIZE, make_colormap=True)
                 camera_position = get_pose_matrix(*pose)
 
-                if auto_mode_active or traj_index is not None:
+                if go_mode_active or traj_index is not None or fuse_only:
                     vbg.integration_step(transform_rgb, depth_numpy, camera_position)
 
                 if goal_position is not None:
                     dist_to_goal = np.linalg.norm(camera_position[0:-1, -1]-goal_position[0])
                     if dist_to_goal < min_dist2goal:
-                        print("Reached goal!")
+                        if last_action_state != 'goal':
+                            print("Reached goal!", flush=True)
+                        last_action_state = 'goal'
                         shouldStop = True
                         break
 
@@ -526,9 +696,6 @@ def main():
                         color=(255, 255, 255),
                     )
 
-                    line_spacing = 5
-                    fps_y = int(hz_y + hz_size[1] + line_spacing + textsize[1])
-
                     cv2.putText(
                         depth_colormap,
                         fps_text,
@@ -540,7 +707,7 @@ def main():
                     )
                     cv2.imshow("Depth", depth_colormap)
                 #cv2.imshow("RGB", transform_bgr)
-                if opencv_waitkey():
+                if _poll_opencv_escape():
                     print("Pressed esc. Ending control.", flush=True)
                     shouldStop = True
                     last_key_pressed = 'c'
@@ -554,128 +721,36 @@ def main():
                     np.savetxt(pose_dir + '/frame-%06d.pose.txt'%(frame_number), camera_position)
 
                 frame_number += 1
-            traj_counter += 1
 
             # Add FPS counter to depth display
-            cur_time  = time.time()
-            loop_hz = 1.0 / (cur_time - start_time)
-            processing_speed = 1.0 / (cur_time - frame_start_time)
+            cur_time  = time.perf_counter()
+            loop_hz = 1.0 / max(cur_time - start_time, 1e-6)
+            processing_speed = 1.0 / max(cur_time - frame_start_time, 1e-6)
 
-            # If a key was pressed during the period, let the outer loop consume it next.
-            if last_key_pressed in ('p', 'c', 'r', 'a', 'w', 'd', 'g', 'h'):
+            if shouldStop:
+                break
+            if last_key_pressed not in (None, key_before_period):
                 continue
 
-            if auto_mode_active and planner_is_dstar and goal_position is not None and camera_position is not None:
-                current_position = camera_position[0:-1, -1].astype(float)
-                if auto_hold_down is None:
-                    auto_hold_down = float(current_position[1])
-                observed_points_xz, obstacle_points_xz = extract_planar_vbg_points(
-                    vbg.vbg,
-                    current_down=current_position[1],
-                    vertical_half_extent=planner_vertical_half_extent,
-                    filter_weights=filterWeights,
-                    weight_threshold=weight_threshold,
-                )
-                if planner_type == 'dstar_lite_primitives':
-                    plan_result = primitive_dstar_planner.plan(
-                        start_xy=current_position[[0, 2]],
-                        goal_xy=goal_position[0, [0, 2]],
-                        obstacle_points_xy=obstacle_points_xz,
-                        observed_points_xy=observed_points_xz,
-                        start_heading_rad=_planar_heading_from_pose(camera_position),
-                    )
-                    planner_name = "D* Lite primitive"
-                else:
-                    plan_result = dstar_planner.plan(
-                        start_xy=current_position[[0, 2]],
-                        goal_xy=goal_position[0, [0, 2]],
-                        obstacle_points_xy=obstacle_points_xz,
-                        observed_points_xy=observed_points_xz,
-                    )
-                    planner_name = "D* Lite"
-                mode = mavc.get_mode() if FLY_VEHICLE else 'GUIDED'
-                if plan_result.found:
-                    current_path_xz = plan_result.world_path
-                    if planner_type == 'dstar_lite_primitives':
-                        current_waypoint_edn = None
-                        planned_auto_traj_index = (
-                            int(plan_result.selected_primitive_indices[0])
-                            if len(plan_result.selected_primitive_indices) > 0
-                            else None
-                        )
-                        if mode == 'BRAKE' and FLY_VEHICLE:
-                            mavc.set_mode('GUIDED')
-                        primitive_trace = ""
-                        if len(plan_result.selected_primitives) > 0:
-                            shown = plan_result.selected_primitives[:6]
-                            suffix = "..." if len(plan_result.selected_primitives) > len(shown) else ""
-                            primitive_trace = f" prim={shown}{suffix}"
-                        print(
-                            f"[PLAN] {planner_name} cells={len(plan_result.grid_path)} changed={plan_result.changed_cells} next_traj={planned_auto_traj_index}{primitive_trace}",
-                            flush=True,
-                        )
-                    else:
-                        planned_auto_traj_index = None
-                        waypoint_xz = select_lookahead_waypoint(
-                            plan_result.world_path,
-                            current_position[[0, 2]],
-                            planner_waypoint_lookahead,
-                            planner_waypoint_reached_radius,
-                        )
-                        target_down = float(goal_position[0, 1]) if planner_hold_goal_altitude else float(auto_hold_down)
-                        if waypoint_xz is not None:
-                            current_waypoint_edn = np.array([waypoint_xz[0], target_down, waypoint_xz[1]], dtype=float)
-                            if mode == 'BRAKE' and FLY_VEHICLE:
-                                mavc.set_mode('GUIDED')
-                            rdf_waypoint = ned_to_rdf(
-                                current_waypoint_edn[2],
-                                current_waypoint_edn[0],
-                                current_waypoint_edn[1],
-                                hdg,
-                            )
-                            print(
-                                f"[PLAN] {planner_name} cells={len(plan_result.grid_path)} changed={plan_result.changed_cells} RDF={np.round(rdf_waypoint, 3)}",
-                                flush=True,
-                            )
-                        else:
-                            current_waypoint_edn = None
-                            print(f"[PLAN] {planner_name} produced no usable waypoint.", flush=True)
-                else:
-                    current_path_xz = np.empty((0, 2), dtype=float)
-                    current_waypoint_edn = None
-                    planned_auto_traj_index = None
-                    if mode == 'GUIDED' and FLY_VEHICLE:
-                        mavc.set_mode('BRAKE')
-                        time.sleep(0.1)
-                    print(f"[PLAN] No {planner_name} path: {plan_result.reason}", flush=True)
+            max_traj_idx = _choose_next_primitive(camera_position)
 
-            elif auto_mode_active and camera_position is not None:
-                max_traj_idx = choose_primitive(
-                    vbg.vbg,
-                    camera_position,
-                    traj_linesets,
-                    goal_position,
-                    min_dist2obs,
-                    filterYvals,
-                    filterWeights,
-                    filterTSDF,
-                    weight_threshold,
-                )
+            if go_mode_active and planner_is_dstar and goal_position is not None and camera_position is not None:
+                refresh_dstar_command()
 
+            elif camera_position is not None:
                 mode = mavc.get_mode() if FLY_VEHICLE else 'GUIDED'
                 if max_traj_idx is None:
-                    if mode == 'GUIDED' and FLY_VEHICLE:
+                    if go_mode_active and mode == 'GUIDED' and FLY_VEHICLE:
                         mavc.set_mode('BRAKE')
                         time.sleep(0.1)
-                    print("[INFO] No safe trajectory found. Hovering in place.", flush=True)
-                else: 
+                    if go_mode_active or last_action_state != 'hover:no_safe_traj':
+                        print("[INFO] No safe trajectory found. Hovering in place.", flush=True)
+                    if not go_mode_active:
+                        last_action_state = 'hover:no_safe_traj'
+                elif go_mode_active:
                     if mode == 'BRAKE' and FLY_VEHICLE:
                         mavc.set_mode('GUIDED')
                     print(f"[TRAJ] Selected traj: {max_traj_idx}/{len(traj_list)-1}", flush=True)
-
-            # If this cycle ended due to a stop command, do not run planner updates.
-            if shouldStop:
-                break
 
         if camera_position is not None:
             camera_position = camera_position[0:-1, -1]
@@ -720,12 +795,19 @@ def main():
         traceback.print_exc()
             
     finally:
+        try:
+            mavc.en_pose_stream(3) # set pose stream to low frequency to reduce bandwidth usage
+        except Exception:
+            pass
         print("Releasing camera capture.")
         stop_pose_thread()
         stop_keyboard_listener()
         cv2.destroyAllWindows()
         if cap is not None:
-            cap.cap.release()
+            try:
+                cap.cap.release()
+            except Exception as e:
+                print(f"[warning] failed to release camera capture: {e}", flush=True)
 
 if __name__ == "__main__":
     main()
