@@ -427,7 +427,6 @@ def main():
                         if last_action_state != 'goal':
                             print("Reached goal!")
                         last_action_state = 'goal'
-                        shouldStop = True
                         break
                 
                 if save_during_flight:
@@ -483,7 +482,7 @@ def main():
             processing_speed = 1.0 / (cur_time - frame_start_time)
    
             # Save trajectory information
-            if save_during_flight:
+            if save_during_flight and max_traj_idx is not None:
                 row = np.array([frame_number, int(max_traj_idx), time.time()-start_flight_time]) # time since start of flight
                 with open(save_dir + '/trajectories.csv', 'a') as file:
                     np.savetxt(file, row.reshape(1, -1), delimiter=',', fmt='%s')

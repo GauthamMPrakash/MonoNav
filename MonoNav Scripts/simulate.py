@@ -1,4 +1,4 @@
-"""
+r"""
   __  __                   _   _             
  |  \/  | ___  _ __   ___ | \ | | __ ___   __
  | |\/| |/ _ \| '_ \ / _ \|  \| |/ _` \ \ / /
@@ -24,16 +24,21 @@ import os
 import open3d as o3d
 import numpy as np
 import copy
+import sys, os
+
+# Ensure the repository root is on sys.path so we can import `utils` from anywhere
+repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
+if repo_root not in sys.path:
+    sys.path.insert(0, repo_root)
 
 from utils.utils import load_config, poses_from_posedir, get_poses_lineset, get_trajlist, get_traj_linesets, choose_primitive
 
-data_dir =  'data/mononav-2026-02-25-16-23-24'      # parent directory to look for RGB images, and save depth images
+data_dir =  '../data/mononav-2026-03-25-14-39-37'      # parent directory to look for RGB images, and save depth images
 
-CONFIG_PATH = "config.yml"
-config = load_config("config.yml")
+config = load_config("../config.yml")
 
 pose_dir = os.path.join(data_dir, "poses")
-trajlib_dir = config["trajlib_dir"]
+trajlib_dir = '../utils/trajlib'
 
 # Load the VoxelBlockGrid from file.
 files = [file for file in os.listdir(data_dir) if file.endswith('.npz')]
@@ -76,7 +81,7 @@ visualizer.add_geometry(pose_lineset)
 n = 5 # iterate over every n poses
 for i in range(0, len(poses), n):
     pose = poses[i]
-    shouldStop, max_traj_idx = choose_primitive(vbg, pose, traj_linesets, goal_position, min_dist2obs, filterYvals, filterWeights, filterTSDF, weight_threshold)
+    max_traj_idx = choose_primitive(vbg, pose, traj_linesets, goal_position, min_dist2obs, filterYvals, filterWeights, filterTSDF, weight_threshold)
     for traj_idx, traj_lineset in enumerate(traj_linesets):
         traj_lineset_copy = copy.deepcopy(traj_lineset)
         traj_lineset_copy.transform(pose)
