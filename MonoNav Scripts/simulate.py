@@ -20,10 +20,11 @@ and trajectory library affect the planning performance.
 
 """
 
+data_dir = None # if None, will automatically look for latest data directory with prefix specified in config.yml
+
 import os
 import open3d as o3d
 import numpy as np
-import copy
 import sys
 
 # Ensure the repository root is on sys.path so we can import `utils` from anywhere
@@ -64,7 +65,6 @@ def _latest_data_dir(prefix):
     return latest_dir
 
 config = load_config(os.path.join(repo_root, "config.yml"))
-data_dir = config.get("data_dir")
 if not data_dir:
     data_dir = _latest_data_dir(config["save_dir_prefix"])
 
@@ -109,18 +109,16 @@ visualizer.add_geometry(pose_lineset)
 
 # For each pose, compute the optimal motion primitive.
 # Paint the optimal motion primitive green, and the rest black.
-n = 5 # iterate over every n poses
+n = 1 # iterate over every n poses
 for i in range(0, len(poses), n):
     pose = poses[i]
     max_traj_idx = choose_primitive(vbg, pose, traj_linesets, goal_position, min_dist2obs, filterYvals, filterWeights, filterTSDF, weight_threshold)
     for traj_idx, traj_lineset in enumerate(traj_linesets):
-        traj_lineset_copy = copy.deepcopy(traj_lineset)
+        traj_lineset_copy = traj_lineset.clone()
         traj_lineset_copy.transform(pose)
 
-        if traj_idx == max_traj_idx:
-            traj_lineset_copy.paint_uniform_color([0, 1, 0])
-        else:
-            traj_lineset_copy.paint_uniform_color([0, 0, 0])
+        color = [0, 1, 0] if traj_idx == max_traj_idx else [0, 0, 0]
+        traj_lineset_copy.paint_uniform_color(color)
 
         visualizer.add_geometry(traj_lineset_copy)
 

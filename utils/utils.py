@@ -21,7 +21,6 @@ import os
 import open3d as o3d
 import open3d.core as o3c
 import math as m
-import copy
 import yaml, json
 import time
 
@@ -405,7 +404,7 @@ def choose_primitive(vbg, camera_position, traj_linesets, goal_position, dist_th
 
     # iterate over the sorted traj linesets
     for traj_idx, traj_linset in enumerate(traj_linesets):
-        traj_lineset_copy = copy.deepcopy(traj_linset)
+        traj_lineset_copy = traj_linset.clone()
         traj_lineset_copy.transform(camera_position) # transform the lineset (copy) to the camera position
         pts = np.asarray(traj_lineset_copy.points) # meters # extract the points from the lineset
         tmp = distance.cdist(voxel_coords_numpy, pts, "sqeuclidean") # compute the distance between all voxels and all points in the trajectory
