@@ -668,3 +668,20 @@ def stop_pose_thread():
         _pose_thread.join(timeout=1.0)
 
     print("[INFO] Pose thread stopped")
+
+def send_esp_cam_commands(ip, vflip, hflip, res_idx):
+    import requests
+    print("Sendingcommands to ESP32 CAM")
+    def send(var, val):
+        url = f"{ip}/control?var={var}&val={val}"
+        try:
+            r = requests.get(url, timeout=2)
+            if r.status_code == 200:
+                print(f"{var} set to {val}")
+        except Exception as e:
+            print(f"Error setting {var}: {e}")
+
+    # Send commands
+    send("vflip", vflip)
+    send("hmirror", hflip)
+    send("framesize", res_idx)

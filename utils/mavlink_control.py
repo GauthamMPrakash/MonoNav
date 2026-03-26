@@ -313,6 +313,8 @@ def set_speed(speed):
         0,0,0,0  # Unused
     )
 
+_boot_time_ns = time.monotonic_ns()
+
 def timesync(timeout_s=0.5):
     """
     Query the autopilot TIMESYNC and return (ap_time_ns, offset_ns).
@@ -328,10 +330,10 @@ def timesync(timeout_s=0.5):
     while True:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            return None, None
+            return None
         msg = drone.recv_match(type='TIMESYNC', blocking=True, timeout=remaining)
         if msg is None:
-            return None, None
+            return None
         if msg.tc1 == 0:
             continue
         if msg.ts1 != t1_ns:
@@ -341,8 +343,21 @@ def timesync(timeout_s=0.5):
         offset_ns = int(msg.tc1 - local_mid_ns)
         ap_ns = int(time.monotonic_ns() + offset_ns)
         return ap_ns
-    
-def reboot_if_EKF_origin(pos_tolerance=0.2):
+
+def system_time():
+    """Send a SYSTEM_TIME message to the autopilot.
+
+    This is the MAVLink common message that syncs the autopilot to the
+    local host clock. It sets:
+      - time_unix_usec: current unix epoch time in microseconds
+    """
+
+    time_unix_usec = time.time_ns() // 1000
+
+    drone.mav.system_time_send(time_unix_usec, 0)
+    printd(f"Sent SYSTEM_TIME: unix={time_unix_usec}")
+
+def reboot_if_EKF_origin(pos_tolerance=0.3):
     """
     Read the current local‑position and, if either x or y deviates from
     zero by more than `tolerance`, request a reboot so the EKF origin can

@@ -17,7 +17,6 @@ depth/reconstruction or planning logic.
 """
 
 import time
-import threading
 import numpy as np
 import os, sys
 
@@ -76,18 +75,39 @@ def main():
             mavc.set_speed(float(traj_list[idx]['forward_speed']))
             mavc.takeoff(config['height'])
 
-           
-            # read and print current x,y (LOCAL_NED)
             try:
-                x1, y1, z1, yaw1, pitch1, roll1 = mavc.get_pose()
-                print(f"Current position (NED): x={x1:.3f}, y={y1:.3f}")
+                x0, y0, z0, yaw0, _, _ = mavc.get_pose()
+                print(f"Takeoff pose (NED): x={x0:.3f}, y={y0:.3f}, z={z0:.3f}, yaw={yaw0:.3f}")
 
-                            print(f"Final pose in RDF (relative to takeoff heading): right={right:.3f}, down={down:.3f}, front={front:.3f}")
-                            print(f"Heading delta (rad): {yaw_delta:.3f} (deg: {np.degrees(yaw_delta):.1f})")
-                        except Exception as e:
-                            print(f"Failed to convert NED->RDF: {e}")
+                start_time = time.perf_counter()
+                while time.perf_counter() - start_time <= period:
+                    elapsed = time.perf_counter() - start_time
+                    yaw_rate = -amplitudes[idx] * np.sin(np.pi / period * elapsed)
+                    mavc.send_body_offset_ned_vel(
+                        float(traj_list[idx]['forward_speed']),
+                        0.0,
+                        yaw_rate=yaw_rate,
+                    )
+
+                # Stop any residual velocity command before querying final pose.
+                mavc.send_body_offset_ned_vel(0, 0, 0, 0)
+                time.sleep(0.1)
+
+                x1, y1, z1, yaw1, _, _ = mavc.get_pose()
+                print(f"Final pose (NED): x={x1:.3f}, y={y1:.3f}, z={z1:.3f}, yaw={yaw1:.3f}")
+
+                dx_north = x1 - x0
+                dx_east = y1 - y0
+                dx_down = z1 - z0
+                right, down, front = ned_to_rdf(dx_north, dx_east, dx_down, yaw0)
+                yaw_delta = np.arctan2(np.sin(yaw1 - yaw0), np.cos(yaw1 - yaw0))
+                print(
+                    "Final pose in RDF (relative to takeoff heading): "
+                    f"right={right:.3f}, down={down:.3f}, front={front:.3f}"
+                )
+                print(f"Heading delta (rad): {yaw_delta:.3f} (deg: {np.degrees(yaw_delta):.1f})")
             except Exception as e:
-                print(f"Failed to read pose: {e}")
+                print(f"Failed to execute primitive or read pose: {e}")
 
             print("Landing...")
             mavc.set_mode('LAND')

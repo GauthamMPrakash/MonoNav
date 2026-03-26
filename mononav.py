@@ -243,8 +243,11 @@ def main():
             print("Rebooted drone to set EKF origin. Waiting for reconnection...")
             time.sleep(7)    # Wait for drone to reboot
             continue         # Restart connection loop
+        mavc.system_time()
+        mavc.timesync()      # Probably not required as it is meant to be called in a loop and we don't currently sync pose and frames using timestamps
         break
     
+    send_esp_cam_commands(STREAM_URL[0:-10],1,1,9) # send commands to ESP32 cam 9=HVGA, 10=VGA
     # Run the depth model a few times (the first inference is slow), and skip the first few frames
     cap = VideoCapture(STREAM_URL)
     bgr = cap.read()
@@ -279,7 +282,7 @@ def main():
 
         start_keyboard_listener()
 
-        start_flight_time = time.time()
+        start_flight_time = time.perf_counter()
         if FLY_VEHICLE:
             print("Arming Motors!", flush=True)
             mavc.arm()
@@ -289,18 +292,22 @@ def main():
 
         start_pose_thread(20)                      # Start background pose polling at given frequency (non-blocking)
 
+        traj_counter = 0                    # how many trajectory iterations have we done?
+        frame_number = 0                    # Initialize frame counter.
+        processing_speed, loop_hz = 0, 0    # for debug display
+        
         while True: # Run until VBG is populated to prevent planning error. This is checked by choose_primitive returning without exception
             bgr = cap.read()
-            cv2.waitKey(1)
             pose = get_latest_pose()
             camera_position = get_pose_matrix(*pose)
             # COMPUTE DEPTH
-            start_time_test = time.time()
+            start_time_test = time.perf_counter()
             transform_bgr = transform_image(bgr, mtx, dist, optimal_mtx, roi, enable_undistort)
             transform_rgb = cv2.cvtColor(transform_bgr, cv2.COLOR_BGR2RGB)
             depth_numpy, depth_colormap = compute_depth(transform_bgr, depth_anything, INPUT_SIZE)
-            print("TIME TO COMPUTE DEPTH:", time.time() - start_time_test)
-            cv2.imshow("Frame", bgr)
+            print("TIME TO COMPUTE DEPTH:", time.perf_counter() - start_time_test)
+            # cv2.imshow("Frame", bgr)
+            # cv2.waitKey(1)
             vbg.integration_step(transform_rgb, depth_numpy, camera_position)
             try:
                 max_traj_idx = choose_primitive(vbg.vbg, camera_position, traj_linesets, goal_position, min_dist2obs, filterYvals, filterWeights, filterTSDF, weight_threshold,) # Enable DEBUG to print trajectory scores during selection
@@ -310,16 +317,12 @@ def main():
 
         print("Starting control.", flush=True)
         print(f"[TRAJ] Estimated next traj: {max_traj_idx}/{len(traj_list)-1}", flush=True)
-        traj_counter = 0                    # how many trajectory iterations have we done?
-        frame_number = 0                    # Initialize frame counter.
-        processing_speed, loop_hz = 0, 0    # for debug display
 
         while not shouldStop:
             mode = mavc.get_mode()
             if max_traj_idx is None:
                 if mode == 'GUIDED' and last_key_pressed == 'g': # Only BRAKE if in Go mode for sudden stop. No need to jerk as much in manual trajectories      
                     mavc.set_mode('BRAKE')
-                    time.sleep(0.1) # brief brake before hover to prevent drift during stop
                 print("[INFO] No safe trajectory found. Hovering in place.", flush=True)
             else:
                 if mode == 'BRAKE':     # so that external mode commands from GCS or RC would not be overridden
@@ -396,11 +399,10 @@ def main():
             start_time = time.perf_counter()
             while time.perf_counter() - start_time <= period:
                 frame_start_time = time.perf_counter()
-                 # get_latest_pose returns (x, y, z, yaw, pitch, roll) - non-blocking from thread
                 #t0=time.perf_counter()
                 bgr = cap.read()
                 #t1=time.perf_counter()
-                pose = get_latest_pose()
+                pose = get_latest_pose()    # get_latest_pose returns (x, y, z, yaw, pitch, roll) - non-blocking from thread
                 #t2=time.perf_counter()
 
                 # Optionally transform camera image (undistort + crop) based on config
@@ -415,7 +417,7 @@ def main():
                     vbg.integration_step(transform_rgb, depth_numpy, camera_position)
 
                 if traj_index is not None:
-                    yawrate = -amplitudes[traj_index] * np.sin(np.pi/period*(time.time() - start_time))  # rad/s
+                    yawrate = -amplitudes[traj_index] * np.sin(np.pi/period*(time.perf_counter() - start_time))  # rad/s
                     yvel = yawrate * yvel_gain
                     yawrate = yawrate * yawrate_gain
                     if FLY_VEHICLE:
@@ -423,11 +425,11 @@ def main():
 
                 if goal_position is not None:
                     dist_to_goal = np.linalg.norm(camera_position[0:-1, -1]-goal_position[0])
-                    if dist_to_goal < min_dist2goal:
+                    if dist_to_goal < max(min_dist2goal, 0.3): # add a small buffer to the goal radius to prevent oscillation at the boundary
                         if last_action_state != 'goal':
                             print("Reached goal!")
                         last_action_state = 'goal'
-                        break
+                        shouldStop = True
                 
                 if save_during_flight:
                     cv2.imwrite(img_dir + '/frame-%06d.rgb.jpg'%(frame_number), bgr)
@@ -447,30 +449,13 @@ def main():
                     # (no extra top margin; add a blank line underneath the Hz text)
                     hz_x = int((depth_colormap.shape[1] - hz_size[0] / 2))
                     hz_y = int(hz_size[1])
-                    cv2.putText(
-                        depth_colormap,
-                        hz_text,
-                        org=(hz_x, hz_y),
-                        fontFace=cv2.FONT_HERSHEY_SIMPLEX,
-                        fontScale=0.5,
-                        thickness=1,
-                        color=(255, 255, 255),
-                    )
+                    cv2.putText(depth_colormap, hz_text, org=(hz_x, hz_y), fontFace=cv2.FONT_HERSHEY_SIMPLEX, fontScale=0.5, thickness=1, color=(255, 255, 255))
 
-                    cv2.putText(
-                        depth_colormap,
-                        fps_text,
-                        org=(int((depth_colormap.shape[1] - textsize[0] / 2)), int((textsize[1]) / 2 + hz_size[1] + 5)),
-                        fontFace=cv2.FONT_HERSHEY_SIMPLEX,
-                        fontScale=0.5,
-                        thickness=1,
-                        color=(255, 255, 255),
-                    )
+                    cv2.putText(depth_colormap, fps_text, org=(int((depth_colormap.shape[1] - textsize[0] / 2)), int((textsize[1]) / 2 + hz_size[1] + 5)), fontFace=cv2.FONT_HERSHEY_SIMPLEX,fontScale=0.5, thickness=1, color=(255, 255, 255))
                     cv2.imshow("Frame", depth_colormap)
-                    cv2.waitKey(1)
                 else:
                     cv2.imshow("Frame", transform_bgr)
-                    cv2.waitKey(1)
+                cv2.waitKey(1)
 
                 frame_number += 1
             traj_counter += 1
@@ -483,7 +468,7 @@ def main():
    
             # Save trajectory information
             if save_during_flight and max_traj_idx is not None:
-                row = np.array([frame_number, int(max_traj_idx), time.time()-start_flight_time]) # time since start of flight
+                row = np.array([frame_number, int(max_traj_idx), time.perf_counter()-start_flight_time]) # time since start of flight
                 with open(save_dir + '/trajectories.csv', 'a') as file:
                     np.savetxt(file, row.reshape(1, -1), delimiter=',', fmt='%s')
             
@@ -497,7 +482,7 @@ def main():
             camera_position = camera_position[0:-1, -1]
             print("\n[INFO] Current distance to goal (m): ", np.linalg.norm(camera_position-goal_position) if goal_position is not None else "N/A", flush=True)
             print("[INFO] Current RDF coords:", *camera_position, flush=True)
-            print("[INFO] Current NED coords:", camera_position[2], camera_position[0], camera_position[1], flush=True)
+            # print("[INFO] Current NED coords:", camera_position[2], camera_position[0], camera_position[1], flush=True)
 
         # save and view vbg (robust to missing save dir; always attempt visualization)
         if save_during_flight:
@@ -528,10 +513,8 @@ def main():
 
     except KeyboardInterrupt:
         mavc.set_mode('LAND')
-        shouldStop = True
         print("\n[INTERRUPT] Ctrl+C detected. Sent land command.", flush=True)
     except Exception as e:
-        shouldStop = True
         print(f"\n[ERROR] Exception in control loop: {e}", flush=True)
         traceback.print_exc()
             

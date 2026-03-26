@@ -5,7 +5,7 @@ trajlib_dir: "utils/trajlib/" # where to save & retrieve the trajectory library 
 # Camera Settings
 camera_calibration_path: 'utils/calibration/intrinsics.json' # camera calibration file (for undistortion)
 # Set to False to bypass undistort/crop transformation on incoming frames
-enable_undistort: True
+enable_undistort: False
 #camera_ip: 'http://10.42.0.29:81/stream'                    # camera stream URL (otherwise enter integer for camera index)   
 camera_ip: 'http://192.168.53.56:81/stream'
 
@@ -15,7 +15,7 @@ DA2_CHECKPOINT: "DepthAnythingV2-metric/checkpoints/depth_anything_v2_metric_hyp
 MODEL_MAX_DEPTH: 20           # maximum depth (in meters) that the depth dataset can predict. Hypersim is 20 m.
 
 enable_vbg : True             # Enable VoxelBlockGrid (TSDF fusion) - only for AP_ObstacleAvoidnace
-save_during_flight : True    # Whether to save images and reconstructions during flight (slows down the loop, but allows you to see the reconstruction quality on the actual flight data)
+save_during_flight : False    # Whether to save images and reconstructions during flight (slows down the loop, but allows you to see the reconstruction quality on the actual flight data)
 
 # Reconstruction settings
 filterYvals: True             # this helps filter out the ground / ceiling (for planar navigation)
@@ -36,7 +36,7 @@ goal_position_rdf: # from EKF origin
   - 7     # Forward
 
 min_dist2obs: 1.0             # minimum acceptable distance from obstacles, meters (for primitive selection)
-min_dist2goal: 1.0            # termination condition for reaching the goal, meters
+min_dist2goal: 0.7            # termination condition for reaching the goal, meters
 
 # Drone Settings
 # --------------
@@ -55,4 +55,4 @@ forward_speed: 0.5         # forward speed in m/s, set to None to use speed defi
 yvel_gain: 0             # yvel =  yawrate*yvel_gain  <- for providing sideways velocity so that turns can be made sharper. Increase for faster turns.
 yawrate_gain: 1.5        # yawrate = yawrate*yawrate_gain
 
-FLY_VEHICLE: True        # whether to actually fly the drone
+FLY_VEHICLE: False        # whether to actually fly the drone
