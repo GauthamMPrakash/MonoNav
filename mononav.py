@@ -450,8 +450,13 @@ def main():
             traj_index = None
             fuse_only = False
             mode = mavc.get_mode() if FLY_VEHICLE else 'GUIDED'
-            key_before_period = last_key_pressed
             go_mode_active = last_key_pressed == 'g'
+
+            # Refresh planner outputs before selecting the next command period.
+            if camera_position is not None:
+                max_traj_idx = _choose_next_primitive(camera_position)
+                if go_mode_active and planner_is_dstar and goal_position is not None:
+                    refresh_dstar_command()
 
             # Check for stop keys first (these exit the control loop). Important that they break out of the loop
             if last_key_pressed == 'p':
@@ -658,28 +663,6 @@ def main():
 
             if shouldStop:
                 break
-            if last_key_pressed not in (None, key_before_period):
-                continue
-
-            max_traj_idx = _choose_next_primitive(camera_position)
-
-            if go_mode_active and planner_is_dstar and goal_position is not None and camera_position is not None:
-                refresh_dstar_command()
-
-            elif camera_position is not None:
-                mode = mavc.get_mode() if FLY_VEHICLE else 'GUIDED'
-                if max_traj_idx is None:
-                    if go_mode_active and mode == 'GUIDED' and FLY_VEHICLE:
-                        mavc.set_mode('BRAKE')
-                        time.sleep(0.1)
-                    if go_mode_active or last_action_state != 'hover:no_safe_traj':
-                        print("[INFO] No safe trajectory found. Hovering in place.", flush=True)
-                    if not go_mode_active:
-                        last_action_state = 'hover:no_safe_traj'
-                elif go_mode_active:
-                    if mode == 'BRAKE' and FLY_VEHICLE:
-                        mavc.set_mode('GUIDED')
-                    print(f"[TRAJ] Selected traj: {max_traj_idx}/{len(traj_list)-1}", flush=True)
 
         if camera_position is not None:
             camera_position = camera_position[0:-1, -1]

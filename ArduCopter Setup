@@ -1,18 +1,33 @@
-"""
-Tested on Copter v4.6.3
+Tested on Copter v4.6.3 and v4.7.0-beta1
+
+Note that this project only commands the drone to move at a specified velocity and yaw at programmed yaw rates 
+to avoid obstacles and navigate the environment. 
+Any other behaviour of the drone will have to be configured by the user and does not necessarily depend on this script.
 
 Hardware Requirements
 ---------------------
-    - ArduPilot compatible drone
+    - ArduPilot drone
     - RGB Camera (This project uses an ESP32-CAM)
     - Link to wirelessly send camera frames to GCS
-    - Wireless telemetry link
+    - Wireless telemetry link (ESP32, ESP8266, SiK radio, etc)
     - Optical Flow sensor for indoor pose estimation
+    - Onboard compass (magnetometer) for heading estimation
+    - Optional: GPS can be used instead of optical flow if used outdoors (outdoor flight is untested)
 
-Sofware Configuration
----------------------
-    - Refer the parameter file given in ArduCopter/
-    - DO NOT USE THE SAME PARAMS AS GIVEN. YOU NEED TO SETUP AND TUNE THE DRONE AS DOCUMENTED AT https://ardupilot.org/copter/docs/initial-setup.html
-      ONLY USE THE SAME PARAMS FOR ANYTHING OTHER THAN PIDs and hardware setup
+Firmware Configuration
+----------------------
+    - YOU NEED TO SETUP AND TUNE THE DRONE AS DOCUMENTED AT https://ardupilot.org/copter/docs/initial-setup.html or use 
+      the ArduPilot Methodic Configurator - https://github.com/ArduPilot/MethodicConfigurator
+    
+    - Setup the vehicle to use optical flow indoors. Either optical flow or GPS works outside (but not tested)
+      Optical flow setup: https://ardupilot.org/copter/docs/common-optical-flow-sensors-landingpage.html
+                          https://ardupilot.org/copter/docs/common-optical-flow-sensor-setup.html
+    
+    - Setup all failsafes. GCS and RC failsafes are especially important. If you don't plan on using an RC, it's 
+      recommended to setup a joystick in case you want to take over manual control after easily switching to a manual mode.
+    
+    - Highly recommended to set EK3_USE_RNG_HGT so that the rangefinder is used below this percentage of its specified 
+      maximum altitude range. This will prevent noisy barometer altitude messing up the reconstruction.
 
-"""
+
+
