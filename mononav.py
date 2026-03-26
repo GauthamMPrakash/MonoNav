@@ -44,10 +44,8 @@ import utils.mavlink_control as mavc   # import the mavlink helper script
 # Helper functions. Core MonoNav algorithms are implemented in utils.py
 from utils.utils import *
 from utils.dstar_lite import (
-    DStarLitePlanner2D,
     DStarLitePrimitivePlanner2D,
     motion_primitives_from_traj_list,
-    select_lookahead_waypoint,
 )
 
 # LOAD VALUES FROM CONFIG FILE
@@ -176,8 +174,8 @@ min_dist2obs = config['min_dist2obs']
 min_dist2goal = config['min_dist2goal']
 
 planner_cfg = config.get('planner', {})
-planner_type = str(planner_cfg.get('type', 'dstar_lite')).lower()
-valid_planner_types = ('dstar_lite', 'dstar_lite_primitives', 'primitive')
+planner_type = str(planner_cfg.get('type', 'dstar_lite_primitives')).lower()
+valid_planner_types = ('dstar_lite_primitives', 'primitive')
 if planner_type not in valid_planner_types:
     raise ValueError(f"Unsupported planner.type '{planner_type}'. Expected one of {valid_planner_types}.")
 planner_replan_period = planner_cfg.get('replan_period')
@@ -186,19 +184,8 @@ if planner_replan_period is None:
 else:
     planner_replan_period = float(planner_replan_period)
 planner_vertical_half_extent = float(planner_cfg.get('vertical_half_extent', max(min_dist2obs, 0.75)))
-planner_waypoint_lookahead = float(planner_cfg.get('lookahead_distance', 0.75))
-planner_waypoint_reached_radius = float(planner_cfg.get('waypoint_reached_radius', max(0.35, planner_waypoint_lookahead * 0.5)))
-planner_hold_goal_altitude = bool(planner_cfg.get('hold_goal_altitude', True))
 planner_heading_bins = int(planner_cfg.get('heading_bins', 16))
-planner_is_dstar = planner_type in ('dstar_lite', 'dstar_lite_primitives')
-
-dstar_planner = DStarLitePlanner2D(
-    resolution=float(planner_cfg.get('grid_resolution', 0.25)),
-    obstacle_buffer_m=float(planner_cfg.get('inflation_radius', min_dist2obs)),
-    bounds_padding_m=float(planner_cfg.get('bounds_margin', 1.5)),
-    min_window_size_m=float(planner_cfg.get('min_window_size', 8.0)),
-    unknown_travel_cost=float(planner_cfg.get('unknown_traversal_cost', 1.75)),
-)
+planner_is_dstar = planner_type == 'dstar_lite_primitives'
 primitive_dstar_planner = DStarLitePrimitivePlanner2D(
     motion_primitives=motion_primitives_from_traj_list(traj_list),
     heading_bins=planner_heading_bins,
@@ -401,26 +388,19 @@ def main():
         print(f"[TRAJ] Estimated next traj: {max_traj_idx}/{len(traj_list)-1}", flush=True)
         frame_number = 0
         processing_speed, loop_hz = 0, 0
-        auto_hold_down = None  # latch altitude in 2D mode
         planned_auto_traj_index = None
-        current_waypoint_edn = None
 
         def reset_auto_state():
-            nonlocal auto_hold_down, planned_auto_traj_index, current_waypoint_edn
-            auto_hold_down = None
+            nonlocal planned_auto_traj_index
             planned_auto_traj_index = None
-            current_waypoint_edn = None
 
         def refresh_dstar_command():
-            nonlocal auto_hold_down, planned_auto_traj_index, current_waypoint_edn
+            nonlocal planned_auto_traj_index
             if goal_position is None or camera_position is None:
                 reset_auto_state()
                 return
 
             current_position = camera_position[0:-1, -1].astype(float)
-            if auto_hold_down is None:
-                auto_hold_down = float(current_position[1])
-
             observed_points_xz, obstacle_points_xz = extract_planar_vbg_points(
                 vbg.vbg,
                 current_down=current_position[1],
@@ -430,76 +410,36 @@ def main():
             )
             mode = mavc.get_mode() if FLY_VEHICLE else 'GUIDED'
 
-            if planner_type == 'dstar_lite_primitives':
-                observed_points_fr = observed_points_xz[:, [1, 0]]
-                obstacle_points_fr = obstacle_points_xz[:, [1, 0]]
-                plan_result = primitive_dstar_planner.plan(
-                    start_xy=current_position[[2, 0]],
-                    goal_xy=goal_position[0, [2, 0]],
-                    obstacle_points_xy=obstacle_points_fr,
-                    observed_points_xy=observed_points_fr,
-                    start_heading_rad=_planar_heading_from_pose(camera_position),
-                )
-                planner_name = "D* Lite primitive"
-            else:
-                plan_result = dstar_planner.plan(
-                    start_xy=current_position[[0, 2]],
-                    goal_xy=goal_position[0, [0, 2]],
-                    obstacle_points_xy=obstacle_points_xz,
-                    observed_points_xy=observed_points_xz,
-                )
-                planner_name = "D* Lite"
+            observed_points_fr = observed_points_xz[:, [1, 0]]
+            obstacle_points_fr = obstacle_points_xz[:, [1, 0]]
+            plan_result = primitive_dstar_planner.plan(
+                start_xy=current_position[[2, 0]],
+                goal_xy=goal_position[0, [2, 0]],
+                obstacle_points_xy=obstacle_points_fr,
+                observed_points_xy=observed_points_fr,
+                start_heading_rad=_planar_heading_from_pose(camera_position),
+            )
+            planner_name = "D* Lite primitive"
 
             if plan_result.found:
-                if planner_type == 'dstar_lite_primitives':
-                    current_waypoint_edn = None
-                    planned_auto_traj_index = (
-                        int(plan_result.selected_primitive_indices[0])
-                        if len(plan_result.selected_primitive_indices) > 0
-                        else None
-                    )
-                    if mode == 'BRAKE' and FLY_VEHICLE:
-                        mavc.set_mode('GUIDED')
-                    primitive_trace = ""
-                    if len(plan_result.selected_primitives) > 0:
-                        shown = plan_result.selected_primitives[:6]
-                        suffix = "..." if len(plan_result.selected_primitives) > len(shown) else ""
-                        primitive_trace = f" prim={shown}{suffix}"
-                    print(
-                        f"[PLAN] {planner_name} cells={len(plan_result.grid_path)} changed={plan_result.changed_cells} next_traj={planned_auto_traj_index}{primitive_trace}",
-                        flush=True,
-                    )
-                    return
-
-                planned_auto_traj_index = None
-                waypoint_xz = select_lookahead_waypoint(
-                    plan_result.world_path,
-                    current_position[[0, 2]],
-                    planner_waypoint_lookahead,
-                    planner_waypoint_reached_radius,
+                planned_auto_traj_index = (
+                    int(plan_result.selected_primitive_indices[0])
+                    if len(plan_result.selected_primitive_indices) > 0
+                    else None
                 )
-                target_down = float(goal_position[0, 1]) if planner_hold_goal_altitude else float(auto_hold_down)
-                if waypoint_xz is not None:
-                    current_waypoint_edn = np.array([waypoint_xz[0], target_down, waypoint_xz[1]], dtype=float)
-                    if mode == 'BRAKE' and FLY_VEHICLE:
-                        mavc.set_mode('GUIDED')
-                    rdf_waypoint = ned_to_rdf(
-                        current_waypoint_edn[2],
-                        current_waypoint_edn[0],
-                        current_waypoint_edn[1],
-                        hdg,
-                    )
-                    print(
-                        f"[PLAN] {planner_name} cells={len(plan_result.grid_path)} changed={plan_result.changed_cells} RDF={np.round(rdf_waypoint, 3)}",
-                        flush=True,
-                    )
-                    return
-
-                current_waypoint_edn = None
-                print(f"[PLAN] {planner_name} produced no usable waypoint.", flush=True)
+                if mode == 'BRAKE' and FLY_VEHICLE:
+                    mavc.set_mode('GUIDED')
+                primitive_trace = ""
+                if len(plan_result.selected_primitives) > 0:
+                    shown = plan_result.selected_primitives[:6]
+                    suffix = "..." if len(plan_result.selected_primitives) > len(shown) else ""
+                    primitive_trace = f" prim={shown}{suffix}"
+                print(
+                    f"[PLAN] {planner_name} cells={len(plan_result.grid_path)} changed={plan_result.changed_cells} next_traj={planned_auto_traj_index}{primitive_trace}",
+                    flush=True,
+                )
                 return
 
-            current_waypoint_edn = None
             planned_auto_traj_index = None
             if mode == 'GUIDED' and FLY_VEHICLE:
                 mavc.set_mode('BRAKE')
@@ -587,22 +527,14 @@ def main():
                 if last_action_state != planner_state:
                     reset_auto_state()
                     if planner_is_dstar and goal_position is not None:
-                        planner_label = "MonoNav D* Lite" if planner_type == 'dstar_lite' else "MonoNav D* Lite (primitives)"
-                        print(f"Pressed g. Using {planner_label}.", flush=True)
+                        print("Pressed g. Using MonoNav D* Lite (primitives).", flush=True)
                     else:
                         print("Pressed g. Using MonoNav primitive planner.", flush=True)
                 last_action_state = planner_state
                 if planner_is_dstar and goal_position is not None:
-                    missing_command = (
-                        planner_type == 'dstar_lite' and current_waypoint_edn is None
-                    ) or (
-                        planner_type == 'dstar_lite_primitives' and planned_auto_traj_index is None
-                    )
-                    if missing_command:
+                    if planned_auto_traj_index is None:
                         refresh_dstar_command()
-                if planner_type == 'dstar_lite' and goal_position is not None:
-                    traj_index = None
-                elif planner_type == 'dstar_lite_primitives' and goal_position is not None:
+                if planner_type == 'dstar_lite_primitives' and goal_position is not None:
                     traj_index = planned_auto_traj_index
                 else:
                     traj_index = max_traj_idx
@@ -625,7 +557,7 @@ def main():
                 traj_index = None
 
             if FLY_VEHICLE and mode == 'BRAKE':
-                if traj_index is not None or (go_mode_active and planner_type == 'dstar_lite' and current_waypoint_edn is not None):
+                if traj_index is not None:
                     mavc.set_mode('GUIDED')
 
             # Save trajectory information
@@ -635,7 +567,7 @@ def main():
                 with open(save_dir + '/trajectories.csv', 'a') as file:
                     np.savetxt(file, row.reshape(1, -1), delimiter=',', fmt='%s')
 
-            if go_mode_active and planner_type == 'dstar_lite' and goal_position is not None:
+            if go_mode_active and planner_is_dstar and goal_position is not None:
                 command_period = planner_replan_period
             else:
                 command_period = period
@@ -650,9 +582,6 @@ def main():
                     yawrate = yawrate * yawrate_gain
                     if FLY_VEHICLE:
                         mavc.send_body_offset_ned_vel(forward_speed, yvel, yaw_rate=yawrate)
-                elif go_mode_active and planner_type == 'dstar_lite' and current_waypoint_edn is not None:
-                    if FLY_VEHICLE:
-                        mavc.send_local_ned_pos(current_waypoint_edn[2], current_waypoint_edn[0], current_waypoint_edn[1])
 
                 bgr = cap.read()
                 # get_latest_pose returns (x, y, z, yaw, pitch, roll) - non-blocking from thread

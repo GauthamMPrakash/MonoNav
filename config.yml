@@ -41,7 +41,7 @@ min_dist2obs: 0.8             # minimum acceptable distance from obstacles, mete
 min_dist2goal: 1.0            # termination condition for reaching the goal, meters
 
 planner:
-  type: dstar_lite_primitives # dstar_lite, dstar_lite_primitives, or primitive
+  type: dstar_lite_primitives # dstar_lite_primitives or primitive
   replan_period: null         # seconds between replans in GO mode; null uses primitive period
   grid_resolution: 0.4        # occupancy-grid cell size in metres
   inflation_radius: 0.6       # obstacle inflation radius in metres
@@ -50,9 +50,6 @@ planner:
   vertical_half_extent: 0.4  # keep voxels within +/- this down-axis distance from current altitude
   unknown_traversal_cost: 1.0 # unknown cells stay traversable but are penalized
   heading_bins: 10             # discrete heading bins for dstar_lite_primitives
-  lookahead_distance: 0.8     # metres to look ahead along the D* Lite path when commanding waypoints
-  waypoint_reached_radius: 1.0
-  hold_goal_altitude: False   # command the goal down position while following the horizontal path
 
 # Drone Settings
 # --------------
