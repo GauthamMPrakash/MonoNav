@@ -4,9 +4,9 @@ import numpy as np
 import time
 
 URL = 'http://192.168.53.56:81/stream'
-CHUNK_SIZE = 512
+CHUNK_SIZE = 64
 MAX_BUFFER_BYTES = 512_000
-REPORT_EVERY = 20
+REPORT_EVERY = 10
 
 
 def pop_latest_complete_jpeg(buf):
@@ -57,10 +57,10 @@ try:
         sum_ms += elapsed_ms
         count += 1
 
-        cv2.imshow('i', frame)
-        key = cv2.waitKey(1) & 0xFF
-        if key == 27 or key == ord('q'):
-            break
+        #cv2.imshow('i', frame)
+        # key = cv2.waitKey(1) & 0xFF
+        # if key == 27 or key == ord('q'):
+        #     break
 
         if count >= REPORT_EVERY:
             print(f"avg read+decode over {count} frames: {sum_ms / count:.2f} ms", flush=True)
