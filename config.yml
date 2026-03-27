@@ -43,13 +43,13 @@ min_dist2goal: 1.0            # termination condition for reaching the goal, met
 planner:
   type: dstar_lite_primitives # dstar_lite_primitives or primitive
   replan_period: null         # seconds between replans in GO mode; null uses primitive period
-  grid_resolution: 0.4        # occupancy-grid cell size in metres
+  grid_resolution: 0.5        # occupancy-grid cell size in metres
   inflation_radius: 0.6       # obstacle inflation radius in metres
   bounds_margin: 1.5          # extra map margin around start, goal, and observed voxels
-  min_window_size: 1.5        # minimum side length of the planning window in metres
-  vertical_half_extent: 0.4  # keep voxels within +/- this down-axis distance from current altitude
-  unknown_traversal_cost: 1.0 # unknown cells stay traversable but are penalized
-  heading_bins: 10             # discrete heading bins for dstar_lite_primitives
+  min_window_size: 15         # minimum side length of the planning window in metres
+  vertical_half_extent: 0.4   # keep voxels within +/- this down-axis distance from current altitude
+  unknown_traversal_cost: 1.5 # unknown cells stay traversable but are penalized
+  heading_bins: 10            # discrete heading bins for dstar_lite_primitives
 
 # Drone Settings
 # --------------
