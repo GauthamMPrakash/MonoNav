@@ -245,6 +245,8 @@ def main():
             continue         # Restart connection loop
         break
     
+    send_espcam_cmd(STREAM_URL, vflip=1, hmirror=1, res_id=9) # ensure correct orientation and resolution from ESP32-CAM
+
     # Run the depth model a few times (the first inference is slow), and skip the first few frames
     cap = VideoCapture(STREAM_URL)
     bgr = cap.read()
@@ -279,7 +281,7 @@ def main():
 
         start_keyboard_listener()
 
-        start_flight_time = time.time()
+        start_flight_time = time.perf_counter()
         if FLY_VEHICLE:
             print("Arming Motors!", flush=True)
             mavc.arm()
@@ -295,11 +297,11 @@ def main():
             pose = get_latest_pose()
             camera_position = get_pose_matrix(*pose)
             # COMPUTE DEPTH
-            start_time_test = time.time()
+            start_time_test = time.perf_counter()
             transform_bgr = transform_image(bgr, mtx, dist, optimal_mtx, roi, enable_undistort)
             transform_rgb = cv2.cvtColor(transform_bgr, cv2.COLOR_BGR2RGB)
             depth_numpy, depth_colormap = compute_depth(transform_bgr, depth_anything, INPUT_SIZE)
-            print("TIME TO COMPUTE DEPTH:", time.time() - start_time_test)
+            print("TIME TO COMPUTE DEPTH:", time.perf_counter() - start_time_test)
             cv2.imshow("Frame", bgr)
             vbg.integration_step(transform_rgb, depth_numpy, camera_position)
             try:
@@ -415,7 +417,7 @@ def main():
                     vbg.integration_step(transform_rgb, depth_numpy, camera_position)
 
                 if traj_index is not None:
-                    yawrate = -amplitudes[traj_index] * np.sin(np.pi/period*(time.time() - start_time))  # rad/s
+                    yawrate = -amplitudes[traj_index] * np.sin(np.pi/period*(time.perf_counter() - start_time))  # rad/s
                     yvel = yawrate * yvel_gain
                     yawrate = yawrate * yawrate_gain
                     if FLY_VEHICLE:
@@ -483,7 +485,7 @@ def main():
    
             # Save trajectory information
             if save_during_flight and max_traj_idx is not None:
-                row = np.array([frame_number, int(max_traj_idx), time.time()-start_flight_time]) # time since start of flight
+                row = np.array([frame_number, int(max_traj_idx), time.perf_counter()-start_flight_time]) # time since start of flight
                 with open(save_dir + '/trajectories.csv', 'a') as file:
                     np.savetxt(file, row.reshape(1, -1), delimiter=',', fmt='%s')
             

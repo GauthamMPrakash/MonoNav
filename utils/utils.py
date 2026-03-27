@@ -101,81 +101,81 @@ Otherwise, a lag builds up in the video stream.
 
 Use this for USB receivers when using something like an FPV camera
 """
-# import queue
-# class VideoCapture:
-
-#   def __init__(self, name):
-#     self.cap = cv2.VideoCapture(name)
-#     self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-#     self.q = queue.Queue(maxsize=1)
-#     self.last_frame = None
-#     t = threading.Thread(target=self._reader)
-#     t.daemon = True
-#     t.start()
-
-#   # read frames as soon as they are available, keeping only most recent one
-#   def _reader(self):
-#     while True:
-#       ret, frame = self.cap.read()
-#       if not ret:
-#         break
-#       self.last_frame = frame
-#       if self.q.full():
-#         try:
-#           self.q.get_nowait()   # discard previous (unprocessed) frame
-#         except queue.Empty:
-#           pass
-#       self.q.put_nowait(frame)
-
-#   def read(self, timeout=1.0):
-#     try:
-#       return self.q.get(timeout=timeout)
-#     except queue.Empty:
-#       if self.last_frame is not None:
-#         return self.last_frame
-#       raise RuntimeError("VideoCapture timeout: no frame available")
-    
+import queue
 class VideoCapture:
-    def __init__(self, name):
-        self.cap = cv2.VideoCapture(name)
-        self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-        self.frame = None
-        self.lock = threading.Lock()
-        self.running = True
-        self.thread = threading.Thread(target=self._reader, daemon=True)
-        self.thread.start()
 
-    def _reader(self):
-        while self.running:
-            if self.cap is None:
-                break
-            ret, frame = self.cap.read()
-            if not ret or frame is None:
-                time.sleep(0.01)
-                continue
-            with self.lock:
-                self.frame = frame
+  def __init__(self, name):
+    self.cap = cv2.VideoCapture(name)
+    self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+    self.q = queue.Queue(maxsize=1)
+    self.last_frame = None
+    t = threading.Thread(target=self._reader)
+    t.daemon = True
+    t.start()
 
-    def read(self, timeout=1.0):
-        start = time.time()
-        while True:
-            with self.lock:
-                if self.frame is not None:
-                    return self.frame
-            if time.time() - start > timeout:
-                raise RuntimeError("No frame received")
-            time.sleep(0.005)
+  # read frames as soon as they are available, keeping only most recent one
+  def _reader(self):
+    while True:
+      ret, frame = self.cap.read()
+      if not ret:
+        break
+      self.last_frame = frame
+      if self.q.full():
+        try:
+          self.q.get_nowait()   # discard previous (unprocessed) frame
+        except queue.Empty:
+          pass
+      self.q.put_nowait(frame)
 
-    def release(self):
-        self.running = False
-        if hasattr(self, 'thread') and self.thread is not None:
-            self.thread.join(timeout=1.0)
-        if hasattr(self, 'cap') and self.cap is not None:
-            try:
-                self.cap.release()
-            except Exception:
-                pass
-            self.cap = None
+  def read(self, timeout=1.0):
+    try:
+      return self.q.get(timeout=timeout)
+    except queue.Empty:
+      if self.last_frame is not None:
+        return self.last_frame
+      raise RuntimeError("VideoCapture timeout: no frame available")
+    
+# class VideoCapture:
+#     def __init__(self, name):
+#         self.cap = cv2.VideoCapture(name)
+#         self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+#         self.frame = None
+#         self.lock = threading.Lock()
+#         self.running = True
+#         self.thread = threading.Thread(target=self._reader, daemon=True)
+#         self.thread.start()
+
+#     def _reader(self):
+#         while self.running:
+#             if self.cap is None:
+#                 break
+#             ret, frame = self.cap.read()
+#             if not ret or frame is None:
+#                 time.sleep(0.01)
+#                 continue
+#             with self.lock:
+#                 self.frame = frame
+
+#     def read(self, timeout=1.0):
+#         start = time.time()
+#         while True:
+#             with self.lock:
+#                 if self.frame is not None:
+#                     return self.frame
+#             if time.time() - start > timeout:
+#                 raise RuntimeError("No frame received")
+#             time.sleep(0.005)
+
+#     def release(self):
+#         self.running = False
+#         if hasattr(self, 'thread') and self.thread is not None:
+#             self.thread.join(timeout=1.0)
+#         if hasattr(self, 'cap') and self.cap is not None:
+#             try:
+#                 self.cap.release()
+#             except Exception:
+#                 pass
+#             self.cap = None
                 
 """
 Compute depth from an RGB image using DepthAnythingV2
@@ -668,3 +668,28 @@ def stop_pose_thread():
         _pose_thread.join(timeout=1.0)
 
     print("[INFO] Pose thread stopped")
+
+import requests
+def send_espcam_cmd(url, vflip=0, hmirror=0, res_id=0, timeout=2):
+    """
+    Send control commands to ESP32-CAM.
+
+    Parameters:
+        base_url (str): e.g. "http://192.168.4.1"
+        vflip (int): 0 or 1
+        hmirror (int): 0 or 1
+        res_id (int): framesize ID (0–15 depending on firmware)
+        timeout (float): request timeout
+    """
+
+    def send(param, value):
+        try:
+            params = {"var": param, "val": value}
+            r = requests.get(url, params=params, timeout=timeout)
+            return r.status_code == 200
+        except requests.RequestException:
+            return False
+
+    send("vflip", int(vflip))
+    send("hmirror", int(hmirror))
+    send("framesize", int(res_id))
