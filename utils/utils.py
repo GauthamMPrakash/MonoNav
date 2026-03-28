@@ -796,12 +796,44 @@ Helper function to extract the image frame number from the filename string.
 def split_filename(filename):
     return int(filename.split("-")[-1].split(".")[0])
 
+def create_pointcloud_visualizer(window_name="MonoNav Realtime VBG", width=None, height=None):
+    """Create a persistent Open3D visualizer with the same initial view control as visualize_pointcloud.
+
+    If width/height are None, Open3D uses the OS default / full-screen window behavior.
+    """
+    vis = o3d.visualization.Visualizer()
+    if width is None or height is None:
+        vis.create_window(window_name=window_name)
+    else:
+        vis.create_window(window_name=window_name, width=width, height=height)
+    pcd = o3d.geometry.PointCloud()
+    vis.add_geometry(pcd)
+    center = pcd.get6_axis_aligned_bounding_box().get_center()
+    ctr = vis.get_view_control()
+    ctr.set_lookat(center)
+    ctr.set_up([0, 0, 1])       # Z up
+    ctr.set_front([0, -1, 0])   # Look along -Y (forward)
+    ctr.set_zoom(1)
+
+    return vis, pcd
+
+
+def update_pointcloud_visualizer(vis, pcd, new_pcd):
+    """Update existing visualizer pointcloud while preserving orientation."""
+    if new_pcd is None:
+        return
+    pcd.points = new_pcd.points
+    if new_pcd.has_colors():
+        pcd.colors = new_pcd.colors
+    vis.update_geometry(pcd)
+    vis.poll_events()
+    vis.update_renderer()
+
+
 def visualize_pointcloud(pcd_legacy, window_name="Reconstruction"):
     """Visualize a legacy Open3D point cloud, matching mononav.py's Visualizer approach."""
     try:
-        vis = o3d.visualization.Visualizer()
-        vis.create_window(window_name=window_name)
-        vis.add_geometry(pcd_legacy)
+        vis = create_pointcloud_visualizer(window_name=window_name)[0]
         ctr = vis.get_view_control()
         # Open3D renamed `get6_axis_aligned_bounding_box` to `get_axis_aligned_bounding_box`.
         # Use whichever is available for maximum compatibility.
@@ -811,10 +843,6 @@ def visualize_pointcloud(pcd_legacy, window_name="Reconstruction"):
         else:
             bounds = pcd_legacy.get6_axis_aligned_bounding_box()
         center = bounds.get_center()
-        ctr.set_lookat(center)
-        ctr.set_up([0, 0, 1])       # Z up
-        ctr.set_front([0, -1, 0])   # Look along -Y (forward)
-        ctr.set_zoom(1)
         vis.run()
         vis.destroy_window()
     except Exception as e:
