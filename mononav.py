@@ -155,6 +155,16 @@ print("Press 'g' to enable MonoNav autonomous mode, or 'a'/'w'/'d' for manual le
 # Track printing state for repeated modes so we only print once per mode transition.
 last_action_state = None
 
+# Planner: greedy goal-seeking with a simple escape mode to reduce local-minima failures.
+planner_cfg = config.get("GreedyEscapePlanner", {}) or {}
+planner_params = GreedyEscapePlannerParams(
+    enabled=bool(planner_cfg.get("enabled", True)),
+    progress_eps_m=float(planner_cfg.get("progress_eps_m", 0.25)),
+    stagnation_steps=int(planner_cfg.get("stagnation_steps", 4)),
+    escape_min_steps=int(planner_cfg.get("escape_min_steps", 6)),
+)
+planner = GreedyEscapePlanner(planner_params)
+
 # Planning presets
 filterYvals = config['filterYvals']
 filterWeights = config['filterWeights']
@@ -280,6 +290,8 @@ def main():
         mavc.set_mode('GUIDED')
 
         start_keyboard_listener()
+        planner.reset()
+        last_planner_mode = planner.mode
 
         start_flight_time = time.perf_counter()
         if FLY_VEHICLE:
@@ -305,7 +317,7 @@ def main():
             cv2.imshow("Frame", bgr)
             vbg.integration_step(transform_rgb, depth_numpy, camera_position)
             try:
-                max_traj_idx = choose_primitive(vbg.vbg, camera_position, traj_linesets, goal_position, min_dist2obs, filterYvals, filterWeights, filterTSDF, weight_threshold,) # Enable DEBUG to print trajectory scores during selection
+                max_traj_idx = planner.choose(vbg.vbg, camera_position, traj_linesets, goal_position, min_dist2obs, filterYvals, filterWeights, filterTSDF, weight_threshold,) # Enable DEBUG to print trajectory scores during selection
                 break
             except ValueError:
                 continue
@@ -490,7 +502,10 @@ def main():
                     np.savetxt(file, row.reshape(1, -1), delimiter=',', fmt='%s')
             
             # Planner always scores trajectories, but only GO mode applies them.
-            max_traj_idx = choose_primitive(vbg.vbg, camera_position, traj_linesets, goal_position, min_dist2obs, filterYvals, filterWeights, filterTSDF, weight_threshold,) # Enable DEBUG to print trajectory scores during selection
+            max_traj_idx = planner.choose(vbg.vbg, camera_position, traj_linesets, goal_position, min_dist2obs, filterYvals, filterWeights, filterTSDF, weight_threshold,) # Enable DEBUG to print trajectory scores during selection
+            if planner.mode != last_planner_mode:
+                print(f"[planner] mode={planner.mode}", flush=True)
+                last_planner_mode = planner.mode
              
             if shouldStop:        # exit on Esc or if shouldStop
                 break

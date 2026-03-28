@@ -56,3 +56,14 @@ yvel_gain: 0             # yvel =  yawrate*yvel_gain  <- for providing sideways 
 yawrate_gain: 1.5        # yawrate = yawrate*yawrate_gain
 
 FLY_VEHICLE: True        # whether to actually fly the drone
+
+# Planner settings (optional)
+# --------------------------
+# Greedy goal-seeking can get stuck in local minima when the goal is occluded by walls.
+# This adds a simple "escape/boundary-following" mode that activates when goal distance
+# stops improving for a few decision steps.
+GreedyEscapePlanner:
+  enabled: False
+  progress_eps_m: 0.25
+  stagnation_steps: 4
+  escape_min_steps: 6
