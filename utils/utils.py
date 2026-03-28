@@ -15,15 +15,19 @@ Functionality should be concentrated here and shared between the scripts.
 """
 import cv2
 import numpy as np
-from matplotlib import colormaps
 from scipy.spatial import distance
 import os
-import open3d as o3d
-import open3d.core as o3c
+try:
+    import open3d as o3d
+    import open3d.core as o3c
+except ModuleNotFoundError:  # allow importing planner logic without Open3D installed
+    o3d = None
+    o3c = None
 import math as m
 import copy
 import yaml, json
 import time
+from dataclasses import dataclass
 
 from . import mavlink_control as mavc  # ArduCopter MAVLink wrappers (relative import)
 import threading                       # For bufferless video capture and pose threading
@@ -47,9 +51,16 @@ class VoxelBlockGrid:
         depth_scale=1000.0,
         depth_max=5.0,
         trunc_voxel_multiplier=8.0,
-        device=o3d.core.Device("CUDA:0"),
+        device=None,
         intrinsic_matrix=None,
     ):
+        if o3d is None or o3c is None:
+            raise ModuleNotFoundError(
+                "open3d is required for VoxelBlockGrid; install it (e.g. `pip install open3d`) "
+                "or run in the provided MonoNav environment."
+            )
+        if device is None:
+            device = o3d.core.Device("CUDA:0")
         # Reconstruction Information
         self.depth_scale = depth_scale
         self.depth_max = depth_max
@@ -183,7 +194,6 @@ Returns: depth_numpy (uint16 in mm), depth_colormap (for visualization) if make_
 
 Uncomment the cmap line and the currently commented depth_colormap line and comment out the second depth_colormap line for a nicer colormap but adds a slight overhead
 """
-# cmap = colormaps.get_cmap('Spectral')
 def compute_depth(frame, depth_model, size, make_colormap=True):
 
     depth = depth_model.infer_image(frame, size)       # as np ndarray, in meters (float32)
@@ -328,6 +338,8 @@ These are used for visualizing the possible trajectories at each step.
 Returns a list of trajectory lineset objects.
 """
 def get_traj_linesets(traj_list):
+    if o3d is None:
+        raise ModuleNotFoundError("open3d is required for get_traj_linesets(); install open3d to use motion primitives.")
     traj_linesets = []
     amplitudes = []
     for traj in traj_list:
@@ -430,6 +442,212 @@ def choose_primitive(vbg, camera_position, traj_linesets, goal_position, dist_th
                     max_traj_score = nearest_voxel_dist
 
     return max_traj_idx
+
+
+@dataclass
+class GreedyEscapePlannerParams:
+    """
+    Parameters for GreedyEscapePlanner.
+
+    This planner is intended to reduce "local minima" failures of pure greedy goal-seeking
+    by switching into an escape / boundary-following mode when goal-distance progress stalls.
+    """
+    enabled: bool = True
+    progress_eps_m: float = 0.25
+    stagnation_steps: int = 4
+    escape_min_steps: int = 6
+
+
+class GreedyEscapePlanner:
+    """
+    Stateful wrapper around `choose_primitive()` that adds a simple escape mode.
+
+    - Normal mode: choose safe trajectory that minimizes goal distance (using end-point distance).
+    - Escape mode (triggered by stalled progress): choose a safe trajectory that maximizes
+      obstacle clearance with a turn bias toward the goal side (left/right).
+    """
+
+    def __init__(self, params: GreedyEscapePlannerParams | None = None):
+        self.params = params or GreedyEscapePlannerParams()
+        self._mode = "goal"  # "goal" | "escape"
+        self._best_goal_dist = np.inf
+        self._stagnation_count = 0
+        self._escape_steps = 0
+        self._escape_dir = None  # "left" | "right" | None
+
+    @property
+    def mode(self) -> str:
+        return self._mode
+
+    def reset(self):
+        self._mode = "goal"
+        self._best_goal_dist = np.inf
+        self._stagnation_count = 0
+        self._escape_steps = 0
+        self._escape_dir = None
+
+    def _filtered_obstacle_voxels(self, vbg, filterYvals, filterWeights, filterTSDF, weight_threshold):
+        def _to_numpy(arr):
+            if isinstance(arr, np.ndarray):
+                return arr
+            if hasattr(arr, "cpu") and hasattr(arr, "numpy"):
+                return arr.cpu().numpy()
+            if hasattr(arr, "numpy"):
+                return arr.numpy()
+            return np.asarray(arr)
+
+        weights = _to_numpy(vbg.attribute("weight")).reshape((-1,))
+        tsdf = _to_numpy(vbg.attribute("tsdf")).reshape((-1,))
+        voxel_coords, voxel_indices = vbg.voxel_coordinates_and_flattened_indices()
+        voxel_coords = _to_numpy(voxel_coords)
+        voxel_indices = _to_numpy(voxel_indices).astype(np.int64, copy=False).reshape((-1,))
+
+        weights = weights[voxel_indices]
+        tsdf = tsdf[voxel_indices]
+        voxel_coords = voxel_coords[voxel_indices, :]
+
+        if filterYvals:
+            mask = voxel_coords[:, 1] < -0.3
+            voxel_coords = voxel_coords[mask]
+            weights = weights[mask]
+            tsdf = tsdf[mask]
+
+        if filterWeights:
+            mask = weights > weight_threshold
+            voxel_coords = voxel_coords[mask, :]
+            tsdf = tsdf[mask]
+
+        if filterTSDF:
+            mask = tsdf < 0.0
+            voxel_coords = voxel_coords[mask, :]
+
+        return np.asarray(voxel_coords, dtype=np.float64)
+
+    @staticmethod
+    def _traj_turn_sign(traj_lineset) -> float:
+        # In local RDF frame, +X is right. Negative end-x implies a leftward arc.
+        pts = np.asarray(traj_lineset.points)
+        if pts.shape[0] == 0:
+            return 0.0
+        return float(pts[-1, 0])
+
+    @staticmethod
+    def _goal_lateral_in_body(camera_position: np.ndarray, goal_position: np.ndarray) -> float:
+        # camera_position is a 4x4 world_from_body transform (used with Open3D .transform()).
+        # Goal is provided in world coordinates in same RDF basis.
+        body_from_world = np.linalg.inv(camera_position)
+        g = np.array([goal_position[0, 0], goal_position[0, 1], goal_position[0, 2], 1.0], dtype=np.float64)
+        g_body = body_from_world @ g
+        return float(g_body[0])  # +X is right
+
+    def choose(
+        self,
+        vbg,
+        camera_position,
+        traj_linesets,
+        goal_position,
+        dist_threshold,
+        filterYvals,
+        filterWeights,
+        filterTSDF,
+        weight_threshold,
+        DEBUG=False,
+    ):
+        # Fall back to legacy behavior when disabled or goal is unknown.
+        if not self.params.enabled or goal_position is None:
+            return choose_primitive(
+                vbg,
+                camera_position,
+                traj_linesets,
+                goal_position,
+                dist_threshold,
+                filterYvals,
+                filterWeights,
+                filterTSDF,
+                weight_threshold,
+                DEBUG=DEBUG,
+            )
+
+        # Track goal-distance stagnation using actual pose (not predicted).
+        cur_pos = camera_position[0:-1, -1]
+        cur_goal_dist = float(np.linalg.norm(cur_pos - goal_position[0]))
+        if cur_goal_dist < self._best_goal_dist - self.params.progress_eps_m:
+            self._best_goal_dist = cur_goal_dist
+            self._stagnation_count = 0
+        else:
+            self._stagnation_count += 1
+
+        if self._mode == "goal" and self._stagnation_count >= self.params.stagnation_steps:
+            self._mode = "escape"
+            self._escape_steps = 0
+            lateral = self._goal_lateral_in_body(camera_position, goal_position)
+            self._escape_dir = "left" if lateral < 0 else "right"
+
+        obstacle_voxels = self._filtered_obstacle_voxels(vbg, filterYvals, filterWeights, filterTSDF, weight_threshold)
+        obstacles_empty = obstacle_voxels.size == 0
+
+        best_idx = None
+        best_goal_end = np.inf
+        best_clearance = -np.inf
+
+        esc_best_idx = None
+        esc_best_clearance = -np.inf
+        esc_best_goal_end = np.inf
+
+        # Evaluate all trajectories once.
+        for traj_idx, traj_lineset in enumerate(traj_linesets):
+            traj_lineset_copy = copy.deepcopy(traj_lineset)
+            traj_lineset_copy.transform(camera_position)
+            pts_world = np.asarray(traj_lineset_copy.points)
+            if pts_world.shape[0] == 0:
+                continue
+
+            # clearance to nearest obstacle voxel along the path
+            if obstacles_empty:
+                clearance = np.inf
+            else:
+                tmp = distance.cdist(obstacle_voxels, pts_world, "sqeuclidean")
+                voxel_idx, pt_idx = np.unravel_index(np.argmin(tmp), tmp.shape)
+                clearance = float(np.sqrt(tmp[voxel_idx, pt_idx]))
+            if clearance <= dist_threshold:
+                continue
+
+            goal_end = float(np.linalg.norm(pts_world[-1] - goal_position[0]))
+
+            # Normal greedy choice: minimize goal distance at end; tie-break on clearance.
+            if goal_end < best_goal_end or (m.isclose(goal_end, best_goal_end) and clearance > best_clearance):
+                best_idx = traj_idx
+                best_goal_end = goal_end
+                best_clearance = clearance
+
+            # Escape choice: maximize clearance (optionally with turn bias), tie-break on goal end.
+            turn_sign = self._traj_turn_sign(traj_lineset)
+            turn_dir = "left" if turn_sign < 0 else ("right" if turn_sign > 0 else "straight")
+            if self._mode == "escape" and self._escape_dir in ("left", "right"):
+                if turn_dir not in (self._escape_dir, "straight"):
+                    continue
+
+            if clearance > esc_best_clearance or (m.isclose(clearance, esc_best_clearance) and goal_end < esc_best_goal_end):
+                esc_best_idx = traj_idx
+                esc_best_clearance = clearance
+                esc_best_goal_end = goal_end
+
+        if self._mode == "escape":
+            self._escape_steps += 1
+
+            # Exit escape when we can make immediate goal progress again and we've
+            # spent a minimum time boundary-following to avoid mode thrashing.
+            can_progress = best_goal_end < cur_goal_dist - self.params.progress_eps_m if best_idx is not None else False
+            if can_progress and self._escape_steps >= self.params.escape_min_steps:
+                self._mode = "goal"
+                self._stagnation_count = 0
+                self._escape_steps = 0
+                self._escape_dir = None
+                return best_idx
+
+            return esc_best_idx
+
+        return best_idx
 
 """
 Load config.yml file
