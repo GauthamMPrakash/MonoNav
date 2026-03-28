@@ -140,6 +140,10 @@ else:
     else:
         device = device_cfg_str
 
+realtime_vbg_display = config.get('realtime_vbg_display', False)
+realtime_vbg_interval = config.get('realtime_vbg_interval', 5)
+realtime_vbg_downsample_voxel_size = config.get('realtime_vbg_downsample_voxel_size', None)
+
 vbg = VoxelBlockGrid(depth_scale, depth_max, trunc_voxel_multiplier, o3d.core.Device(device), intrinsic_matrix=fusion_intrinsics)
 
 # Initialize Trajectory Library (Motion Primitives)
@@ -256,6 +260,26 @@ def main():
         break
     
     send_espcam_cmd(STREAM_URL, vflip=1, hmirror=1, res_id=9) # ensure correct orientation and resolution from ESP32-CAM
+
+    vbg_visualizer = None
+    vbg_visualizer_pcd = None
+    drone_path = None
+    drone_marker = None
+    drone_positions = []
+    if realtime_vbg_display:
+        vbg_visualizer, vbg_visualizer_pcd = create_pointcloud_visualizer("MonoNav Realtime VBG", width=960, height=540)
+
+        # Initialize path and drone marker
+        drone_path = o3d.geometry.LineSet()
+        drone_path.points = o3d.utility.Vector3dVector(np.zeros((0, 3)))
+        drone_path.lines = o3d.utility.Vector2iVector(np.zeros((0, 2), dtype=np.int32))
+        drone_path.colors = o3d.utility.Vector3dVector(np.zeros((0, 3)))
+        vbg_visualizer.add_geometry(drone_path)
+
+        drone_marker = o3d.geometry.TriangleMesh.create_arrow(cylinder_radius=0.02, cone_radius=0.04, cylinder_height=0.15, cone_height=0.1)
+        drone_marker.paint_uniform_color([1.0, 0.0, 0.0])
+        drone_marker.compute_vertex_normals()
+        vbg_visualizer.add_geometry(drone_marker)
 
     # Run the depth model a few times (the first inference is slow), and skip the first few frames
     cap = VideoCapture(STREAM_URL)
@@ -509,6 +533,47 @@ def main():
              
             if shouldStop:        # exit on Esc or if shouldStop
                 break
+            
+            if realtime_vbg_display and traj_counter % realtime_vbg_interval == 0:
+                try:
+                    pcd = vbg.vbg.extract_point_cloud(weight_threshold)
+                    pcd_cpu = pcd.cpu().to_legacy()
+                    if realtime_vbg_downsample_voxel_size:
+                        pcd_cpu = pcd_cpu.voxel_down_sample(realtime_vbg_downsample_voxel_size)
+
+                    # Update reconstruction points
+                    update_pointcloud_visualizer(vbg_visualizer, vbg_visualizer_pcd, pcd_cpu)
+
+                    # Update drone path + marker at current position
+                    if camera_position is not None:
+                        position_vec = np.array(camera_position[0:3, 3]).reshape(1, 3)
+                        drone_positions.append(position_vec[0])
+
+                        # update path
+                        pts = np.array(drone_positions)
+                        if len(pts) > 1:
+                            lines = np.column_stack([np.arange(len(pts)-1), np.arange(1, len(pts))])
+                        else:
+                            lines = np.zeros((0, 2), dtype=np.int32)
+                        drone_path.points = o3d.utility.Vector3dVector(pts)
+                        drone_path.lines = o3d.utility.Vector2iVector(lines)
+                        drone_path.colors = o3d.utility.Vector3dVector(np.tile(np.array([[1.0, 0.0, 0.0]]), (len(lines), 1)))
+
+                        # update arrow pose
+                        try:
+                            vbg_visualizer.remove_geometry(drone_marker, reset_bounding_box=False)
+                        except Exception:
+                            pass
+                        drone_marker = o3d.geometry.TriangleMesh.create_arrow(cylinder_radius=0.02, cone_radius=0.04, cylinder_height=0.15, cone_height=0.1)
+                        drone_marker.paint_uniform_color([1.0, 0.0, 0.0])
+                        drone_marker.compute_vertex_normals()
+                        drone_marker.transform(camera_position)
+                        vbg_visualizer.add_geometry(drone_marker)
+
+                    vbg_visualizer.poll_events()
+                    vbg_visualizer.update_renderer()
+                except Exception as e:
+                    print(f"[warning] realtime VBG visualize failed: {e}", flush=True)
 
         if camera_position is not None:
             camera_position = camera_position[0:-1, -1]
@@ -561,6 +626,11 @@ def main():
                 cap.release()
             except Exception as e:
                 print(f"[warning] failed to release camera capture: {e}", flush=True)
+        if vbg_visualizer is not None and not realtime_vbg_display:
+            try:
+                vbg_visualizer.destroy_window()
+            except Exception as e:
+                print(f"[warning] failed to destroy VBG visualizer window: {e}", flush=True)
         cv2.destroyAllWindows()
 
 if __name__ == "__main__":

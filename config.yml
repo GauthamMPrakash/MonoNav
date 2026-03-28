@@ -22,6 +22,9 @@ filterYvals: True             # this helps filter out the ground / ceiling (for 
 filterWeights: True           # this helps filter out low-weight voxels
 filterTSDF: True
 weight_threshold: 3           # determine the weight threshold for filtering (higher threshold -> fewer points)
+realtime_vbg_display: True    # Enable live VBG point cloud display while flying
+realtime_vbg_interval: 2  # update visualization every N frames (tradeoff between compute and responsiveness)
+realtime_vbg_downsample_voxel_size: null  # optional downsample for displayed cloud (set to null to disable)
 VoxelBlockGrid:
   depth_scale: 1000.0         # 1000.0 is default (mm to m), scale factor for depth values during integration
   depth_max: 7.0              # max depth to include in the reconstruction
