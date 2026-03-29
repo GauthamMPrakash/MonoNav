@@ -17,12 +17,8 @@ import cv2
 import numpy as np
 from scipy.spatial import distance
 import os
-try:
-    import open3d as o3d
-    import open3d.core as o3c
-except ModuleNotFoundError:  # allow importing planner logic without Open3D installed
-    o3d = None
-    o3c = None
+import open3d as o3d
+import open3d.core as o3c
 import math as m
 import copy
 import yaml, json
@@ -82,8 +78,8 @@ class VoxelBlockGrid:
             device=device)
 
     def set_intrinsics(self, intrinsic_matrix):
-        self.intrinsic_matrix = np.asarray(intrinsic_matrix, dtype=np.float64)
-        self.depth_intrinsic = o3d.core.Tensor(self.intrinsic_matrix, o3d.core.Dtype.Float64)
+        self.intrinsic_matrix = np.asarray(intrinsic_matrix)
+        self.depth_intrinsic = o3d.core.Tensor(self.intrinsic_matrix)
 
     def ensure_intrinsics_for_frame(self, frame_width, frame_height):
         if self.intrinsic_matrix is None:
