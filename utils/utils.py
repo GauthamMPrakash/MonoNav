@@ -47,16 +47,9 @@ class VoxelBlockGrid:
         depth_scale=1000.0,
         depth_max=5.0,
         trunc_voxel_multiplier=8.0,
-        device=None,
+        device = o3d.core.Device("CUDA:0"),
         intrinsic_matrix=None,
     ):
-        if o3d is None or o3c is None:
-            raise ModuleNotFoundError(
-                "open3d is required for VoxelBlockGrid; install it (e.g. `pip install open3d`) "
-                "or run in the provided MonoNav environment."
-            )
-        if device is None:
-            device = o3d.core.Device("CUDA:0")
         # Reconstruction Information
         self.depth_scale = depth_scale
         self.depth_max = depth_max
@@ -91,14 +84,12 @@ class VoxelBlockGrid:
         frame_height, frame_width = depth_numpy.shape[:2]
         self.ensure_intrinsics_for_frame(frame_width, frame_height)
         depth = o3d.t.geometry.Image(depth_numpy).to(self.device)
-        # Open3D frustum indexing expects camera tensors on CPU even when VBG lives on CUDA.
-        depth_intrinsic_cpu = self.depth_intrinsic.to(o3d.core.Device("CPU:0"))
-        extrinsic_cpu = o3d.core.Tensor(np.linalg.inv(cam_pose))
+        extrinsic_cpu = o3d.core.Tensor(np.linalg.inv(cam_pose), o3d.core.Dtype.Float64)
         frustum_block_coords = self.vbg.compute_unique_block_coordinates(
-            depth, depth_intrinsic_cpu, extrinsic_cpu, self.depth_scale, self.depth_max, self.trunc_voxel_multiplier)
+            depth, self.depth_intrinsic, extrinsic_cpu, self.depth_scale, self.depth_max, self.trunc_voxel_multiplier)
         color = o3d.t.geometry.Image(np.asarray(color)).to(self.device)
-        color_intrinsic_cpu = o3d.core.Tensor(self.intrinsic_matrix)
-        self.vbg.integrate(frustum_block_coords, depth, color, depth_intrinsic_cpu,
+        color_intrinsic_cpu = o3d.core.Tensor(self.intrinsic_matrix, o3d.core.Dtype.Float64)
+        self.vbg.integrate(frustum_block_coords, depth, color, self.depth_intrinsic,
                        color_intrinsic_cpu, extrinsic_cpu, self.depth_scale, self.depth_max, self.trunc_voxel_multiplier)
 
 
@@ -113,9 +104,7 @@ class VideoCapture:
 
   def __init__(self, name):
     self.cap = cv2.VideoCapture(name)
-    self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-    self.q = queue.Queue(maxsize=1)
-    self.last_frame = None
+    self.q = queue.Queue()
     t = threading.Thread(target=self._reader)
     t.daemon = True
     t.start()
@@ -126,21 +115,15 @@ class VideoCapture:
       ret, frame = self.cap.read()
       if not ret:
         break
-      self.last_frame = frame
-      if self.q.full():
+      if not self.q.empty():
         try:
           self.q.get_nowait()   # discard previous (unprocessed) frame
         except queue.Empty:
           pass
-      self.q.put_nowait(frame)
+      self.q.put(frame)
 
-  def read(self, timeout=1.0):
-    try:
-      return self.q.get(timeout=timeout)
-    except queue.Empty:
-      if self.last_frame is not None:
-        return self.last_frame
-      raise RuntimeError("VideoCapture timeout: no frame available")
+  def read(self):
+    return self.q.get()
     
 # class VideoCapture:
 #     def __init__(self, name):
@@ -199,7 +182,7 @@ def compute_depth(frame, depth_model, size, make_colormap=True):
 
     if make_colormap:
         depth_colormap = cv2.normalize(depth, None, 0, 255, cv2.NORM_MINMAX, cv2.CV_8U)
-        depth_colormap = cv2.applyColorMap(depth_colormap, cv2.COLORMAP_JET)
+        depth_colormap = cv2.applyColorMap(depth_colormap, cv2.COLORMAP_JET).astype(np.uint8)
         #depth_colormap = (cmap(depth_colormap)[:, :, :3] * 255)[:, :, ::-1].astype(np.uint8)
     else:
         depth_colormap = None

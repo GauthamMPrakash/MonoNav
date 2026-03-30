@@ -329,7 +329,6 @@ def main():
 
         while True: # Run until VBG is populated to prevent planning error. This is checked by choose_primitive returning without exception
             bgr = cap.read()
-            cv2.waitKey(1)
             pose = get_latest_pose()
             camera_position = get_pose_matrix(*pose)
             # COMPUTE DEPTH
@@ -339,6 +338,7 @@ def main():
             depth_numpy, depth_colormap = compute_depth(transform_bgr, depth_anything, INPUT_SIZE)
             print("TIME TO COMPUTE DEPTH:", time.perf_counter() - start_time_test)
             cv2.imshow("Frame", bgr)
+            cv2.waitKey(1)
             vbg.integration_step(transform_rgb, depth_numpy, camera_position)
             try:
                 max_traj_idx = planner.choose(vbg.vbg, camera_position, traj_linesets, goal_position, min_dist2obs, filterYvals, filterWeights, filterTSDF, weight_threshold,) # Enable DEBUG to print trajectory scores during selection
@@ -432,7 +432,7 @@ def main():
                     last_action_state = None # reset last_action_state if we're not in GO or hover, so that we can print the next mode transition when it happens without being stuck in a state
 
             start_time = time.perf_counter()
-            while time.perf_counter() - start_time <= period:
+            while time.perf_counter() - start_time < period:
                 frame_start_time = time.perf_counter()
                  # get_latest_pose returns (x, y, z, yaw, pitch, roll) - non-blocking from thread
                 #t0=time.perf_counter()
@@ -449,8 +449,8 @@ def main():
                 depth_numpy, depth_colormap = compute_depth(transform_bgr, depth_anything, INPUT_SIZE, make_colormap=True)
                 camera_position = get_pose_matrix(*pose)
                 
-                if last_key_pressed in ('g', 'w', 'a', 'd', 'f'): # if not in hover or land mode, integrate into VBG
-                    vbg.integration_step(transform_rgb, depth_numpy, camera_position)
+                #if last_key_pressed in ('g', 'w', 'a', 'd', 'f'): # if not in hover or land mode, integrate into VBG
+                vbg.integration_step(transform_rgb, depth_numpy, camera_position)
 
                 if traj_index is not None:
                     yawrate = -amplitudes[traj_index] * np.sin(np.pi/period*(time.perf_counter() - start_time))  # rad/s
@@ -474,42 +474,6 @@ def main():
                     np.save(transform_depth_dir + '/' + 'transform_frame-%06d.depth.npy'%(frame_number), depth_numpy) # saved in meters
                     np.savetxt(pose_dir + '/frame-%06d.pose.txt'%(frame_number), camera_position)
 
-                if depth_colormap is not None:
-                    # time elapsed since the beginning of the current period
-                    hz_text = ("%0.2f" % (loop_hz,)) + ' Hz '
-                    fps_text = ("%0.2f" % (processing_speed,)) + ' FPS'
-                    hz_size = cv2.getTextSize(hz_text, cv2.FONT_HERSHEY_SIMPLEX, 1, 2)[0]
-                    textsize = cv2.getTextSize(fps_text, cv2.FONT_HERSHEY_SIMPLEX, 1, 2)[0]
-
-                    # Draw a second line of text above the FPS for additional info
-                    # (no extra top margin; add a blank line underneath the Hz text)
-                    hz_x = int((depth_colormap.shape[1] - hz_size[0] / 2))
-                    hz_y = int(hz_size[1])
-                    cv2.putText(
-                        depth_colormap,
-                        hz_text,
-                        org=(hz_x, hz_y),
-                        fontFace=cv2.FONT_HERSHEY_SIMPLEX,
-                        fontScale=0.5,
-                        thickness=1,
-                        color=(255, 255, 255),
-                    )
-
-                    cv2.putText(
-                        depth_colormap,
-                        fps_text,
-                        org=(int((depth_colormap.shape[1] - textsize[0] / 2)), int((textsize[1]) / 2 + hz_size[1] + 5)),
-                        fontFace=cv2.FONT_HERSHEY_SIMPLEX,
-                        fontScale=0.5,
-                        thickness=1,
-                        color=(255, 255, 255),
-                    )
-                    cv2.imshow("Frame", depth_colormap)
-                    cv2.waitKey(1)
-                else:
-                    cv2.imshow("Frame", transform_bgr)
-                    cv2.waitKey(1)
-
                 frame_number += 1
             traj_counter += 1
 
@@ -518,6 +482,41 @@ def main():
             cur_time  = time.perf_counter()
             loop_hz = 1.0 / (cur_time - start_time)
             processing_speed = 1.0 / (cur_time - frame_start_time)
+
+            if depth_colormap is not None:
+                # time elapsed since the beginning of the current period
+                hz_text = ("%0.2f" % (loop_hz,)) + ' Hz '
+                fps_text = ("%0.2f" % (processing_speed,)) + ' FPS'
+                hz_size = cv2.getTextSize(hz_text, cv2.FONT_HERSHEY_SIMPLEX, 1, 2)[0]
+                textsize = cv2.getTextSize(fps_text, cv2.FONT_HERSHEY_SIMPLEX, 1, 2)[0]
+
+                # Draw a second line of text above the FPS for additional info
+                # (no extra top margin; add a blank line underneath the Hz text)
+                hz_x = int((depth_colormap.shape[1] - hz_size[0] / 2))
+                hz_y = int(hz_size[1])
+                cv2.putText(
+                    depth_colormap,
+                    hz_text,
+                    org=(hz_x, hz_y),
+                    fontFace=cv2.FONT_HERSHEY_SIMPLEX,
+                    fontScale=0.5,
+                    thickness=1,
+                    color=(255, 255, 255),
+                )
+
+                cv2.putText(
+                    depth_colormap,
+                    fps_text,
+                    org=(int((depth_colormap.shape[1] - textsize[0] / 2)), int((textsize[1]) / 2 + hz_size[1] + 5)),
+                    fontFace=cv2.FONT_HERSHEY_SIMPLEX,
+                    fontScale=0.5,
+                    thickness=1,
+                    color=(255, 255, 255),
+                )
+                cv2.imshow("Frame", depth_colormap)
+            else:
+                cv2.imshow("Frame", transform_bgr)
+            cv2.waitKey(1)
    
             # Save trajectory information
             if save_during_flight and max_traj_idx is not None:

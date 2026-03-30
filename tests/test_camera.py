@@ -8,7 +8,6 @@ CHUNK_SIZE = 64
 MAX_BUFFER_BYTES = 512_000
 REPORT_EVERY = 10
 
-
 def pop_latest_complete_jpeg(buf):
     """Drain complete JPEGs and return only the newest one to minimize latency."""
     newest = None
