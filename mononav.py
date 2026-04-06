@@ -259,7 +259,7 @@ def main():
             continue         # Restart connection loop
         break
     
-    send_espcam_cmd(STREAM_URL, vflip=1, hmirror=1, res_id=9) # ensure correct orientation and resolution from ESP32-CAM
+    send_espcam_cmd(STREAM_URL[:-10], vflip=1, hmirror=1, res_id=9) # ensure correct orientation and resolution from ESP32-CAM
 
     vbg_visualizer = None
     vbg_visualizer_pcd = None
@@ -302,7 +302,7 @@ def main():
     vbg.set_intrinsics(vbg_intrinsics)
 
     try:
-        hdg = mavc.get_pose()[3] # get initial yaw
+        hdg = mavc.get_pose()[5] # get initial yaw
         # Convert startup nose-relative RDF goal to absolute NED, then reorder
         # to internal [E, D, N] so it matches camera_position[0:-1, -1].
         if goal_position is not None:
@@ -329,7 +329,7 @@ def main():
 
         while True: # Run until VBG is populated to prevent planning error. This is checked by choose_primitive returning without exception
             bgr = cap.read()
-            pose = get_latest_pose()
+            pose = get_latest_pose()[2:]
             camera_position = get_pose_matrix(*pose)
             # COMPUTE DEPTH
             start_time_test = time.perf_counter()

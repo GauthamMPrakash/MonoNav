@@ -311,6 +311,8 @@ def distances_from_depth_image(obstacle_line_height, depth_mat, distances, min_d
     # Parameters for obstacle distance message
     step = depth_img_width / distances_array_length
 
+    clear_distance_cm = 65535 + 1
+
     for i in range(distances_array_length):
         # Each range (left to right) is found from a set of rows within a column
         #  [ ] -> ignored
@@ -339,14 +341,13 @@ def distances_from_depth_image(obstacle_line_height, depth_mat, distances, min_d
         min_point_in_scan = np.min(depth_mat[int(lower_pixel):int(upper_pixel), int(i * step)])
         dist_m = min_point_in_scan * obstacle_depth_scale_m_per_unit
 
-        # Default value, unless overwritten: 
-        #   A value of max_distance + 1 (cm) means no obstacle is present. 
-        #   A value of UINT16_MAX (65535) for unknown/not used.
-        distances[i] = 65535
-
         # Note that dist_m is in meter, while distances[] is in cm.
+        # A value of max_distance + 1 (cm) means no obstacle is present.
+        # Re-write every bin each frame to avoid stale obstacle values.
+        distances[i] = clear_distance_cm
+
         if dist_m > min_depth_m and dist_m < max_depth_m:
-            distances[i] = dist_m * 100
+            distances[i] = int(dist_m * 100)
 
 def _timesync_loop(period_s, stop_event):
     """Background loop that calls mavc.timesync() every `period_s` seconds.
@@ -387,7 +388,7 @@ def main():
     while True:
         vehicle = mavc.connect_drone(IP, baud=baud)
         mavc.set_ekf_origin(EKF_LAT, EKF_LON)
-        mavc.en_pose_stream()
+        mavc.en_pose_stream(25)
         reboot = mavc.reboot_if_EKF_origin(0.5)
         if reboot:
             mavc.printd("Rebooted drone to set EKF origin. Waiting for reconnection...")
@@ -456,8 +457,8 @@ def main():
         mavc.takeoff(height)
         mavc.set_speed(forward_speed)
 
-    start_pose_thread()  # Start background pose polling at 10 Hz (non-blocking)
-    hdg = mavc.heading_offset_init()
+    start_pose_thread(20)  # Start background pose polling at 10 Hz (non-blocking)
+    hdg = mavc.get_pose()[5]
     # Convert RDF goal to NED, then reorder to internal [E, D, N]
     # to match camera_position[0:-1, -1] from get_pose_matrix().
     print("Goal position (RDF):", goal_position)
@@ -489,7 +490,7 @@ def main():
         if debug_enable:
             cv2.imshow("Camera Stream", bgr)
         # Get latest pose directly (no buffering) - read fresh values each iteration
-        pos_x, pos_y, pos_z, vehicle_yaw_rad, pitch_rad, vehicle_roll_rad = get_latest_pose()
+        tpos, tatt, pos_x, pos_y, pos_z, vehicle_yaw_rad, pitch_rad, vehicle_roll_rad = get_latest_pose()
         with vehicle_pose_lock:
             vehicle_pitch_rad = pitch_rad
         camera_position = get_pose_matrix(pos_x, pos_y, pos_z, vehicle_yaw_rad, pitch_rad, vehicle_roll_rad)

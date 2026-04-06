@@ -10,8 +10,10 @@ from pymavlink import mavutil
 import time
 
 FLTMODES = {'GUIDED': 4, 'LOITER':5, 'LAND':9, 'BRAKE':17, 'SMART_RTL':21}
-
 DEBUG = True                                                # Whether to print debug messages
+
+# Initialise poses 
+tpos, tatt, x, y, z, yaw, pitch, roll = None, None, None, None, None, None
 
 def printd(string):
     """
@@ -122,69 +124,32 @@ def en_pose_stream(freq=20):
 
     printd(f"Enabled pose stream at {freq} Hz")
 
-# Keep last-seen pose so callers can request a quick non-blocking sample
-x_last = None
-y_last = None
-z_last = None
-yaw_last = None
-pitch_last = None
-roll_last = None
-
-def get_pose(blocking=False, timeout_s=None):
+def get_pose():
     """
-    Return the position (Local NED) and attitude (in radians) of the drone.
-
-    If `timeout_s` is None and `blocking` is as before: the function will
-    block until both LOCAL_POSITION_NED and ATTITUDE messages have been
-    received (legacy behaviour).
-
-    If `timeout_s` is set (float seconds), the function will poll until the
-    timeout and then return the last values seen (or Nones if nothing seen).
-    This allows callers to perform a quick, non-blocking pose query.
+    Return the position (Local NED) and attitude (in radians) of the drone along with the timestamps these messages were polled at.
     """
-
-    global x_last, y_last, z_last, yaw_last, pitch_last, roll_last
-
     got_position = False
     got_attitude = False
-    x = x_last
-    y = y_last
-    z = z_last
-    yaw = yaw_last
-    pitch = pitch_last
-    roll = roll_last
-
-    start_time = time.time()
-    deadline = start_time + timeout_s if timeout_s is not None else None
-
+    deadline = time.perf_counter() + 0.3  # 300 ms timeout
     while True:
-        # Use the provided blocking flag and a small internal timeout so we can
-        # respect the overall deadline when one is provided.
-        msg = drone.recv_match(type=["LOCAL_POSITION_NED", "ATTITUDE"], blocking=blocking, timeout=0.1)
+        remaining = deadline - time.perf_counter()
+        if remaining < 0:
+            printd("Timeout while waiting for pose data")
+            return None, None, None, None, None, None, None, None
+        msg = drone.recv_match(type=["LOCAL_POSITION_NED", "ATTITUDE"], blocking=False, timeout=min(remaining, 0.1))
 
         if not msg or msg.get_type() == "BAD_DATA":
-            if got_position and got_attitude:
-                break
-            if deadline is not None and time.time() >= deadline:
-                break
             continue
 
-        if msg.get_type() == "LOCAL_POSITION_NED":
-            x, y, z = msg.x, msg.y, msg.z
-            got_position = True
-            x_last, y_last, z_last = x, y, z
-        elif msg.get_type() == "ATTITUDE":
-            roll, pitch, yaw = msg.roll, msg.pitch, msg.yaw
+        if msg.get_type() == "ATTITUDE":            # mavlink message #30
+            tatt, roll, pitch, yaw = msg.time_boot_ms, msg.roll, msg.pitch, msg.yaw
             got_attitude = True
-            roll_last, pitch_last, yaw_last = roll, pitch, yaw
+        if msg.get_type() == "LOCAL_POSITION_NED":  # mavlink message #32
+            tpos, x, y, z = msg.time_boot_ms, msg.x, msg.y, msg.z
+            got_position = True
 
         if got_position and got_attitude:
-            break
-
-        if deadline is not None and time.time() >= deadline:
-            break
-
-    return x, y, z, yaw, pitch, roll
+            return tpos, tatt, x, y, z, yaw, pitch, roll
 
 def arm(arm_state=1, force_disarm=False):
     """
@@ -233,6 +198,7 @@ def takeoff(target_alt):
 
     """
     printd(f"Taking off to {target_alt} meters...")
+    #target_alt = target_alt + -get_pose()[4]    # add current altitude to get target in EKF frame so that baro offsets are accounted for
     drone.mav.command_long_send(
         drone.target_system,
         drone.target_component,
@@ -244,13 +210,14 @@ def takeoff(target_alt):
 
     while True:
         # Read LOCAL_POSITION_NED messages only (faster and more robust for altitude)
-        alt = -get_pose()[2]    # convert Down (positive) -> altitude (positive up)
+        alt = -get_pose()[4]    # convert Down (positive) -> altitude (positive up)
         if alt is None:
             time.sleep(0.1)
             continue
 
         if alt >= target_alt * 0.9:
             printd("Reached target altitude")
+            time.sleep(1)  # small delay to ensure we're stable at the target altitude
             return True
 
 def send_body_offset_ned_vel(vx, vy, vz=0, yaw_rate=0):
@@ -320,7 +287,7 @@ def timesync(timeout_s=0.5):
     - ap_time_ns: estimated current AP clock (nanoseconds)
     - offset_ns: estimated offset between local and AP clocks
 
-    Returns `(None, None)` on timeout/failure.
+    Returns: offset_ns
     """
     t1_ns = time.monotonic_ns()
     drone.mav.timesync_send(0, t1_ns)
@@ -328,10 +295,10 @@ def timesync(timeout_s=0.5):
     while True:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            return None, None
+            return None
         msg = drone.recv_match(type='TIMESYNC', blocking=True, timeout=remaining)
         if msg is None:
-            return None, None
+            return None
         if msg.tc1 == 0:
             continue
         if msg.ts1 != t1_ns:
@@ -339,9 +306,21 @@ def timesync(timeout_s=0.5):
         t4_ns = time.monotonic_ns()
         local_mid_ns = (t1_ns + t4_ns) // 2
         offset_ns = int(msg.tc1 - local_mid_ns)
-        ap_ns = int(time.monotonic_ns() + offset_ns)
-        return ap_ns
-    
+        printd("Offset_ns between GCS and AP = {offset_ns} ms".format(offset_ns=offset_ns/1e6))
+        return offset_ns
+
+def system_time():      # mavlink message #2
+    """
+    Send companion wall-clock time to ArduPilot using SYSTEM_TIME.
+
+    - time_unix_usec: UNIX epoch time in microseconds
+    - time_boot_ms: companion monotonic time since boot in milliseconds
+    """
+    unix_us = time.time_ns() // 1000
+    boot_ms = int(time.monotonic_ns() // 1_000_000)
+    drone.mav.system_time_send(unix_us, boot_ms)
+    printd(f"Sent SYSTEM_TIME unix_us={unix_us}")
+
 def reboot_if_EKF_origin(pos_tolerance=0.3):
     """
     Read the current local‑position and, if either x or y deviates from
@@ -354,9 +333,9 @@ def reboot_if_EKF_origin(pos_tolerance=0.3):
     Returns True if reboot command was sent, False otherwise.
     """
 
-    x, y, _, _, _, _ = get_pose()
+    _, _, x, y, z, _, _, _ = get_pose()
     printd(f"reboot check – x={x:.3f}, y={y:.3f}")
-    if abs(x) > pos_tolerance or abs(y) > pos_tolerance:
+    if abs(x) > pos_tolerance or abs(y) > pos_tolerance or abs(z) > pos_tolerance:
         printd(f"pos deviation exceeds {pos_tolerance}, rebooting")
         drone.mav.command_long_send(
             drone.target_system,
@@ -386,7 +365,7 @@ def test():
         print("Checking telemetry:")
         for i in range(40):
             pose = get_pose()
-            print(pose, flush=True)
+            print(pose[2:], flush=True)
         print("AP time, offset:", timesync())
         arm()
         takeoff(1)

@@ -24,6 +24,7 @@ import copy
 import yaml, json
 import time
 from dataclasses import dataclass
+import urllib.parse
 
 from . import mavlink_control as mavc  # ArduCopter MAVLink wrappers (relative import)
 import threading                       # For bufferless video capture and pose threading
@@ -787,7 +788,16 @@ def create_pointcloud_visualizer(window_name="MonoNav Realtime VBG", width=None,
         vis.create_window(window_name=window_name, width=width, height=height)
     pcd = o3d.geometry.PointCloud()
     vis.add_geometry(pcd)
-    center = pcd.get6_axis_aligned_bounding_box().get_center()
+    get_aabb = getattr(pcd, 'get_axis_aligned_bounding_box', None)
+    if get_aabb is None:
+        get_aabb = getattr(pcd, 'get6_axis_aligned_bounding_box', None)
+    if get_aabb is not None:
+        try:
+            center = get_aabb().get_center()
+        except Exception:
+            center = np.zeros(3)
+    else:
+        center = np.zeros(3)
     ctr = vis.get_view_control()
     ctr.set_lookat(center)
     ctr.set_up([0, 0, 1])       # Z up
@@ -839,11 +849,10 @@ def _pose_thread_worker():
         next_time += sleep_time
 
         # Get pose
-        x, y, z, yaw, pitch, roll = get_pose()
-        t = time.time()
+        tpos, tatt, x, y, z, yaw, pitch, roll = get_pose()
 
         # Update shared pose
-        _pose_latest = (x, y, z, yaw, pitch, roll)
+        _pose_latest = (tpos, tatt, x, y, z, yaw, pitch, roll)
 
         # Signal that pose is ready (only matters first time)
         _pose_ready.set()
@@ -856,7 +865,7 @@ def _pose_thread_worker():
             next_time = time.perf_counter()
 
 
-def start_pose_thread(frequency_hz):
+def start_pose_thread(frequency_hz=15):
     """Start pose thread at given frequency."""
     global _pose_thread, _pose_thread_hz
 
@@ -882,7 +891,6 @@ def get_latest_pose():
     _pose_ready.wait()   # efficient wait (no CPU burn)
     return _pose_latest
 
-
 def stop_pose_thread():
     """Stop pose thread cleanly."""
     global _pose_thread
@@ -900,17 +908,26 @@ def send_espcam_cmd(url, vflip=0, hmirror=0, res_id=0, timeout=2):
     Send control commands to ESP32-CAM.
 
     Parameters:
-        base_url (str): e.g. "http://192.168.4.1"
+        url (str): base URL for the ESP32-CAM camera.
+            The helper appends '/control' if needed.
         vflip (int): 0 or 1
         hmirror (int): 0 or 1
         res_id (int): framesize ID (0–15 depending on firmware)
         timeout (float): request timeout
     """
 
+    def control_url_for(url):
+        parsed = urllib.parse.urlparse(url)
+        path = parsed.path.rstrip('/')
+        control_path = path + '/control'
+        return urllib.parse.urlunparse(parsed._replace(path=control_path, query=''))
+
+    control_url = control_url_for(url)
+
     def send(param, value):
         try:
             params = {"var": param, "val": value}
-            r = requests.get(url, params=params, timeout=timeout)
+            r = requests.get(control_url, params=params, timeout=timeout)
             return r.status_code == 200
         except requests.RequestException:
             return False
