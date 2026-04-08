@@ -69,4 +69,9 @@ GreedyEscapePlanner:
   enabled: False
   progress_eps_m: 0.25
   stagnation_steps: 4
-  escape_min_steps: 6
+  escape_min_steps: 6 # how many times planner stays in esape mode before giving up and returning control to greedy planner.
+  # Conservative mapping policy: reject trajectories that pass through unknown space.
+  # "Known" means voxels observed with weight > weight_threshold.
+  unknown_is_unsafe: True
+  # Maximum distance (m) from each trajectory sample to known space.
+  known_space_radius_m: 0.25

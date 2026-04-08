@@ -28,6 +28,7 @@ import urllib.parse
 
 from . import mavlink_control as mavc  # ArduCopter MAVLink wrappers (relative import)
 import threading                       # For bufferless video capture and pose threading
+import queue
 
 _pose_latest = None   # (timestamp, x, y, z, yaw, pitch, roll)
 _pose_thread = None
@@ -95,79 +96,29 @@ class VoxelBlockGrid:
 
 
 """
-Bufferless VideoCapture, courtesy of Ulrich Stern (https://stackoverflow.com/a/54577746)
+Based on bufferless VideoCapture courtesy of Ulrich Stern (https://stackoverflow.com/a/54577746)
 Otherwise, a lag builds up in the video stream.
 
-Use this for USB receivers when using something like an FPV camera
 """
-import queue
 class VideoCapture:
+    def __init__(self, url):
+        self.cap = cv2.VideoCapture(url)
+        self.q = queue.Queue(maxsize=1)
+        t = threading.Thread(target=self._reader, daemon=True)
+        t.start()
 
-  def __init__(self, name):
-    self.cap = cv2.VideoCapture(name)
-    self.q = queue.Queue()
-    t = threading.Thread(target=self._reader)
-    t.daemon = True
-    t.start()
+    def _reader(self):
+        while True:
+            ret, frame = self.cap.read()
+            if not ret:
+                break
+            if self.q.full():
+                self.q.get_nowait()
+            self.q.put(frame)
 
-  # read frames as soon as they are available, keeping only most recent one
-  def _reader(self):
-    while True:
-      ret, frame = self.cap.read()
-      if not ret:
-        break
-      if not self.q.empty():
-        try:
-          self.q.get_nowait()   # discard previous (unprocessed) frame
-        except queue.Empty:
-          pass
-      self.q.put(frame)
-
-  def read(self):
-    return self.q.get()
-    
-# class VideoCapture:
-#     def __init__(self, name):
-#         self.cap = cv2.VideoCapture(name)
-#         self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-#         self.frame = None
-#         self.lock = threading.Lock()
-#         self.running = True
-#         self.thread = threading.Thread(target=self._reader, daemon=True)
-#         self.thread.start()
-
-#     def _reader(self):
-#         while self.running:
-#             if self.cap is None:
-#                 break
-#             ret, frame = self.cap.read()
-#             if not ret or frame is None:
-#                 time.sleep(0.01)
-#                 continue
-#             with self.lock:
-#                 self.frame = frame
-
-#     def read(self, timeout=1.0):
-#         start = time.time()
-#         while True:
-#             with self.lock:
-#                 if self.frame is not None:
-#                     return self.frame
-#             if time.time() - start > timeout:
-#                 raise RuntimeError("No frame received")
-#             time.sleep(0.005)
-
-#     def release(self):
-#         self.running = False
-#         if hasattr(self, 'thread') and self.thread is not None:
-#             self.thread.join(timeout=1.0)
-#         if hasattr(self, 'cap') and self.cap is not None:
-#             try:
-#                 self.cap.release()
-#             except Exception:
-#                 pass
-#             self.cap = None
-                
+    def read(self):
+        return self.q.get()
+         
 """
 Compute depth from an RGB image using DepthAnythingV2
 Returns: depth_numpy (uint16 in mm), depth_colormap (for visualization) if make_colormap is True, otherwise None.
@@ -344,22 +295,54 @@ def get_traj_linesets(traj_list):
     return traj_linesets, period, forward_speed, amplitudes
 
 
+def _to_numpy(arr):
+    if isinstance(arr, np.ndarray):
+        return arr
+    if hasattr(arr, "cpu") and hasattr(arr, "numpy"):
+        return arr.cpu().numpy()
+    if hasattr(arr, "numpy"):
+        return arr.numpy()
+    return np.asarray(arr)
+
+
+def _voxel_arrays(vbg):
+    """Return voxel_coords/weights/tsdf in deterministic order."""
+    weights = _to_numpy(vbg.attribute("weight")).reshape((-1,))
+    tsdf = _to_numpy(vbg.attribute("tsdf")).reshape((-1,))
+    voxel_coords, voxel_indices = vbg.voxel_coordinates_and_flattened_indices()
+    voxel_coords = _to_numpy(voxel_coords)
+    voxel_indices = _to_numpy(voxel_indices).astype(np.int64, copy=False).reshape((-1,))
+
+    weights = weights[voxel_indices]
+    tsdf = tsdf[voxel_indices]
+    voxel_coords = voxel_coords[voxel_indices, :]
+
+    return (
+        np.asarray(voxel_coords, dtype=np.float64),
+        np.asarray(weights, dtype=np.float64),
+        np.asarray(tsdf, dtype=np.float64),
+    )
+
+
 """
 MonoNav Planner: Return the chosen trajectory index given the current position, current reconstruction, trajectory library, and goal position.
 """
-def choose_primitive(vbg, camera_position, traj_linesets, goal_position, dist_threshold, filterYvals, filterWeights, filterTSDF, weight_threshold, DEBUG=False):
+def choose_primitive(
+    vbg,
+    camera_position,
+    traj_linesets,
+    goal_position,
+    dist_threshold,
+    filterYvals,
+    filterWeights,
+    filterTSDF,
+    weight_threshold,
+    unknown_is_unsafe=True,
+    known_space_radius_m=0.25,
+    DEBUG=False,
+):
 
-    # Get weights and tsdf values from the voxel block grid
-    weights = vbg.attribute("weight").reshape((-1))
-    tsdf = vbg.attribute("tsdf").reshape((-1))
-    # Get the voxel_coords, voxel_indices
-    voxel_coords, voxel_indices = vbg.voxel_coordinates_and_flattened_indices()
-
-    # IMPORTANT
-    # Use voxel_indices to rearrange weights and tsdf to match voxel_coords
-    # Otherwise, the ordering of voxels from the hashmap is non-deterministic
-    weights = weights[voxel_indices]
-    tsdf = tsdf[voxel_indices]
+    voxel_coords, weights, tsdf = _voxel_arrays(vbg)
 
     # Generate mask to filter out y values (vertical) (+y is DOWN)
     # This is useful to filter out the floor, and avoid obstacles in-plane
@@ -384,8 +367,18 @@ def choose_primitive(vbg, camera_position, traj_linesets, goal_position, dist_th
         mask = tsdf < 0.0
         voxel_coords = voxel_coords[mask,:]
 
-    # transfer to cpu for cdist
-    voxel_coords_numpy = voxel_coords.cpu().numpy()
+    obstacle_voxels = np.asarray(voxel_coords, dtype=np.float64)
+
+    # Conservative unknown-space policy: only traverse trajectories close to observed voxels.
+    # "Known" voxels are those integrated with sufficient weight.
+    known_voxels = np.empty((0, 3), dtype=np.float64)
+    if unknown_is_unsafe:
+        all_voxel_coords, all_weights, _ = _voxel_arrays(vbg)
+        known_weight_threshold = max(float(weight_threshold), 1e-6)
+        known_mask = all_weights > known_weight_threshold
+        known_voxels = all_voxel_coords[known_mask, :]
+
+    obstacles_empty = obstacle_voxels.size == 0
 
     # NOW WE HAVE A FILTERED SET OF VOXELS THAT REPRESENT OBSTACLES
     # NEXT, WE DETERMINE THE BEST TRAJECTORY ACCORDING TO A COST FUNCTION
@@ -400,9 +393,20 @@ def choose_primitive(vbg, camera_position, traj_linesets, goal_position, dist_th
         traj_lineset_copy = copy.deepcopy(traj_linset)
         traj_lineset_copy.transform(camera_position) # transform the lineset (copy) to the camera position
         pts = np.asarray(traj_lineset_copy.points) # meters # extract the points from the lineset
-        tmp = distance.cdist(voxel_coords_numpy, pts, "sqeuclidean") # compute the distance between all voxels and all points in the trajectory
-        voxel_idx, pt_idx = np.unravel_index(np.argmin(tmp), tmp.shape) # extract indices of the nearest voxel to and nearest point in the trajectory
-        nearest_voxel_dist = np.sqrt(tmp[voxel_idx, pt_idx])
+        if unknown_is_unsafe:
+            if known_voxels.size == 0:
+                continue
+            known_d2 = distance.cdist(known_voxels, pts, "sqeuclidean")
+            nearest_known = np.sqrt(np.min(known_d2, axis=0))
+            if np.any(nearest_known > known_space_radius_m):
+                continue
+
+        if obstacles_empty:
+            nearest_voxel_dist = np.inf
+        else:
+            tmp = distance.cdist(obstacle_voxels, pts, "sqeuclidean") # compute the distance between all voxels and all points in the trajectory
+            voxel_idx, pt_idx = np.unravel_index(np.argmin(tmp), tmp.shape) # extract indices of the nearest voxel to and nearest point in the trajectory
+            nearest_voxel_dist = np.sqrt(tmp[voxel_idx, pt_idx])
         if nearest_voxel_dist > dist_threshold:
             # the trajectory meets the dist_threshold criterion
             if goal_position is not None:
@@ -436,6 +440,8 @@ class GreedyEscapePlannerParams:
     progress_eps_m: float = 0.25
     stagnation_steps: int = 4
     escape_min_steps: int = 6
+    unknown_is_unsafe: bool = True
+    known_space_radius_m: float = 0.25
 
 
 class GreedyEscapePlanner:
@@ -466,25 +472,12 @@ class GreedyEscapePlanner:
         self._escape_steps = 0
         self._escape_dir = None
 
+    def _voxel_arrays(self, vbg):
+        """Return voxel_coords/weights/tsdf with deterministic ordering."""
+        return _voxel_arrays(vbg)
+
     def _filtered_obstacle_voxels(self, vbg, filterYvals, filterWeights, filterTSDF, weight_threshold):
-        def _to_numpy(arr):
-            if isinstance(arr, np.ndarray):
-                return arr
-            if hasattr(arr, "cpu") and hasattr(arr, "numpy"):
-                return arr.cpu().numpy()
-            if hasattr(arr, "numpy"):
-                return arr.numpy()
-            return np.asarray(arr)
-
-        weights = _to_numpy(vbg.attribute("weight")).reshape((-1,))
-        tsdf = _to_numpy(vbg.attribute("tsdf")).reshape((-1,))
-        voxel_coords, voxel_indices = vbg.voxel_coordinates_and_flattened_indices()
-        voxel_coords = _to_numpy(voxel_coords)
-        voxel_indices = _to_numpy(voxel_indices).astype(np.int64, copy=False).reshape((-1,))
-
-        weights = weights[voxel_indices]
-        tsdf = tsdf[voxel_indices]
-        voxel_coords = voxel_coords[voxel_indices, :]
+        voxel_coords, weights, tsdf = self._voxel_arrays(vbg)
 
         if filterYvals:
             mask = voxel_coords[:, 1] < -0.3
@@ -502,6 +495,13 @@ class GreedyEscapePlanner:
             voxel_coords = voxel_coords[mask, :]
 
         return np.asarray(voxel_coords, dtype=np.float64)
+
+    def _known_space_voxels(self, vbg, weight_threshold):
+        """Observed voxels with sufficient integration weight are treated as known space."""
+        voxel_coords, weights, _ = self._voxel_arrays(vbg)
+        known_weight_threshold = max(float(weight_threshold), 1e-6)
+        mask = weights > known_weight_threshold
+        return voxel_coords[mask, :]
 
     @staticmethod
     def _traj_turn_sign(traj_lineset) -> float:
@@ -545,6 +545,8 @@ class GreedyEscapePlanner:
                 filterWeights,
                 filterTSDF,
                 weight_threshold,
+                unknown_is_unsafe=self.params.unknown_is_unsafe,
+                known_space_radius_m=self.params.known_space_radius_m,
                 DEBUG=DEBUG,
             )
 
@@ -565,6 +567,8 @@ class GreedyEscapePlanner:
 
         obstacle_voxels = self._filtered_obstacle_voxels(vbg, filterYvals, filterWeights, filterTSDF, weight_threshold)
         obstacles_empty = obstacle_voxels.size == 0
+        known_voxels = self._known_space_voxels(vbg, weight_threshold)
+        known_space_empty = known_voxels.size == 0
 
         best_idx = None
         best_goal_end = np.inf
@@ -581,6 +585,15 @@ class GreedyEscapePlanner:
             pts_world = np.asarray(traj_lineset_copy.points)
             if pts_world.shape[0] == 0:
                 continue
+
+            if self.params.unknown_is_unsafe:
+                # Conservative policy: every point on a candidate path must lie near observed space.
+                if known_space_empty:
+                    continue
+                known_d2 = distance.cdist(known_voxels, pts_world, "sqeuclidean")
+                nearest_known = np.sqrt(np.min(known_d2, axis=0))
+                if np.any(nearest_known > self.params.known_space_radius_m):
+                    continue
 
             # clearance to nearest obstacle voxel along the path
             if obstacles_empty:

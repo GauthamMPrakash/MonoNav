@@ -166,6 +166,8 @@ planner_params = GreedyEscapePlannerParams(
     progress_eps_m=float(planner_cfg.get("progress_eps_m", 0.25)),
     stagnation_steps=int(planner_cfg.get("stagnation_steps", 4)),
     escape_min_steps=int(planner_cfg.get("escape_min_steps", 6)),
+    unknown_is_unsafe=bool(planner_cfg.get("unknown_is_unsafe", True)),
+    known_space_radius_m=float(planner_cfg.get("known_space_radius_m", 0.25)),
 )
 planner = GreedyEscapePlanner(planner_params)
 
@@ -434,11 +436,10 @@ def main():
             start_time = time.perf_counter()
             while time.perf_counter() - start_time < period:
                 frame_start_time = time.perf_counter()
-                 # get_latest_pose returns (x, y, z, yaw, pitch, roll) - non-blocking from thread
                 #t0=time.perf_counter()
                 bgr = cap.read()
                 #t1=time.perf_counter()
-                pose = get_latest_pose()
+                pose = get_latest_pose() # get_latest_pose returns (x, y, z, yaw, pitch, roll) - non-blocking from thread
                 #t2=time.perf_counter()
 
                 # Optionally transform camera image (undistort + crop) based on config
@@ -447,7 +448,7 @@ def main():
 
                 # compute depth
                 depth_numpy, depth_colormap = compute_depth(transform_bgr, depth_anything, INPUT_SIZE, make_colormap=True)
-                camera_position = get_pose_matrix(*pose)
+                camera_position = get_pose_matrix(*pose[2:]) # we dont need the timestamps
                 
                 #if last_key_pressed in ('g', 'w', 'a', 'd', 'f'): # if not in hover or land mode, integrate into VBG
                 vbg.integration_step(transform_rgb, depth_numpy, camera_position)

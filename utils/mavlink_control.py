@@ -13,7 +13,7 @@ FLTMODES = {'GUIDED': 4, 'LOITER':5, 'LAND':9, 'BRAKE':17, 'SMART_RTL':21}
 DEBUG = True                                                # Whether to print debug messages
 
 # Initialise poses 
-tpos, tatt, x, y, z, yaw, pitch, roll = None, None, None, None, None, None
+tpos, tatt, x, y, z, yaw, pitch, roll = None, None, None, None, None, None, None, None
 
 def printd(string):
     """

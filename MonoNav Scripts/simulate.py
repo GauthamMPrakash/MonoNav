@@ -84,6 +84,8 @@ planner = GreedyEscapePlanner(
         progress_eps_m=float(planner_cfg.get("progress_eps_m", 0.25)),
         stagnation_steps=int(planner_cfg.get("stagnation_steps", 4)),
         escape_min_steps=int(planner_cfg.get("escape_min_steps", 6)),
+        unknown_is_unsafe=bool(planner_cfg.get("unknown_is_unsafe", True)),
+        known_space_radius_m=float(planner_cfg.get("known_space_radius_m", 0.25)),
     )
 )
 
