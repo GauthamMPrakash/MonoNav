@@ -325,7 +325,7 @@ def main():
                     mavc.set_mode('BRAKE')
                 print("[INFO] No safe trajectory found. Hovering in place.", flush=True)
             else:
-                if mode == 'BRAKE':     # so that external mode commands from GCS or RC would not be overridden
+                if mode == 'BRAKE':         # so that external mode commands for other modes from GCS or RC would not be overridden
                     mavc.set_mode('GUIDED') # ensure we're in guided mode to accept velocity commands
                 if last_key_pressed == 'g':
                     traj_str = "Selected traj:"
@@ -390,7 +390,7 @@ def main():
                 print("Hovering in place.", flush=True)
                 traj_index = None
 
-            if last_key_pressed != 'g':
+            if last_key_pressed != 'g' or mode == 'LAND':
                 last_key_pressed = None # reset key state if we're not in GO mode, so that single keypresses don't carry over into future periods
             
                 if last_action_state not in ('g', 'goal'):

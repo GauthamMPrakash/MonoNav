@@ -249,7 +249,7 @@ def takeoff(target_alt):
             time.sleep(0.1)
             continue
 
-        if alt >= target_alt * 0.9:
+        elif alt >= target_alt * 0.9:
             printd("Reached target altitude")
             return True
 
