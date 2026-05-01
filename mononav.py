@@ -154,10 +154,7 @@ max_traj_idx = int(len(traj_list)/2)
 if config['forward_speed'] is not None:
     forward_speed = config['forward_speed']
 print(f"\nTrajectory library loaded: {len(traj_list)} trajectories", flush=True)
-print("Press 'g' for autonomous mode, 'h' to hover, 'f' to fuse, 'a'/'w'/'d' for manual left/straight/right, or 'q'/'e' to yaw", flush=True)
-
-# Track mode transitions so repeated states do not spam the console.
-last_action_state = None
+print("Press 'g' to enable MonoNav autonomous mode, or 'a'/'w'/'d' for manual left/straight/right", flush=True)
 
 # Track printing state for repeated modes so we only print once per mode transition.
 last_action_state = None
@@ -475,8 +472,9 @@ def main():
             elif last_key_pressed in ('c', 'esc'):
                 mavc.set_mode('BRAKE')
                 time.sleep(0.2)
+                time.sleep(0.2)
                 mavc.set_mode('LAND')
-                print(f"Pressed {last_key_pressed}. Ending control.", flush=True)
+                print("Pressed c. Ending control.", flush=True)
                 shouldStop = True
                 break
             elif last_key_pressed == 'r':
@@ -484,20 +482,8 @@ def main():
                 if FLY_VEHICLE:
                     mavc.set_mode('SMART_RTL')
                 break
-
-            elif last_key_pressed == 'h':
-                if last_action_state != 'hover':
-                    print("Pressed h. Hovering in place.", flush=True)
-                last_action_state = 'hover'
-                reset_auto_state()
-                last_key_pressed = None
-
-            elif last_key_pressed == 'f':
-                print("Pressed f. Fusing current frame into VBG (no movement).", flush=True)
-                last_action_state = 'fuse'
-                reset_auto_state()
-                fuse_only = True
-                last_key_pressed = None
+            
+            # Check for trajectory control keys
             elif last_key_pressed == 'a':
                 print("Pressed a. Going left.", flush=True)
                 last_action_state = 'manual'
@@ -547,61 +533,49 @@ def main():
                 else:
                     traj_index = max_traj_idx
             else:
-                if last_action_state != 'hover':
-                    print("Hovering in place.", flush=True)
-                last_action_state = 'hover'
-                reset_auto_state()
+                print("Hovering in place.", flush=True)
                 if FLY_VEHICLE:
-                    mavc.send_body_offset_ned_vel(0, 0, yaw_rate=0)
-                time.sleep(0.1)
-
-            if go_mode_active and (not planner_is_dstar or goal_position is None) and max_traj_idx is None:
-                if mode == 'GUIDED' and FLY_VEHICLE:
-                    mavc.set_mode('BRAKE')
-                    time.sleep(0.1)
-                if last_action_state != 'hover:no_safe_traj':
-                    print("[INFO] No safe trajectory found. Hovering in place.", flush=True)
-                last_action_state = 'hover:no_safe_traj'
+                    mavc.send_body_offset_ned_vel(0, 0, yaw_rate=0) # hover in place
                 traj_index = None
-
-            if FLY_VEHICLE and mode == 'BRAKE':
-                if traj_index is not None:
-                    mavc.set_mode('GUIDED')
+                last_key_pressed = None
+                time.sleep(0.5) # small sleep to prevent busy loop when hovering without a trajectory
 
             # Save trajectory information
             if save_during_flight:
-                traj_idx_to_log = traj_index if traj_index is not None else -1
+                traj_idx_to_log = max_traj_idx if max_traj_idx is not None else -1
                 row = np.array([frame_number, int(traj_idx_to_log), time.time()-start_flight_time]) # time since start of flight
                 with open(save_dir + '/trajectories.csv', 'a') as file:
                     np.savetxt(file, row.reshape(1, -1), delimiter=',', fmt='%s')
-
-            if go_mode_active and planner_is_dstar and goal_position is not None:
-                command_period = planner_replan_period
-            else:
-                command_period = period
-
-            start_time = time.perf_counter()
-            while time.perf_counter() - start_time <= command_period:
-                elapsed = time.perf_counter() - start_time
-                frame_start_time = time.perf_counter()
+            
+            start_time = time.time()
+            while time.time() - start_time <= period:
+                frame_start_time = time.time()
                 if traj_index is not None:
-                    yawrate = -amplitudes[traj_index] * np.sin(np.pi / period * elapsed)  # rad/s
+                    yawrate = -amplitudes[traj_index] * np.sin(np.pi/period*(time.time() - start_time))  # rad/s
                     yvel = yawrate * yvel_gain
                     yawrate = yawrate * yawrate_gain
                     if FLY_VEHICLE:
                         mavc.send_body_offset_ned_vel(forward_speed, yvel, yaw_rate=yawrate)
-
+                
                 bgr = cap.read()
                 #t1=time.perf_counter()
                 pose = get_latest_pose()    # get_latest_pose returns (x, y, z, yaw, pitch, roll) - non-blocking from thread
                 #t2=time.perf_counter()
 
-                transform_bgr = transform_image(bgr, mtx, dist, optimal_mtx, roi, enable_undistort)
-                transform_rgb = cv2.cvtColor(transform_bgr, cv2.COLOR_BGR2RGB)
+                # Optionally transform camera image (undistort + crop) based on config
+                if enable_undistort:
+                    transform_bgr = transform_image(bgr, mtx, dist, optimal_mtx, roi)
+                    transform_rgb = cv2.cvtColor(transform_bgr, cv2.COLOR_BGR2RGB)
+                else:
+                    transform_bgr = bgr
+                    transform_rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+                #transform_rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+
+                # compute depth
                 depth_numpy, depth_colormap = compute_depth(transform_bgr, depth_anything, INPUT_SIZE, make_colormap=True)
                 camera_position = get_pose_matrix(*pose)
-
-                if go_mode_active or traj_index is not None or fuse_only:
+                
+                if last_key_pressed in ['g', 'w', 'a', 's', 'd']: # if not in hover mode, integrate into VBG
                     vbg.integration_step(transform_rgb, depth_numpy, camera_position)
 
                 if traj_index is not None:
@@ -614,9 +588,7 @@ def main():
                 if goal_position is not None:
                     dist_to_goal = np.linalg.norm(camera_position[0:-1, -1]-goal_position[0])
                     if dist_to_goal < min_dist2goal:
-                        if last_action_state != 'goal':
-                            print("Reached goal!", flush=True)
-                        last_action_state = 'goal'
+                        print("Reached goal!")
                         shouldStop = True
                 
                 if save_during_flight:
@@ -637,7 +609,18 @@ def main():
                     # (no extra top margin; add a blank line underneath the Hz text)
                     hz_x = int((depth_colormap.shape[1] - hz_size[0] / 2))
                     hz_y = int(hz_size[1])
-                    cv2.putText(depth_colormap, hz_text, org=(hz_x, hz_y), fontFace=cv2.FONT_HERSHEY_SIMPLEX, fontScale=0.5, thickness=1, color=(255, 255, 255))
+                    cv2.putText(
+                        depth_colormap,
+                        hz_text,
+                        org=(hz_x, hz_y),
+                        fontFace=cv2.FONT_HERSHEY_SIMPLEX,
+                        fontScale=0.5,
+                        thickness=1,
+                        color=(255, 255, 255),
+                    )
+
+                    line_spacing = 5
+                    fps_y = int(hz_y + hz_size[1] + line_spacing + textsize[1])
 
                     cv2.putText(
                         depth_colormap,
@@ -650,7 +633,7 @@ def main():
                     )
                     cv2.imshow("Depth", depth_colormap)
                 #cv2.imshow("RGB", transform_bgr)
-                if _poll_opencv_escape():
+                if opencv_waitkey():
                     print("Pressed esc. Ending control.", flush=True)
                     shouldStop = True
                     last_key_pressed = 'c'
@@ -667,10 +650,33 @@ def main():
 
             #print(f"Pose delay (ms): ({(t1-t0)*1000}, Capture delay (ms):{(t2-t1)*1000}", flush=True)
             # Add FPS counter to depth display
-            cur_time  = time.perf_counter()
-            loop_hz = 1.0 / max(cur_time - start_time, 1e-6)
-            processing_speed = 1.0 / max(cur_time - frame_start_time, 1e-6)
+            cur_time  = time.time()
+            loop_hz = 1.0 / (cur_time - start_time)
+            processing_speed = 1.0 / (cur_time - frame_start_time)
 
+            # If a key was pressed during the period, let the outer loop consume it next.
+            if last_key_pressed in ('p', 'c', 'r', 'a', 'w', 'd', 'h'):
+                continue
+
+            # Planner always scores trajectories, but only GO mode applies them.
+            max_traj_idx = choose_primitive(vbg.vbg, camera_position, traj_linesets, goal_position, min_dist2obs, filterYvals, filterWeights, filterTSDF, weight_threshold,) # Enable DEBUG to print trajectory scores during selection
+
+            mode = mavc.get_mode()
+            if max_traj_idx is None:
+                if mode == 'GUIDED':      
+                    mavc.set_mode('BRAKE')
+                    time.sleep(0.1) # brief brake before hover to prevent drift during stop
+                print("[INFO] No safe trajectory found. Hovering in place.", flush=True)
+            else:
+                if mode == 'BRAKE':     # so that external mode commands from GCS or RC would not be overridden
+                    mavc.set_mode('GUIDED') # ensure we're in guided mode to accept velocity commands
+                if last_key_pressed == 'g':
+                    traj_str = "Selected traj:"
+                else:
+                    traj_str = "Next traj:"
+                print(f"[TRAJ] {traj_str} {max_traj_idx}/{len(traj_list)-1}", flush=True)
+
+            # If this cycle ended due to a stop command, do not run planner updates.
             if shouldStop:
                 break
 
@@ -715,10 +721,6 @@ def main():
         traceback.print_exc()
             
     finally:
-        try:
-            mavc.en_pose_stream(3) # set pose stream to low frequency to reduce bandwidth usage
-        except Exception:
-            pass
         print("Releasing camera capture.")
         stop_pose_thread()
         stop_keyboard_listener()
@@ -728,11 +730,7 @@ def main():
             except Exception as e:
                 print(f"[warning] failed to release camera capture: {e}", flush=True)
         cv2.destroyAllWindows()
-        if cap is not None:
-            try:
-                cap.cap.release()
-            except Exception as e:
-                print(f"[warning] failed to release camera capture: {e}", flush=True)
+        cap.cap.release()
 
 if __name__ == "__main__":
     main()
