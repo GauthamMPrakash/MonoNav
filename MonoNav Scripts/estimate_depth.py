@@ -20,6 +20,7 @@ The following are saved to file:
 
 import time
 import os
+import sys
 import torch
 import cv2
 
@@ -32,6 +33,11 @@ import open3d as o3d
 from PIL import Image
 import numpy as np
 
+# Ensure the repository root is on sys.path so we can import `utils` from anywhere
+repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
+if repo_root not in sys.path:
+    sys.path.insert(0, repo_root)
+
 from utils.utils import compute_depth, load_config, get_calibration_values, transform_image
 
 """"
@@ -39,9 +45,42 @@ This script runs a depth estimation model on a directory of RGB images and saves
 """
 
 # LOAD CONFIG
-CONFIG_PATH = "config.yml"
-config = load_config("config.yml")
-data_dir = config["data_dir"] # parent directory to look for RGB images, and save depth images
+CONFIG_PATH = os.path.join(repo_root, "config.yml")
+config = load_config(CONFIG_PATH)
+
+def _latest_data_dir(prefix):
+    prefix = os.path.normpath(prefix)
+    directory_parent = os.path.dirname(prefix)
+    basename = os.path.basename(prefix)
+    if not basename:
+        raise ValueError(f"save_dir_prefix must have a basename, got '{prefix}'")
+
+    if os.path.isabs(directory_parent):
+        parent_dir = directory_parent
+    elif directory_parent:
+        parent_dir = os.path.join(repo_root, directory_parent)
+    else:
+        parent_dir = repo_root
+
+    parent_dir = os.path.abspath(parent_dir)
+    if not os.path.isdir(parent_dir):
+        raise FileNotFoundError(f"parent data directory '{parent_dir}' not found")
+
+    candidates = [
+        os.path.join(parent_dir, entry)
+        for entry in os.listdir(parent_dir)
+        if entry.startswith(basename) and os.path.isdir(os.path.join(parent_dir, entry))
+    ]
+    if not candidates:
+        raise FileNotFoundError(f"no data directories starting with '{basename}' in '{parent_dir}'")
+
+    latest_dir = max(candidates, key=os.path.getmtime)
+    print(f"[estimate_depth] using latest data directory: {latest_dir}", flush=True)
+    return latest_dir
+
+data_dir = config.get("data_dir")
+if not data_dir:
+    data_dir = _latest_data_dir(config["save_dir_prefix"])
 camera_source = config["camera_source"] # what camera was used for the RGB images?
 print("Loading" + camera_source + "images from: ", data_dir, ".")
 

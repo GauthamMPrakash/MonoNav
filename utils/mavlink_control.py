@@ -36,9 +36,8 @@ def connect_drone(IP, baud=115200):
     """
     global drone
     drone = mavutil.mavlink_connection(IP, baud, autoreconnect=True)
-    time.sleep(0.05)
     printd("Waiting for heartbeat...")
-    while not drone.wait_heartbeat(timeout=1):
+    while not drone.wait_heartbeat(timeout=2):
         send_heartbeat()
     printd(f"Heartbeat received from system {drone.target_system} component {drone.target_component}")
     return drone
@@ -74,7 +73,7 @@ def set_mode(mode_name):
 
 def get_mode():
     while True:
-        msg = drone.recv_match(type='HEARTBEAT', blocking=True)
+        msg = drone.recv_match(type='HEARTBEAT', blocking=False)
 
         if msg is None:
             continue
@@ -187,7 +186,7 @@ def get_pose(blocking=False, timeout_s=None):
 
     return x, y, z, yaw, pitch, roll
 
-def arm(arm_state=1, force_disarm=True):
+def arm(arm_state=1, force_disarm=False):
     """
     Arm the drone
     """
@@ -250,7 +249,7 @@ def takeoff(target_alt):
             time.sleep(0.1)
             continue
 
-        if alt >= target_alt * 0.9:
+        elif alt >= target_alt * 0.9:
             printd("Reached target altitude")
             return True
 
@@ -314,6 +313,8 @@ def set_speed(speed):
         0,0,0,0  # Unused
     )
 
+_boot_time_ns = time.monotonic_ns()
+
 def timesync(timeout_s=0.5):
     """
     Query the autopilot TIMESYNC and return (ap_time_ns, offset_ns).
@@ -329,10 +330,10 @@ def timesync(timeout_s=0.5):
     while True:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            return None, None
+            return None
         msg = drone.recv_match(type='TIMESYNC', blocking=True, timeout=remaining)
         if msg is None:
-            return None, None
+            return None
         if msg.tc1 == 0:
             continue
         if msg.ts1 != t1_ns:
@@ -342,8 +343,21 @@ def timesync(timeout_s=0.5):
         offset_ns = int(msg.tc1 - local_mid_ns)
         ap_ns = int(time.monotonic_ns() + offset_ns)
         return ap_ns
-    
-def reboot_if_EKF_origin(pos_tolerance=0.2):
+
+def system_time():
+    """Send a SYSTEM_TIME message to the autopilot.
+
+    This is the MAVLink common message that syncs the autopilot to the
+    local host clock. It sets:
+      - time_unix_usec: current unix epoch time in microseconds
+    """
+
+    time_unix_usec = time.time_ns() // 1000
+
+    drone.mav.system_time_send(time_unix_usec, 0)
+    printd(f"Sent SYSTEM_TIME: unix={time_unix_usec}")
+
+def reboot_if_EKF_origin(pos_tolerance=0.3):
     """
     Read the current local‑position and, if either x or y deviates from
     zero by more than `tolerance`, request a reboot so the EKF origin can
@@ -373,7 +387,8 @@ def reboot_if_EKF_origin(pos_tolerance=0.2):
 
 def set_param(param_id, param_value, param_type, timeout=5.0):
     """
-    UNTESTED
+    UNTESTED func
+    -------------
 
     Set a parameter on the autopilot. Use with caution and ensure you know what the parameter does before changing.
     Waits for PARAM_VALUE response to verify successful parameter set with configurable timeout.
@@ -410,7 +425,7 @@ def set_param(param_id, param_value, param_type, timeout=5.0):
     printd(f"ERROR: No PARAM_VALUE response received for {param_id} within {timeout}s timeout")
     return False
 
-def test(): 
+def test():
     """
     Do not fly the vehicle unless you have configured and tested the drone in a safe environment. Always be ready to disarm if the drone behaves unexpectedly.
     """
@@ -420,7 +435,6 @@ def test():
         EKF_LON = 76.9295203
         IP = "udpout:192.168.53.51:14550"  # Drone IP
         connect_drone(IP)
-        en_pose_stream()
         reboot_if_EKF_origin()
         set_ekf_origin(EKF_LAT, EKF_LON, 0)
         set_mode('GUIDED')

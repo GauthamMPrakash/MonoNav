@@ -18,22 +18,22 @@ import numpy as np
 from matplotlib import colormaps
 from scipy.spatial import distance
 import os
+import copy
 import open3d as o3d
 import open3d.core as o3c
 import math as m
-import copy
 import yaml, json
 import time
 
 from . import mavlink_control as mavc  # ArduCopter MAVLink wrappers (relative import)
-import queue, threading                # For bufferless video capture
+import threading                       # For bufferless video capture and pose threading
 
-# Background pose thread variables for non-blocking pose polling
-_pose_lock = threading.Lock()
+_pose_latest = None   # (timestamp, x, y, z, yaw, pitch, roll)
 _pose_thread = None
-_pose_thread_stop = False
-_pose_thread_hz = 10.0  # default frequency
-_pose_latest = {'x': 0, 'y': 0, 'z': 0, 'yaw': 0, 'pitch': 0, 'roll': 0}
+_pose_thread_hz = 15
+
+_stop_event = threading.Event()
+_pose_ready = threading.Event()   # signals first pose is available
 
 
 """
@@ -98,7 +98,10 @@ class VoxelBlockGrid:
 """
 Bufferless VideoCapture, courtesy of Ulrich Stern (https://stackoverflow.com/a/54577746)
 Otherwise, a lag builds up in the video stream.
+
+Use this for USB receivers when using something like an FPV camera
 """
+import queue
 class VideoCapture:
 
   def __init__(self, name):
@@ -131,24 +134,67 @@ class VideoCapture:
       if self.last_frame is not None:
         return self.last_frame
       raise RuntimeError("VideoCapture timeout: no frame available")
+    
+# class VideoCapture:
+#     def __init__(self, name):
+#         self.cap = cv2.VideoCapture(name)
+#         self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+#         self.frame = None
+#         self.lock = threading.Lock()
+#         self.running = True
+#         self.thread = threading.Thread(target=self._reader, daemon=True)
+#         self.thread.start()
 
+#     def _reader(self):
+#         while self.running:
+#             if self.cap is None:
+#                 break
+#             ret, frame = self.cap.read()
+#             if not ret or frame is None:
+#                 time.sleep(0.01)
+#                 continue
+#             with self.lock:
+#                 self.frame = frame
 
+#     def read(self, timeout=1.0):
+#         start = time.time()
+#         while True:
+#             with self.lock:
+#                 if self.frame is not None:
+#                     return self.frame
+#             if time.time() - start > timeout:
+#                 raise RuntimeError("No frame received")
+#             time.sleep(0.005)
+
+#     def release(self):
+#         self.running = False
+#         if hasattr(self, 'thread') and self.thread is not None:
+#             self.thread.join(timeout=1.0)
+#         if hasattr(self, 'cap') and self.cap is not None:
+#             try:
+#                 self.cap.release()
+#             except Exception:
+#                 pass
+#             self.cap = None
+                
 """
 Compute depth from an RGB image using DepthAnythingV2
-Returns depth_numpy (uint16 in mm), depth_colormap (for visualization)
+Returns: depth_numpy (uint16 in mm), depth_colormap (for visualization) if make_colormap is True, otherwise None.
+
+Uncomment the cmap line and the currently commented depth_colormap line and comment out the second depth_colormap line for a nicer colormap but adds a slight overhead
 """
 # cmap = colormaps.get_cmap('Spectral')
-def compute_depth(frame, depth_anything, size, make_colormap=True):
+def compute_depth(frame, depth_model, size, make_colormap=True):
 
-    depth = depth_anything.infer_image(frame, size)    # as np ndarray, in meters (float32)
+    depth = depth_model.infer_image(frame, size)       # as np ndarray, in meters (float32)
     depth = (1000*depth).astype(np.uint16)             # Convert to mm and uint16 for Open3D integration (depth in mm is more standard for TSDF fusion)
     # the above line works as long as depth is ensured to be under 65.535 meters but this shouldn't matter
     # In case KITTI is used and you for some reason want to integrate VBG more than this limit (depth_max in config.yml), beware
 
     if make_colormap:
         depth_colormap = cv2.normalize(depth, None, 0, 255, cv2.NORM_MINMAX, cv2.CV_8U)
-        #depth_colormap = (cmap(depth_colormap)[:, :, :3] * 255)[:, :, ::-1].astype(np.uint8)
         depth_colormap = cv2.applyColorMap(depth_colormap, cv2.COLORMAP_JET)
+        #depth_colormap = (cmap(depth_colormap)[:, :, :3] * 255)[:, :, ::-1].astype(np.uint8)
     else:
         depth_colormap = None
 
@@ -177,10 +223,6 @@ def rdf_goal_to_ned(goal_right, goal_down, goal_front, heading_offset):
     # down (Y_RDF) -> down (Z_NED)  
     # front (Z_RDF) -> north (X_NED)
     
-    goal_ned_x_unrotated = goal_front
-    goal_ned_y_unrotated = goal_right
-    goal_ned_z = goal_down
-    
     # Apply yaw rotation to account for heading offset.
     # The heading_offset is the absolute yaw at takeoff.
     # RDF coordinates are relative to the drone's initial heading,
@@ -188,10 +230,10 @@ def rdf_goal_to_ned(goal_right, goal_down, goal_front, heading_offset):
     cos_yaw = m.cos(heading_offset)
     sin_yaw = m.sin(heading_offset)
     
-    goal_ned_x = goal_ned_x_unrotated * cos_yaw - goal_ned_y_unrotated * sin_yaw
-    goal_ned_y = goal_ned_x_unrotated * sin_yaw + goal_ned_y_unrotated * cos_yaw
+    goal_ned_x = goal_front * cos_yaw - goal_right * sin_yaw
+    goal_ned_y = goal_front * sin_yaw + goal_right * cos_yaw
     
-    return goal_ned_x, goal_ned_y, goal_ned_z
+    return goal_ned_x, goal_ned_y, goal_down
 
 
 def ned_to_rdf(goal_north, goal_east, goal_down, heading_offset):
@@ -207,7 +249,6 @@ def ned_to_rdf(goal_north, goal_east, goal_down, heading_offset):
     # Unrotate NED coordinates back to the unrotated RDF orientation
     goal_front = goal_north * cos_yaw + goal_east * sin_yaw
     goal_right = -goal_north * sin_yaw + goal_east * cos_yaw
-    goal_down = goal_down
 
     return goal_right, goal_down, goal_front
 
@@ -229,10 +270,10 @@ def get_pose_matrix(pos_x, pos_y, pos_z, vehicle_yaw_rad, vehicle_pitch_rad, veh
 
     # NED->EDN (considered as RDF for Open3D) basis reorder
     pose = np.array([
-        [sy*sp*sr + cy*cr, sy*sp*cr - cy*sr, sy*cp, pos_y],
-        [cp*sr,            cp*cr,            -sp,   pos_z],
-        [cy*sp*sr - sy*cr, cy*sp*cr + sy*sr, cy*cp, pos_x],
-        [0,           0,           0,           1]
+        [sy*sp*sr + cy*cr,  sy*sp*cr - cy*sr,  sy*cp,  pos_y],
+        [cp*sr,             cp*cr,             -sp,    pos_z],
+        [cy*sp*sr - sy*cr,  cy*sp*cr + sy*sr,  cy*cp,  pos_x],
+        [0,                 0,                 0,          1]
     ])
 
     return pose
@@ -367,34 +408,18 @@ def choose_primitive(vbg, camera_position, traj_linesets, goal_position, dist_th
         traj_lineset_copy = copy.deepcopy(traj_linset)
         traj_lineset_copy.transform(camera_position) # transform the lineset (copy) to the camera position
         pts = np.asarray(traj_lineset_copy.points) # meters # extract the points from the lineset
-
-        # Skip malformed trajectories with no sampled points.
-        if pts.size == 0:
-            continue
-
-        # If no obstacle voxels are available yet, treat trajectory as clear.
-        if voxel_coords_numpy.size == 0:
-            nearest_voxel_dist = np.inf
-        else:
-            tmp = distance.cdist(voxel_coords_numpy, pts, "sqeuclidean") # compute the distance between all voxels and all points in the trajectory
-            if tmp.size == 0:
-                nearest_voxel_dist = np.inf
-            else:
-                voxel_idx, pt_idx = np.unravel_index(np.argmin(tmp), tmp.shape) # extract indices of the nearest voxel to and nearest point in the trajectory
-                nearest_voxel_dist = np.sqrt(tmp[voxel_idx, pt_idx])
-
+        tmp = distance.cdist(voxel_coords_numpy, pts, "sqeuclidean") # compute the distance between all voxels and all points in the trajectory
+        voxel_idx, pt_idx = np.unravel_index(np.argmin(tmp), tmp.shape) # extract indices of the nearest voxel to and nearest point in the trajectory
+        nearest_voxel_dist = np.sqrt(tmp[voxel_idx, pt_idx])
         if nearest_voxel_dist > dist_threshold:
             # the trajectory meets the dist_threshold criterion
             if goal_position is not None:
                 # the trajectory satisfies the dist_threshold; let's compute the goal score
                 tmp_to_goal = distance.cdist(goal_position, pts, "sqeuclidean")
-                if tmp_to_goal.size == 0:
-                    continue
                 dst_to_goal = np.sqrt(np.min(tmp_to_goal))
                 if dst_to_goal < min_goal_score:
                     # we have a trajectory that gets us closer to the goal
-                    if DEBUG:
-                        print("[TRAJ] traj %d gets us closer to the goal: %f"%(traj_idx, dst_to_goal), flush=True)
+                    # print("traj %d gets us closer to the goal: %f"%(traj_idx, dst_to_goal))
                     max_traj_idx = traj_idx
                     min_goal_score = dst_to_goal
             else:
@@ -574,20 +599,21 @@ Args:
     apply_undistort: If False, the original image is returned (cropped if
         ``roi`` is not ``None``); no undistortion is performed.
 """
-def transform_image(image, mtx, dist, optimal_matrix, roi, apply_undistort: bool = True):
-    # optionally skip undistortion entirely
-    if not apply_undistort:
-        if roi is not None:
-            x, y, w, h = roi
-            return image[y:y+h, x:x+w]
-        return image
+def transform_image(image, mtx=None, dist=None, optimal_matrix=None, roi=None, enable_undistort = True, roi_crop = True):
+    transformed_image = image
+    if enable_undistort:
+        if not roi_crop:
+            if roi is not None:
+                x, y, w, h = roi
+                return image[y:y+h, x:x+w]
+            return image
 
-    # cv2 can handle both numpy arrays and other array-like objects efficiently
-    transformed_image = cv2.undistort(image if isinstance(image, np.ndarray) else np.asarray(image), 
-                                      mtx, dist, None, optimal_matrix)
-    # Crop the image to the ROI
-    x, y, w, h = roi
-    transformed_image = transformed_image[y:y+h, x:x+w]
+        # cv2 can handle both numpy arrays and other array-like objects efficiently
+        transformed_image = cv2.undistort(image if isinstance(image, np.ndarray) else np.asarray(image), 
+                                        mtx, dist, None, optimal_matrix)
+        # Crop the image to the ROI
+        x, y, w, h = roi
+        transformed_image = transformed_image[y:y+h, x:x+w]
 
     return transformed_image
 
@@ -622,44 +648,85 @@ def visualize_pointcloud(pcd_legacy, window_name="Reconstruction"):
         print(f"[vis] Open3D visualization failed: {e}")
 
 def _pose_thread_worker():
-    """Background thread that polls get_pose at configured frequency and stores latest values (no buffering)."""
-    global _pose_thread_stop, _pose_latest, _pose_thread_hz
-    
+    """Background thread: stable-rate pose polling with timestamp."""
+    global _pose_latest
+
+    get_pose = mavc.get_pose
     sleep_time = 1.0 / _pose_thread_hz
-    while not _pose_thread_stop:
-        x, y, z, yaw, pitch, roll = mavc.get_pose()
-        with _pose_lock:
-            _pose_latest = {'x': x, 'y': y, 'z': z, 'yaw': yaw, 'pitch': pitch, 'roll': roll}
-        time.sleep(sleep_time)
+    next_time = time.perf_counter()
+
+    while not _stop_event.is_set():
+        next_time += sleep_time
+
+        # Get pose
+        x, y, z, yaw, pitch, roll = get_pose()
+        t = time.time()
+
+        # Update shared pose
+        _pose_latest = (x, y, z, yaw, pitch, roll)
+
+        # Signal that pose is ready (only matters first time)
+        _pose_ready.set()
+
+        # Maintain stable loop timing
+        sleep = next_time - time.perf_counter()
+        if sleep > 0:
+            time.sleep(sleep)
+        else:
+            next_time = time.perf_counter()
+
 
 def start_pose_thread(frequency_hz):
-    """Start the background pose thread at specified frequency.
-    
-    Args:
-        frequency_hz: Update frequency in Hz
-    """
-    global _pose_thread, _pose_thread_stop, _pose_thread_hz
-    
+    """Start pose thread at given frequency."""
+    global _pose_thread, _pose_thread_hz
+
     if _pose_thread and _pose_thread.is_alive():
         print("[INFO] Pose thread already running")
         return
-    
+
     _pose_thread_hz = frequency_hz
-    _pose_thread_stop = False
+    _stop_event.clear()
+    _pose_ready.clear()
+
     _pose_thread = threading.Thread(target=_pose_thread_worker, daemon=True)
     _pose_thread.start()
-    print(f"[INFO] Pose thread started ({frequency_hz}Hz, non-blocking)")
+
+    print(f"[INFO] Pose thread started ({frequency_hz} Hz)")
+
 
 def get_latest_pose():
-    """Get the latest pose without blocking. Returns (x, y, z, yaw, pitch, roll)."""
-    with _pose_lock:
-        return (_pose_latest['x'], _pose_latest['y'], _pose_latest['z'],
-                _pose_latest['yaw'], _pose_latest['pitch'], _pose_latest['roll'])
+    """
+    Blocks until first pose is available, then returns immediately.
+    Returns (t, x, y, z, yaw, pitch, roll)
+    """
+    _pose_ready.wait()   # efficient wait (no CPU burn)
+    return _pose_latest
+
 
 def stop_pose_thread():
-    """Stop the background pose thread."""
-    global _pose_thread_stop, _pose_thread
-    _pose_thread_stop = True
+    """Stop pose thread cleanly."""
+    global _pose_thread
+
+    _stop_event.set()
+
     if _pose_thread and _pose_thread.is_alive():
         _pose_thread.join(timeout=1.0)
-    print("[INFO]Pose thread stopped")
+
+    print("[INFO] Pose thread stopped")
+
+def send_esp_cam_commands(ip, vflip, hflip, res_idx):
+    import requests
+    print("Sendingcommands to ESP32 CAM")
+    def send(var, val):
+        url = f"{ip}/control?var={var}&val={val}"
+        try:
+            r = requests.get(url, timeout=2)
+            if r.status_code == 200:
+                print(f"{var} set to {val}")
+        except Exception as e:
+            print(f"Error setting {var}: {e}")
+
+    # Send commands
+    send("vflip", vflip)
+    send("hmirror", hflip)
+    send("framesize", res_idx)

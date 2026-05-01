@@ -639,7 +639,7 @@ def main():
         # Release camera and close windows (always do this)
         mavc.printd("[CLEANUP] Releasing camera and closing windows...")
         try:
-            cap.cap.release()
+            cap.release()
         except Exception:
             pass
         cv2.destroyAllWindows()

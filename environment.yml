@@ -1,4 +1,4 @@
-name: mononav
+name: ardumononav
 channels:
   - pytorch
   - nvidia

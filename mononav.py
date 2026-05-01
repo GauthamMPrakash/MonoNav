@@ -159,6 +159,9 @@ print("Press 'g' for autonomous mode, 'h' to hover, 'f' to fuse, 'a'/'w'/'d' for
 # Track mode transitions so repeated states do not spam the console.
 last_action_state = None
 
+# Track printing state for repeated modes so we only print once per mode transition.
+last_action_state = None
+
 # Planning presets
 filterYvals = config['filterYvals']
 filterWeights = config['filterWeights']
@@ -227,14 +230,15 @@ if save_during_flight:
 def _on_key_press(key):
     """Capture keyboard input using pynput."""
     global last_key_pressed
-    if key == keyboard.Key.esc:
-        last_key_pressed = 'esc'
-        return
     try:
         if key.char:
             last_key_pressed = key.char.lower()
     except AttributeError:
-        last_key_pressed = key
+        # Handle special keys such as ESC
+        if key == keyboard.Key.esc:
+            last_key_pressed = 'esc'
+        else:
+            last_key_pressed = key
 
 def start_keyboard_listener():
     global keyboard_listener
@@ -309,13 +313,18 @@ def main():
             print("Rebooted drone to set EKF origin. Waiting for reconnection...")
             time.sleep(7)    # Wait for drone to reboot
             continue         # Restart connection loop
+        mavc.system_time()
+        mavc.timesync()      # Probably not required as it is meant to be called in a loop and we don't currently sync pose and frames using timestamps
         break
     
+    send_esp_cam_commands(STREAM_URL[0:-10],1,1,9) # send commands to ESP32 cam 9=HVGA, 10=VGA
     # Run the depth model a few times (the first inference is slow), and skip the first few frames
     cap = VideoCapture(STREAM_URL)
-    first_bgr = cap.read()
-    frame_height, frame_width = first_bgr.shape[:2]
+    bgr = cap.read()
+    frame_height, frame_width = bgr.shape[:2]
     
+    # Scale mtx, dist to match current camera resolution
+    # Read one frame to get actual resolution
     if calib_width is not None and calib_height is not None:
         mtx, dist, optimal_mtx, roi = adjust_intrinsics_to_frame_size(
             mtx, dist, optimal_mtx, roi, frame_width, frame_height, calib_width, calib_height
@@ -335,20 +344,16 @@ def main():
         # to internal [E, D, N] so it matches camera_position[0:-1, -1].
         if goal_position is not None:
             print("\nGoal position (RDF): ", goal_position, flush=True)
-            goal_position_ned = np.array(
-                rdf_goal_to_ned(goal_position[0], goal_position[1], goal_position[2], hdg),
-                dtype=float,
-            )
-            mavc.printd(f"Goal position (NED): {goal_position_ned}")
-            goal_position = np.array(
-                [goal_position_ned[1], goal_position_ned[2], goal_position_ned[0]],
-                dtype=float,
-            ).reshape(1, 3)
+            goal_position_ned = rdf_goal_to_ned(goal_position[0], goal_position[1], goal_position[2], hdg)
+            mavc.printd(f"Goal position (NED): {[goal_position_ned]}")
+            goal_position = np.array([goal_position_ned[1], goal_position_ned[2], goal_position_ned[0]]).reshape(1,3) # In EDN (So it is easier to integrate with O3D whoch uses RDF)
         mavc.printd(f"Heading offset: {hdg*180/np.pi}")
         mavc.set_mode('GUIDED')
         start_keyboard_listener()
 
-        start_flight_time = time.time()
+        start_keyboard_listener()
+
+        start_flight_time = time.perf_counter()
         if FLY_VEHICLE:
             print("Arming Motors!", flush=True)
             mavc.arm()
@@ -466,7 +471,6 @@ def main():
                 mavc.set_mode('BRAKE')
                 mavc.arm(0, force_disarm=True)
                 print("Pressed p. EMERGENCY STOP.", flush=True)
-                shouldStop = True
                 break
             elif last_key_pressed in ('c', 'esc'):
                 mavc.set_mode('BRAKE')
@@ -479,7 +483,6 @@ def main():
                 print("\nPressed r. Switching to SMART_RTL.\n", flush=True)
                 if FLY_VEHICLE:
                     mavc.set_mode('SMART_RTL')
-                shouldStop = True
                 break
 
             elif last_key_pressed == 'h':
@@ -589,8 +592,9 @@ def main():
                         mavc.send_body_offset_ned_vel(forward_speed, yvel, yaw_rate=yawrate)
 
                 bgr = cap.read()
-                # get_latest_pose returns (x, y, z, yaw, pitch, roll) - non-blocking from thread
-                pose = get_latest_pose()
+                #t1=time.perf_counter()
+                pose = get_latest_pose()    # get_latest_pose returns (x, y, z, yaw, pitch, roll) - non-blocking from thread
+                #t2=time.perf_counter()
 
                 transform_bgr = transform_image(bgr, mtx, dist, optimal_mtx, roi, enable_undistort)
                 transform_rgb = cv2.cvtColor(transform_bgr, cv2.COLOR_BGR2RGB)
@@ -600,6 +604,13 @@ def main():
                 if go_mode_active or traj_index is not None or fuse_only:
                     vbg.integration_step(transform_rgb, depth_numpy, camera_position)
 
+                if traj_index is not None:
+                    yawrate = -amplitudes[traj_index] * np.sin(np.pi/period*(time.perf_counter() - start_time))  # rad/s
+                    yvel = yawrate * yvel_gain
+                    yawrate = yawrate * yawrate_gain
+                    if FLY_VEHICLE:
+                        mavc.send_body_offset_ned_vel(forward_speed, yvel, yaw_rate=yawrate)
+
                 if goal_position is not None:
                     dist_to_goal = np.linalg.norm(camera_position[0:-1, -1]-goal_position[0])
                     if dist_to_goal < min_dist2goal:
@@ -607,7 +618,13 @@ def main():
                             print("Reached goal!", flush=True)
                         last_action_state = 'goal'
                         shouldStop = True
-                        break
+                
+                if save_during_flight:
+                    cv2.imwrite(img_dir + '/frame-%06d.rgb.jpg'%(frame_number), bgr)
+                    cv2.imwrite(transform_img_dir + '/transform_frame-%06d.rgb.jpg'%(frame_number), transform_bgr)
+                    cv2.imwrite(transform_depth_dir + '/' + 'transform_frame-%06d.depth.jpg'%(frame_number), depth_colormap)
+                    np.save(transform_depth_dir + '/' + 'transform_frame-%06d.depth.npy'%(frame_number), depth_numpy) # saved in meters
+                    np.savetxt(pose_dir + '/frame-%06d.pose.txt'%(frame_number), camera_position)
 
                 if depth_colormap is not None:
                     # time elapsed since the beginning of the current period
@@ -620,15 +637,7 @@ def main():
                     # (no extra top margin; add a blank line underneath the Hz text)
                     hz_x = int((depth_colormap.shape[1] - hz_size[0] / 2))
                     hz_y = int(hz_size[1])
-                    cv2.putText(
-                        depth_colormap,
-                        hz_text,
-                        org=(hz_x, hz_y),
-                        fontFace=cv2.FONT_HERSHEY_SIMPLEX,
-                        fontScale=0.5,
-                        thickness=1,
-                        color=(255, 255, 255),
-                    )
+                    cv2.putText(depth_colormap, hz_text, org=(hz_x, hz_y), fontFace=cv2.FONT_HERSHEY_SIMPLEX, fontScale=0.5, thickness=1, color=(255, 255, 255))
 
                     cv2.putText(
                         depth_colormap,
@@ -656,6 +665,7 @@ def main():
 
                 frame_number += 1
 
+            #print(f"Pose delay (ms): ({(t1-t0)*1000}, Capture delay (ms):{(t2-t1)*1000}", flush=True)
             # Add FPS counter to depth display
             cur_time  = time.perf_counter()
             loop_hz = 1.0 / max(cur_time - start_time, 1e-6)
@@ -666,12 +676,12 @@ def main():
 
         if camera_position is not None:
             camera_position = camera_position[0:-1, -1]
-            print("\n[INFO] Current distance to goal (m): ", np.linalg.norm(camera_position-goal_position[0]) if goal_position is not None else "N/A", flush=True)
+            print("\n[INFO] Current distance to goal (m): ", np.linalg.norm(camera_position-goal_position) if goal_position is not None else "N/A", flush=True)
             print("[INFO] Current RDF coords:", *camera_position, flush=True)
-            print("[INFO] Current NED coords:", camera_position[2], camera_position[0], camera_position[1], flush=True)
+            # print("[INFO] Current NED coords:", camera_position[2], camera_position[0], camera_position[1], flush=True)
 
         # save and view vbg (robust to missing save dir; always attempt visualization)
-        try:
+        if save_during_flight:
             save_dir = os.path.dirname(npz_save_filename) if npz_save_filename else None
             if save_dir and os.path.isdir(save_dir):
                 print("\nSaving to {}...".format(npz_save_filename), flush=True)
@@ -681,9 +691,9 @@ def main():
                 except Exception as e:
                     print(f"[warning] failed to save VoxelBlockGrid: {e}", flush=True)
             else:
-                print("\nSave directory not present or saving disabled; skipping VBG file save\n", flush=True)
-        except Exception as e:
-            print(f"[warning] exception while attempting to save VBG: {e}", flush=True)
+                print("\nSave directory not present!; skipping VBG file save\n", flush=True)
+        else:
+            print("\nSaving disabled; skipping VBG file save\n", flush=True)
 
         # Attempt to extract and visualize point cloud regardless of save success
         try:
@@ -699,10 +709,8 @@ def main():
 
     except KeyboardInterrupt:
         mavc.set_mode('LAND')
-        shouldStop = True
         print("\n[INTERRUPT] Ctrl+C detected. Sent land command.", flush=True)
     except Exception as e:
-        shouldStop = True
         print(f"\n[ERROR] Exception in control loop: {e}", flush=True)
         traceback.print_exc()
             
@@ -714,6 +722,11 @@ def main():
         print("Releasing camera capture.")
         stop_pose_thread()
         stop_keyboard_listener()
+        if 'cap' in locals() and cap is not None:
+            try:
+                cap.release()
+            except Exception as e:
+                print(f"[warning] failed to release camera capture: {e}", flush=True)
         cv2.destroyAllWindows()
         if cap is not None:
             try:

@@ -24,7 +24,7 @@ if repo_root not in sys.path:
 # -----------------------------
 from utils.utils import load_config
 cfg = load_config(os.path.join(repo_root, "config.yml"))
-STREAM_URL = cfg.get("camera_ip")               # Enter URL of stream or camera number for webcam (0, 1, etc.)
+STREAM_URL = 0               # Enter URL of stream or camera number for webcam (0, 1, etc.)
 INPUT_SIZE = cfg.get("INPUT_SIZE")
 CHECKPOINT = "../"+cfg.get("DA2_CHECKPOINT")
 ENCODER = CHECKPOINT[-8:-4]

@@ -1,4 +1,4 @@
-"""
+r"""
   __  __                   _   _             
  |  \/  | ___  _ __   ___ | \ | | __ ___   __
  | |\/| |/ _ \| '_ \ / _ \|  \| |/ _` \ \ / /
@@ -20,20 +20,56 @@ and trajectory library affect the planning performance.
 
 """
 
+data_dir = None # if None, will automatically look for latest data directory with prefix specified in config.yml
+
 import os
 import open3d as o3d
 import numpy as np
-import copy
+import sys
+
+# Ensure the repository root is on sys.path so we can import `utils` from anywhere
+repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
+if repo_root not in sys.path:
+    sys.path.insert(0, repo_root)
 
 from utils.utils import load_config, poses_from_posedir, get_poses_lineset, get_trajlist, get_traj_linesets, choose_primitive
 
-data_dir =  'data/mononav-2026-02-25-16-23-24'      # parent directory to look for RGB images, and save depth images
+def _latest_data_dir(prefix):
+    prefix = os.path.normpath(prefix)
+    directory_parent = os.path.dirname(prefix)
+    basename = os.path.basename(prefix)
+    if not basename:
+        raise ValueError(f"save_dir_prefix must have a basename, got '{prefix}'")
 
-CONFIG_PATH = "config.yml"
-config = load_config("config.yml")
+    if os.path.isabs(directory_parent):
+        parent_dir = directory_parent
+    elif directory_parent:
+        parent_dir = os.path.join(repo_root, directory_parent)
+    else:
+        parent_dir = repo_root
+
+    parent_dir = os.path.abspath(parent_dir)
+    if not os.path.isdir(parent_dir):
+        raise FileNotFoundError(f"parent data directory '{parent_dir}' not found")
+
+    candidates = [
+        os.path.join(parent_dir, entry)
+        for entry in os.listdir(parent_dir)
+        if entry.startswith(basename) and os.path.isdir(os.path.join(parent_dir, entry))
+    ]
+    if not candidates:
+        raise FileNotFoundError(f"no data directories starting with '{basename}' in '{parent_dir}'")
+
+    latest_dir = max(candidates, key=os.path.getmtime)
+    print(f"[simulate] using latest data directory: {latest_dir}", flush=True)
+    return latest_dir
+
+config = load_config(os.path.join(repo_root, "config.yml"))
+if not data_dir:
+    data_dir = _latest_data_dir(config["save_dir_prefix"])
 
 pose_dir = os.path.join(data_dir, "poses")
-trajlib_dir = config["trajlib_dir"]
+trajlib_dir = os.path.join(repo_root, config.get("trajlib_dir", "utils/trajlib"))
 
 # Load the VoxelBlockGrid from file.
 files = [file for file in os.listdir(data_dir) if file.endswith('.npz')]
@@ -73,18 +109,16 @@ visualizer.add_geometry(pose_lineset)
 
 # For each pose, compute the optimal motion primitive.
 # Paint the optimal motion primitive green, and the rest black.
-n = 5 # iterate over every n poses
+n = 1 # iterate over every n poses
 for i in range(0, len(poses), n):
     pose = poses[i]
-    shouldStop, max_traj_idx = choose_primitive(vbg, pose, traj_linesets, goal_position, min_dist2obs, filterYvals, filterWeights, filterTSDF, weight_threshold)
+    max_traj_idx = choose_primitive(vbg, pose, traj_linesets, goal_position, min_dist2obs, filterYvals, filterWeights, filterTSDF, weight_threshold)
     for traj_idx, traj_lineset in enumerate(traj_linesets):
-        traj_lineset_copy = copy.deepcopy(traj_lineset)
+        traj_lineset_copy = traj_lineset.clone()
         traj_lineset_copy.transform(pose)
 
-        if traj_idx == max_traj_idx:
-            traj_lineset_copy.paint_uniform_color([0, 1, 0])
-        else:
-            traj_lineset_copy.paint_uniform_color([0, 0, 0])
+        color = [0, 1, 0] if traj_idx == max_traj_idx else [0, 0, 0]
+        traj_lineset_copy.paint_uniform_color(color)
 
         visualizer.add_geometry(traj_lineset_copy)
 

@@ -16,7 +16,7 @@ After fusion, the reconstruction is visualized (in addition to the camera poses)
 
 """
 addPose = True  # Visualize camera poses in addition to the point cloud
-data_dir = None # if None, will automatically look for latest data directory with prefix specified in config.yml (e.g. "data/flight-")
+data_dir = None # if None, will automatically look for latest data directory with prefix specified in config.yml
 
 import numpy as np
 import time
