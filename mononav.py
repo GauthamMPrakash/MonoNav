@@ -31,6 +31,7 @@ import os
 import open3d as o3d
 import sys
 import traceback
+import threading
 from pynput import keyboard
 
 # Add DepthAnythingV2-metric path
@@ -82,6 +83,11 @@ shouldStop = False
 last_key_pressed = None
 npz_save_filename = None
 keyboard_listener = None
+
+# ===== THREAD SAFETY LOCKS =====
+# Protect access to shared state modified by keyboard listener or main loop
+_key_lock = threading.Lock()           # Protects: last_key_pressed
+_state_lock = threading.Lock()         # Protects: replan_pending, held_from_replan, collision_check_counter
 
 yawrate_gain = config['yawrate_gain']       # gain for yaw rate control (tuning parameter for your robot)
 yvel_gain = config['yvel_gain']             # gain for lateral velocity to prevent sideslip during high velocity turns (probably not required for ArduPilot)
@@ -154,9 +160,9 @@ max_traj_idx = int(len(traj_list)/2)
 if config['forward_speed'] is not None:
     forward_speed = config['forward_speed']
 print(f"\nTrajectory library loaded: {len(traj_list)} trajectories", flush=True)
-print("Press 'g' to enable MonoNav autonomous mode, or 'a'/'w'/'d' for manual left/straight/right", flush=True)
+print("Press 'g' for autonomous mode, 'h' to hover, 'f' to fuse, 'a'/'w'/'d' for manual left/straight/right, or 'q'/'e' to yaw", flush=True)
 
-# Track printing state for repeated modes so we only print once per mode transition.
+# Track mode transitions so repeated states do not spam the console.
 last_action_state = None
 
 # Planning presets
@@ -225,17 +231,22 @@ if save_during_flight:
         file.write(','.join(header) + '\n')
 
 def _on_key_press(key):
-    """Capture keyboard input using pynput."""
+    """Capture keyboard input using pynput. Thread-safe access to last_key_pressed."""
     global last_key_pressed
     try:
+        key_val = None
         if key.char:
-            last_key_pressed = key.char.lower()
+            key_val = key.char.lower()
     except AttributeError:
         # Handle special keys such as ESC
         if key == keyboard.Key.esc:
-            last_key_pressed = 'esc'
+            key_val = 'esc'
         else:
-            last_key_pressed = key
+            key_val = str(key)
+    
+    if key_val:
+        with _key_lock:
+            last_key_pressed = key_val
 
 def start_keyboard_listener():
     global keyboard_listener
@@ -285,6 +296,40 @@ def _planar_heading_from_pose(camera_pose):
     return float(np.arctan2(forward_axis[0], forward_axis[2]))
 
 
+def _check_primitive_collision(traj_idx, obstacle_points_xz, min_dist2obs):
+    """
+    Check if a trajectory primitive would collide with obstacles.
+    Returns True if trajectory is blocked/colliding, False if safe.
+    """
+    if traj_idx is None or len(obstacle_points_xz) == 0:
+        return False
+    
+    try:
+        idx = int(traj_idx)
+        if idx < 0 or idx >= len(traj_linesets):
+            return False
+
+        # Primitive points are in local frame; compare in world frame by
+        # transforming with the latest camera pose (same convention as choose_primitive).
+        cam_pose = get_latest_pose()
+        cam_T = get_pose_matrix(*cam_pose)
+
+        pts_local = np.asarray(traj_linesets[idx].points, dtype=float)
+        if pts_local.size == 0:
+            return False
+
+        pts_h = np.hstack([pts_local, np.ones((pts_local.shape[0], 1), dtype=float)])
+        pts_world = (cam_T @ pts_h.T).T[:, :3]
+        traj_points_xz = pts_world[:, [0, 2]]
+
+        # Minimum distance between trajectory path samples and observed obstacle points.
+        deltas = traj_points_xz[:, None, :] - obstacle_points_xz[None, :, :]
+        min_dist = float(np.sqrt(np.min(np.sum(deltas * deltas, axis=2))))
+        return min_dist < float(min_dist2obs)
+    except Exception:
+        return False
+
+
 # MAIN MONONAV CONTROL LOOP
 def main():
     global shouldStop
@@ -296,6 +341,12 @@ def main():
     global last_action_state
     cap = None
     camera_position = None
+    
+    # Tracking for primitive sequence execution
+    planned_auto_traj_sequence = []  # Full sequence from planner
+    current_path_sequence = []       # Currently executing sequence
+    current_path_index = 0           # Which primitive in sequence
+    collision_check_counter = 0      # Only check every N frames to save compute
 
     while True:
         # ARDUCOPTER CONTROL
@@ -348,8 +399,6 @@ def main():
         mavc.set_mode('GUIDED')
         start_keyboard_listener()
 
-        start_keyboard_listener()
-
         start_flight_time = time.perf_counter()
         if FLY_VEHICLE:
             print("Arming Motors!", flush=True)
@@ -380,7 +429,8 @@ def main():
             if _poll_opencv_escape():
                 print("Pressed esc. Ending control.", flush=True)
                 shouldStop = True
-                last_key_pressed = 'c'
+                with _key_lock:
+                    last_key_pressed = 'c'
                 break
 
         if shouldStop:
@@ -391,16 +441,30 @@ def main():
         frame_number = 0
         processing_speed, loop_hz = 0, 0
         planned_auto_traj_index = None
+        planned_auto_traj_sequence = []
+        current_path_sequence = []
+        current_path_index = 0
+        replan_pending = False
+        plan_thread = None
+        plan_result_cache = None
+        plan_error = None
+        plan_started_at = None
+        plan_lock = threading.Lock()
 
         def reset_auto_state():
-            nonlocal planned_auto_traj_index
+            nonlocal planned_auto_traj_index, planned_auto_traj_sequence, current_path_sequence, current_path_index, replan_pending
             planned_auto_traj_index = None
+            planned_auto_traj_sequence = []
+            current_path_sequence = []
+            current_path_index = 0
+            replan_pending = False
 
         def refresh_dstar_command():
-            nonlocal planned_auto_traj_index
+            nonlocal planned_auto_traj_index, planned_auto_traj_sequence, current_path_sequence, current_path_index, replan_pending
+            nonlocal plan_thread, plan_result_cache, plan_error, plan_started_at, plan_lock
             if goal_position is None or camera_position is None:
                 reset_auto_state()
-                return
+                return False
 
             current_position = camera_position[0:-1, -1].astype(float)
             observed_points_xz, obstacle_points_xz = extract_planar_vbg_points(
@@ -414,21 +478,80 @@ def main():
 
             observed_points_fr = observed_points_xz[:, [1, 0]]
             obstacle_points_fr = obstacle_points_xz[:, [1, 0]]
-            plan_result = primitive_dstar_planner.plan(
-                start_xy=current_position[[2, 0]],
-                goal_xy=goal_position[0, [2, 0]],
-                obstacle_points_xy=obstacle_points_fr,
-                observed_points_xy=observed_points_fr,
-                start_heading_rad=_planar_heading_from_pose(camera_position),
-            )
+
             planner_name = "D* Lite primitive"
 
-            if plan_result.found:
-                planned_auto_traj_index = (
-                    int(plan_result.selected_primitive_indices[0])
-                    if len(plan_result.selected_primitive_indices) > 0
-                    else None
+            # Non-blocking planner: run in background thread with deadline protection.
+            def _plan_worker(start_xy, goal_xy, obstacle_xy, observed_xy, heading_rad):
+                nonlocal plan_result_cache, plan_error
+                try:
+                    result = primitive_dstar_planner.plan(
+                        start_xy=start_xy,
+                        goal_xy=goal_xy,
+                        obstacle_points_xy=obstacle_xy,
+                        observed_points_xy=observed_xy,
+                        start_heading_rad=heading_rad,
+                    )
+                    with plan_lock:
+                        plan_result_cache = result
+                        plan_error = None
+                except Exception as e:
+                    with plan_lock:
+                        plan_result_cache = None
+                        plan_error = e
+
+            # If a plan is already running, honor the deadline and hold position.
+            if plan_thread is not None and plan_thread.is_alive():
+                if plan_started_at is not None and (time.time() - plan_started_at) > 0.2:
+                    print("[WARNING] Planner exceeded 200ms budget - holding position", flush=True)
+                return False
+
+            # If previous plan finished, pull result.
+            if plan_thread is not None and not plan_thread.is_alive():
+                plan_thread = None
+
+            with plan_lock:
+                plan_result = plan_result_cache
+                plan_err = plan_error
+                plan_result_cache = None
+                plan_error = None
+
+            if plan_err is not None:
+                print(f"[PLANNER EXCEPTION] {plan_err}", flush=True)
+                plan_result = None
+
+            # If no result available yet, start a new plan and hold this cycle.
+            if plan_result is None:
+                plan_started_at = time.time()
+                plan_thread = threading.Thread(
+                    target=_plan_worker,
+                    args=(
+                        current_position[[2, 0]],
+                        goal_position[0, [2, 0]],
+                        obstacle_points_fr,
+                        observed_points_fr,
+                        _planar_heading_from_pose(camera_position),
+                    ),
+                    daemon=True,
                 )
+                plan_thread.start()
+
+                print(f"[PLAN] {planner_name} pending - holding position", flush=True)
+                planned_auto_traj_index = None
+                planned_auto_traj_sequence = []
+                current_path_sequence = []
+                current_path_index = 0
+                replan_pending = True
+                return False
+                
+            if plan_result.found:
+                # Store FULL sequence, not just first primitive
+                planned_auto_traj_sequence = [int(idx) for idx in plan_result.selected_primitive_indices]
+                planned_auto_traj_index = planned_auto_traj_sequence[0] if planned_auto_traj_sequence else None
+                current_path_sequence = list(planned_auto_traj_sequence)  # Copy for execution tracking
+                current_path_index = 0  # Start at first primitive
+                replan_pending = False
+                
                 if mode == 'BRAKE' and FLY_VEHICLE:
                     mavc.set_mode('GUIDED')
                 primitive_trace = ""
@@ -437,31 +560,41 @@ def main():
                     suffix = "..." if len(plan_result.selected_primitives) > len(shown) else ""
                     primitive_trace = f" prim={shown}{suffix}"
                 print(
-                    f"[PLAN] {planner_name} cells={len(plan_result.grid_path)} changed={plan_result.changed_cells} next_traj={planned_auto_traj_index}{primitive_trace}",
+                    f"[PLAN] {planner_name} seq_len={len(planned_auto_traj_sequence)} cells={len(plan_result.grid_path)} changed={plan_result.changed_cells} path={primitive_trace}",
                     flush=True,
                 )
-                return
+                return True
 
             planned_auto_traj_index = None
+            planned_auto_traj_sequence = []
+            current_path_sequence = []
+            current_path_index = 0
+            replan_pending = True
             if mode == 'GUIDED' and FLY_VEHICLE:
                 mavc.set_mode('BRAKE')
                 time.sleep(0.1)
             print(f"[PLAN] No {planner_name} path: {plan_result.reason}", flush=True)
+            return False
 
         while not shouldStop:
             traj_index = None
             fuse_only = False
+            period_interrupted_for_replan = False
+            held_from_replan = False  # Track if we're holding this cycle due to replan
+            
+            # Read keyboard input once with lock (copy for duration of loop iteration)
+            with _key_lock:
+                last_key = last_key_pressed
+            
             mode = mavc.get_mode() if FLY_VEHICLE else 'GUIDED'
-            go_mode_active = last_key_pressed == 'g'
+            go_mode_active = last_key == 'g'
 
             # Refresh planner outputs before selecting the next command period.
             if camera_position is not None:
                 max_traj_idx = _choose_next_primitive(camera_position)
-                if go_mode_active and planner_is_dstar and goal_position is not None:
-                    refresh_dstar_command()
 
             # Check for stop keys first (these exit the control loop). Important that they break out of the loop
-            if last_key_pressed == 'p':
+            if last_key == 'p':
                 """
                 DO NOT USE FOR NORMAL FLYING. WILL STOP MOTORS IMMEDIATELY CAUSING A CRASH. Only use in emergency situations when you need to stop the drone immediately.
                 """
@@ -469,7 +602,7 @@ def main():
                 mavc.arm(0, force_disarm=True)
                 print("Pressed p. EMERGENCY STOP.", flush=True)
                 break
-            elif last_key_pressed in ('c', 'esc'):
+            elif last_key in ('c', 'esc'):
                 mavc.set_mode('BRAKE')
                 time.sleep(0.2)
                 time.sleep(0.2)
@@ -477,45 +610,63 @@ def main():
                 print("Pressed c. Ending control.", flush=True)
                 shouldStop = True
                 break
-            elif last_key_pressed == 'r':
+            elif last_key == 'r':
                 print("\nPressed r. Switching to SMART_RTL.\n", flush=True)
                 if FLY_VEHICLE:
                     mavc.set_mode('SMART_RTL')
                 break
-            
-            # Check for trajectory control keys
-            elif last_key_pressed == 'a':
+
+            elif last_key == 'h':
+                if last_action_state != 'hover':
+                    print("Pressed h. Hovering in place.", flush=True)
+                last_action_state = 'hover'
+                reset_auto_state()
+                with _key_lock:
+                    last_key_pressed = None
+            elif last_key == 'f':
+                print("Pressed f. Fusing current frame into VBG (no movement).", flush=True)
+                last_action_state = 'fuse'
+                reset_auto_state()
+                fuse_only = True
+                with _key_lock:
+                    last_key_pressed = None
+            elif last_key == 'a':
                 print("Pressed a. Going left.", flush=True)
                 last_action_state = 'manual'
                 reset_auto_state()
                 traj_index = 0
-                last_key_pressed = None
-            elif last_key_pressed == 'w':
+                with _key_lock:
+                    last_key_pressed = None
+            elif last_key == 'w':
                 print("Pressed w. Going straight.", flush=True)
                 last_action_state = 'manual'
                 reset_auto_state()
                 traj_index = len(traj_list)//2
-                last_key_pressed = None
-            elif last_key_pressed == 'd':
+                with _key_lock:
+                    last_key_pressed = None
+            elif last_key == 'd':
                 print("Pressed d. Going right.", flush=True)
                 last_action_state = 'manual'
                 reset_auto_state()
                 traj_index = len(traj_list)-1
-                last_key_pressed = None
-            elif last_key_pressed == 'q':
+                with _key_lock:
+                    last_key_pressed = None
+            elif last_key == 'q':
                 print("Pressed q. Yawing left.", flush=True)
                 last_action_state = 'yaw'
                 reset_auto_state()
                 if FLY_VEHICLE:
                     mavc.send_body_offset_ned_vel(0, 0, yaw_rate=-0.3)
-                last_key_pressed = None
-            elif last_key_pressed == 'e':
+                with _key_lock:
+                    last_key_pressed = None
+            elif last_key == 'e':
                 print("Pressed e. Yawing right.", flush=True)
                 last_action_state = 'yaw'
                 reset_auto_state()
                 if FLY_VEHICLE:
                     mavc.send_body_offset_ned_vel(0, 0, yaw_rate=0.3)
-                last_key_pressed = None
+                with _key_lock:
+                    last_key_pressed = None
             elif go_mode_active:
                 planner_state = f"go:{planner_type}" if planner_is_dstar and goal_position is not None else "go:primitive"
                 if last_action_state != planner_state:
@@ -526,19 +677,61 @@ def main():
                         print("Pressed g. Using MonoNav primitive planner.", flush=True)
                 last_action_state = planner_state
                 if planner_is_dstar and goal_position is not None:
-                    if planned_auto_traj_index is None:
-                        refresh_dstar_command()
-                if planner_type == 'dstar_lite_primitives' and goal_position is not None:
-                    traj_index = planned_auto_traj_index
+                    need_replan_now = replan_pending or (planned_auto_traj_index is None) or (current_path_index >= len(current_path_sequence))
+                    if need_replan_now:
+                        try:
+                            refresh_dstar_command()
+                            held_from_replan = True  # Hold execution for this full cycle after replanning
+                        except Exception as e:
+                            print(f"[PLANNER ERROR] {e}. Holding position and retrying...", flush=True)
+                            replan_pending = True  # Hold: force replanning state
+                            held_from_replan = True  # Also hold on error
+                            if FLY_VEHICLE:
+                                mavc.send_body_offset_ned_vel(0, 0, yaw_rate=0)
+
+                    # During replanning or right after replan: do not fly forward, keep fusing frames. Manual yaw always enabled.
+                    if replan_pending or held_from_replan:
+                        traj_index = None
+                        fuse_only = True
+                        # Preserve manual yaw control during replan
+                        yaw_replan = 0
+                        if last_key == 'q':
+                            yaw_replan = 0.3
+                        elif last_key == 'e':
+                            yaw_replan = -0.3
+                        if FLY_VEHICLE:
+                            mavc.send_body_offset_ned_vel(0, 0, yaw_rate=yaw_replan)
+                    elif current_path_index < len(current_path_sequence):
+                        traj_index = current_path_sequence[current_path_index]
+                        if traj_index is None:
+                            traj_index = max_traj_idx
+                    else:
+                        traj_index = planned_auto_traj_index  # Fallback to first planned if issue
                 else:
                     traj_index = max_traj_idx
             else:
-                print("Hovering in place.", flush=True)
+                if last_action_state != 'hover':
+                    print("Hovering in place.", flush=True)
+                last_action_state = 'hover'
+                reset_auto_state()
                 if FLY_VEHICLE:
-                    mavc.send_body_offset_ned_vel(0, 0, yaw_rate=0) # hover in place
+                    mavc.send_body_offset_ned_vel(0, 0, yaw_rate=0)
+
+            if go_mode_active and (not planner_is_dstar or goal_position is None) and max_traj_idx is None:
+                if mode == 'GUIDED' and FLY_VEHICLE:
+                    mavc.set_mode('BRAKE')
+                    time.sleep(0.1)
+                if last_action_state != 'hover:no_safe_traj':
+                    print("[INFO] No safe trajectory found. Hovering in place.", flush=True)
+                last_action_state = 'hover:no_safe_traj'
                 traj_index = None
-                last_key_pressed = None
-                time.sleep(0.5) # small sleep to prevent busy loop when hovering without a trajectory
+
+            if FLY_VEHICLE and mode == 'BRAKE':
+                if traj_index is not None:
+                    mavc.set_mode('GUIDED')
+
+            if fuse_only:
+                traj_index = None
 
             # Save trajectory information
             if save_during_flight:
@@ -550,16 +743,14 @@ def main():
             start_time = time.time()
             while time.time() - start_time <= period:
                 frame_start_time = time.time()
-                if traj_index is not None:
-                    yawrate = -amplitudes[traj_index] * np.sin(np.pi/period*(time.time() - start_time))  # rad/s
-                    yvel = yawrate * yvel_gain
-                    yawrate = yawrate * yawrate_gain
-                    if FLY_VEHICLE:
-                        mavc.send_body_offset_ned_vel(forward_speed, yvel, yaw_rate=yawrate)
-                
                 bgr = cap.read()
                 #t1=time.perf_counter()
-                pose = get_latest_pose()    # get_latest_pose returns (x, y, z, yaw, pitch, roll) - non-blocking from thread
+                pose, pose_age = get_latest_pose_with_age()
+                if pose_age is not None and pose_age > 0.5:
+                    # Pose is stale; hold position and skip motion for this frame.
+                    if FLY_VEHICLE:
+                        mavc.send_body_offset_ned_vel(0, 0, yaw_rate=0)
+                    continue
                 #t2=time.perf_counter()
 
                 # Optionally transform camera image (undistort + crop) based on config
@@ -575,8 +766,37 @@ def main():
                 depth_numpy, depth_colormap = compute_depth(transform_bgr, depth_anything, INPUT_SIZE, make_colormap=True)
                 camera_position = get_pose_matrix(*pose)
                 
-                if last_key_pressed in ['g', 'w', 'a', 's', 'd']: # if not in hover mode, integrate into VBG
+                if last_key in ['g', 'w', 'a', 'd', 'f', 'h'] or fuse_only: # integrate into VBG unless yawing
                     vbg.integration_step(transform_rgb, depth_numpy, camera_position)
+                    
+                    # Periodic collision check: only check every 5 frames to save compute (with state lock for race condition protection)
+                    with _state_lock:
+                        collision_check_counter += 1
+                        should_check_collision = collision_check_counter >= 5 and go_mode_active and len(current_path_sequence) > 0
+                        if should_check_collision:
+                            collision_check_counter = 0
+                    
+                    if should_check_collision:
+                        # Extract current obstacles from VBG
+                        current_position_inner = camera_position[0:-1, -1].astype(float)
+                        _, obstacle_points_xz = extract_planar_vbg_points(
+                            vbg.vbg,
+                            current_down=current_position_inner[1],
+                            vertical_half_extent=planner_vertical_half_extent,
+                            filter_weights=filterWeights,
+                            weight_threshold=weight_threshold,
+                        )
+                        # Check if current or next primitive is blocked
+                        if len(obstacle_points_xz) > 0 and traj_index is not None:
+                            if _check_primitive_collision(traj_index, obstacle_points_xz, min_dist2obs):
+                                print(f"[COLLISION] Trajectory {traj_index} blocked by obstacles. Replanning...", flush=True)
+                                with _state_lock:
+                                    replan_pending = True
+                                period_interrupted_for_replan = True
+                                traj_index = None
+                                if FLY_VEHICLE:
+                                    mavc.send_body_offset_ned_vel(0, 0, yaw_rate=0)
+                                break  # Exit inner loop to trigger replan
 
                 if traj_index is not None:
                     yawrate = -amplitudes[traj_index] * np.sin(np.pi/period*(time.perf_counter() - start_time))  # rad/s
@@ -590,13 +810,6 @@ def main():
                     if dist_to_goal < min_dist2goal:
                         print("Reached goal!")
                         shouldStop = True
-                
-                if save_during_flight:
-                    cv2.imwrite(img_dir + '/frame-%06d.rgb.jpg'%(frame_number), bgr)
-                    cv2.imwrite(transform_img_dir + '/transform_frame-%06d.rgb.jpg'%(frame_number), transform_bgr)
-                    cv2.imwrite(transform_depth_dir + '/' + 'transform_frame-%06d.depth.jpg'%(frame_number), depth_colormap)
-                    np.save(transform_depth_dir + '/' + 'transform_frame-%06d.depth.npy'%(frame_number), depth_numpy) # saved in meters
-                    np.savetxt(pose_dir + '/frame-%06d.pose.txt'%(frame_number), camera_position)
 
                 if depth_colormap is not None:
                     # time elapsed since the beginning of the current period
@@ -633,10 +846,11 @@ def main():
                     )
                     cv2.imshow("Depth", depth_colormap)
                 #cv2.imshow("RGB", transform_bgr)
-                if opencv_waitkey():
+                if _poll_opencv_escape():
                     print("Pressed esc. Ending control.", flush=True)
                     shouldStop = True
-                    last_key_pressed = 'c'
+                    with _key_lock:
+                        last_key_pressed = 'c'
                     break
 
                 if save_during_flight:
@@ -653,6 +867,21 @@ def main():
             cur_time  = time.time()
             loop_hz = 1.0 / (cur_time - start_time)
             processing_speed = 1.0 / (cur_time - frame_start_time)
+
+            # Handle primitive sequence advancement
+            if go_mode_active and len(current_path_sequence) > 0 and not shouldStop and not period_interrupted_for_replan and not replan_pending:
+                # Just finished executing a primitive, check if we should advance
+                if current_path_index + 1 < len(current_path_sequence):
+                    # Move to next primitive in sequence
+                    current_path_index += 1
+                    print(f"[SEQ] Advancing to primitive {current_path_index}: traj={current_path_sequence[current_path_index]}", flush=True)
+                else:
+                    # Sequence complete, replan from new position
+                    print(f"[SEQ] Primitive sequence complete ({len(current_path_sequence)} total). Replanning...", flush=True)
+                    if planner_is_dstar and goal_position is not None:
+                        replan_pending = True
+                    else:
+                        reset_auto_state()
 
             # If a key was pressed during the period, let the outer loop consume it next.
             if last_key_pressed in ('p', 'c', 'r', 'a', 'w', 'd', 'h'):
@@ -726,11 +955,16 @@ def main():
         stop_keyboard_listener()
         if 'cap' in locals() and cap is not None:
             try:
-                cap.release()
+                if hasattr(cap, 'release') and callable(getattr(cap, 'release')):
+                    cap.release()
             except Exception as e:
                 print(f"[warning] failed to release camera capture: {e}", flush=True)
+            try:
+                if hasattr(cap, 'cap') and cap.cap is not None:
+                    cap.cap.release()
+            except Exception as e:
+                print(f"[warning] failed to release underlying cv2 capture: {e}", flush=True)
         cv2.destroyAllWindows()
-        cap.cap.release()
 
 if __name__ == "__main__":
     main()

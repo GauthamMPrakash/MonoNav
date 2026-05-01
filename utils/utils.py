@@ -28,9 +28,11 @@ import time
 from . import mavlink_control as mavc  # ArduCopter MAVLink wrappers (relative import)
 import threading                       # For bufferless video capture and pose threading
 
-_pose_latest = None   # (timestamp, x, y, z, yaw, pitch, roll)
+_pose_latest = None   # (x, y, z, yaw, pitch, roll)
+_pose_latest_time = None  # timestamp when pose was last updated
 _pose_thread = None
 _pose_thread_hz = 15
+_pose_lock = threading.Lock()
 
 _stop_event = threading.Event()
 _pose_ready = threading.Event()   # signals first pose is available
@@ -187,7 +189,9 @@ Uncomment the cmap line and the currently commented depth_colormap line and comm
 def compute_depth(frame, depth_model, size, make_colormap=True):
 
     depth = depth_model.infer_image(frame, size)       # as np ndarray, in meters (float32)
-    depth = (1000*depth).astype(np.uint16)             # Convert to mm and uint16 for Open3D integration (depth in mm is more standard for TSDF fusion)
+    depth = np.nan_to_num(depth, nan=0.0, posinf=65.535, neginf=0.0)
+    depth = np.clip(depth, 0.0, 65.535)
+    depth = (1000 * depth).astype(np.uint16)           # Convert to mm and uint16 for Open3D integration (depth in mm is more standard for TSDF fusion)
     # the above line works as long as depth is ensured to be under 65.535 meters but this shouldn't matter
     # In case KITTI is used and you for some reason want to integrate VBG more than this limit (depth_max in config.yml), beware
 
@@ -649,7 +653,7 @@ def visualize_pointcloud(pcd_legacy, window_name="Reconstruction"):
 
 def _pose_thread_worker():
     """Background thread: stable-rate pose polling with timestamp."""
-    global _pose_latest
+    global _pose_latest, _pose_latest_time
 
     get_pose = mavc.get_pose
     sleep_time = 1.0 / _pose_thread_hz
@@ -662,8 +666,10 @@ def _pose_thread_worker():
         x, y, z, yaw, pitch, roll = get_pose()
         t = time.time()
 
-        # Update shared pose
-        _pose_latest = (x, y, z, yaw, pitch, roll)
+        # Update shared pose atomically with timestamp.
+        with _pose_lock:
+            _pose_latest = (x, y, z, yaw, pitch, roll)
+            _pose_latest_time = t
 
         # Signal that pose is ready (only matters first time)
         _pose_ready.set()
@@ -697,10 +703,37 @@ def start_pose_thread(frequency_hz):
 def get_latest_pose():
     """
     Blocks until first pose is available, then returns immediately.
-    Returns (t, x, y, z, yaw, pitch, roll)
+    Returns (x, y, z, yaw, pitch, roll)
+    Warns if pose is stale (> 500ms old)
     """
     _pose_ready.wait()   # efficient wait (no CPU burn)
-    return _pose_latest
+    with _pose_lock:
+        pose = _pose_latest
+        pose_time = _pose_latest_time
+    
+    # Check pose freshness
+    if pose_time is not None:
+        age = time.time() - pose_time
+        if age > 0.5:  # 500ms staleness threshold
+            print(f"[WARNING] Pose is stale: {age*1000:.0f}ms old", flush=True)
+    
+    return pose
+
+
+def get_latest_pose_with_age():
+    """
+    Blocks until first pose is available, then returns (pose, age_seconds).
+    age_seconds is None if timestamp is unavailable.
+    """
+    _pose_ready.wait()
+    with _pose_lock:
+        pose = _pose_latest
+        pose_time = _pose_latest_time
+
+    age = None
+    if pose_time is not None:
+        age = time.time() - pose_time
+    return pose, age
 
 
 def stop_pose_thread():
